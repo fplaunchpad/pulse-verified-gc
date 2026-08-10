@@ -50,7 +50,10 @@
 #include "../caml/roots.h"
 #include "../caml/minor_gc.h"  /* for struct caml_ref_table */
 #include "../caml/domain_state.h"  /* for Caml_state */
-#include "../caml/address_class.h" /* for In_heap, caml_page_table_add */
+#include "../caml/address_class.h" /* for In_heap, In_young, caml_page_table_add */
+#include "../caml/signals.h"       /* for caml_update_young_limit */
+#include "../caml/memprof.h"       /* for caml_memprof_renew_minor_sample */
+#include "../caml/fail.h"          /* for caml_raise_if_exception */
 
 /* --- Patched externs from GC_Gen_Impl.c --- */
 #include "GC_Spec_ZeroAddr.h"  /* zero_addr, heap_size_u64 */
@@ -210,6 +213,70 @@ static void ensure_heap(void) {
                     (unsigned long)(major_bytes / (1024*1024)),
                     (unsigned long)(minor_sz / 1024));
 }
+
+#ifdef NATIVE_CODE
+/* Native startup: point the domain's minor-heap fields at the SAME
+ * verified minor buffer ensure_heap() already sets up for bytecode,
+ * completing what it leaves undone.
+ *
+ * ensure_heap() already sets young_start/young_end/young_ptr/
+ * young_alloc_start/young_alloc_end to point at minor_data (see above) --
+ * that part was already correct for both flavors, done for Is_young()'s
+ * sake. What it does NOT set (harmless for bytecode, which never reads
+ * them; load-bearing for native, whose compiled instructions check them
+ * on every single allocation) is young_trigger/young_limit, and it never
+ * registers the minor buffer in the page table the way stock's own
+ * caml_set_minor_heap_size does for its buffer.
+ *
+ * Must run EAGERLY, once, before any OCaml code executes -- unlike
+ * bytecode, where ensure_heap() is triggered lazily by the first
+ * allocation macro invocation, native's compiled fast path never calls
+ * into any of our C code for the common case, so nothing would trigger
+ * this setup if we waited. Called from runtime/startup_nat.c, right
+ * after caml_init_gc(), overriding whatever stock init just set up. */
+void vergc_native_minor_startup_init(void) {
+    /* Save stock's real minor buffer (allocated moments ago by
+     * caml_init_gc -> caml_set_minor_heap_size, in runtime/startup_nat.c
+     * right before this function is called) so it can be freed below --
+     * ensure_heap() immediately overwrites these fields to point at our
+     * own buffer, and once overwritten, the old pointer is unrecoverable.
+     * Without this, that buffer (2MB by default) leaks silently for the
+     * life of every native process using this runtime. */
+    void  *old_base  = Caml_state->_young_base;
+    value *old_start = Caml_state->_young_start;
+    value *old_end   = Caml_state->_young_end;
+
+    ensure_heap();
+
+    Caml_state->_young_trigger = Caml_state->_young_alloc_start;
+    caml_update_young_limit();
+
+    /* caml_init_gc() already ran caml_set_minor_heap_size() (and its own
+     * caml_memprof_renew_minor_sample()) against the real stock buffer we
+     * just abandoned above. caml_memprof_young_trigger is still pointing
+     * somewhere inside THAT old buffer -- comparing it against our new
+     * young_ptr is comparing addresses from two unrelated allocations, and
+     * can spuriously look "not yet reached" or "already passed" depending
+     * on where the two buffers happen to land in memory, triggering
+     * memprof's sampling callback on every allocation even though memprof
+     * was never started. Recompute it relative to the buffer we actually
+     * use now. (Found via a real crash: see NATIVE_MINOR_GC_LOG.md.) */
+    caml_memprof_renew_minor_sample();
+
+    if (caml_page_table_add(In_young, minor_base,
+                             minor_base + minor_heap_size_u64) != 0)
+        caml_fatal_error("verified gen GC: minor page table registration failed");
+
+    /* Reclaim stock's now-abandoned buffer -- mirrors exactly what
+     * caml_set_minor_heap_size (minor_gc.c) already does itself when
+     * resizing an existing minor heap, just applied to the one stock set
+     * up for us moments ago instead of one it's replacing on its own. */
+    if (old_start != NULL) {
+        caml_page_table_remove(In_young, old_start, old_end);
+        caml_stat_free(old_base);
+    }
+}
+#endif /* NATIVE_CODE */
 
 /* --- Address translation helpers --- */
 

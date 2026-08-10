@@ -508,6 +508,46 @@ static void do_minor_gc(void) {
     bytes_promoted_since_major += bump_before;
 }
 
+#ifdef NATIVE_CODE
+/* Native minor-collection trigger. Called from ONE place:
+ * caml_alloc_small_dispatch's retry loop (runtime/minor_gc.c), in place
+ * of stock's caml_gc_dispatch() -- NOT called directly by us elsewhere.
+ * See NATIVE_MINOR_GC_LOG.md, Phase 4.
+ *
+ * Why here and not in caml_garbage_collection (signals_nat.c): that
+ * function is only reached via the COMPILED-CODE trap (caml_call_gc).
+ * But caml_alloc_small_dispatch is also called directly by plain C
+ * helpers (caml_alloc_small(), used by custom.c/weak.c/etc.) that never
+ * go through the compiled-code trap at all. Redirecting only
+ * caml_garbage_collection left that second path running STOCK's real
+ * caml_empty_minor_heap() against our buffer -- which resets young_ptr
+ * (looks fine from native's side) but never touches our OWN bump_ref
+ * counter, desyncing the two conventions this whole plan exists to keep
+ * in sync. Found via a real crash (garbage wosize read from a corrupted
+ * header) -- see the log for the full trace. Redirecting this one
+ * shared call site instead covers both paths at once. */
+void vergc_native_run_minor_collection(void) {
+    /* Translate in: native's top-down "how much used" into our
+     * bottom-up bump_ref -- both describe the SAME buffer (ensure_heap()
+     * points young_alloc_start/end at minor_base, see Phase 3). */
+    uint64_t used_bytes = (uint64_t)((uint8_t *)Caml_state->_young_alloc_end
+                                      - (uint8_t *)Caml_state->_young_ptr);
+    *gc_gen_heap.minor.bump_ref = minor_heap_size_u64 - used_bytes;
+
+    do_minor_gc(); /* the same, already-proven collection path bytecode uses */
+
+    /* minor_collect_full (inside do_minor_gc_core) already reset bump_ref
+     * to 0 -- translate back: young_ptr returns to the top, mirroring
+     * stock's own post-collection reset (same destination regardless of
+     * who ran the collection). caml_alloc_small_dispatch's own loop
+     * (unmodified) handles the undo/redo/recheck/pending-actions dance
+     * around this call -- that part doesn't need to change for native. */
+    Caml_state->_young_ptr = Caml_state->_young_alloc_end;
+    Caml_state->_young_trigger = Caml_state->_young_alloc_start;
+    caml_update_young_limit();
+}
+#endif /* NATIVE_CODE */
+
 /* --- Full GC (minor + major) --- */
 
 static int full_gc_count = 0;

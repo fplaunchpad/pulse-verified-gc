@@ -78,6 +78,8 @@ build_verified_gc() {
     fi
     echo "=== Building patched OCaml runtime ==="
     make -C runtime -j8 ocamlrun
+    echo "=== Building patched native (ocamlopt) runtime archive ==="
+    make -C runtime -j8 libasmrun.a
     cd ..
     echo "=== Verified generational GC OCaml runtime ready ==="
 }

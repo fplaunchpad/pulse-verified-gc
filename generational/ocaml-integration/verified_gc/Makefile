@@ -22,12 +22,25 @@ VPATH = $(SNAPSHOT)
 OBJECTS = GC_Gen_Impl.o GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.o \
           krmlinit.o compat.o alloc_gen.o
 
-all: libvergc_gen.a
+# Native (ocamlopt) build: same sources, compiled with -DNATIVE_CODE so
+# alloc_gen.c's #ifdef NATIVE_CODE branches (minor-heap trap/startup glue)
+# activate. Mirrors OCaml's own runtime/Makefile convention of compiling
+# shared sources twice (once per flavor) rather than sharing objects.
+NATIVE_CFLAGS = $(CFLAGS) -DNATIVE_CODE -DTARGET_amd64
+NATIVE_OBJECTS = $(OBJECTS:.o=.n.o)
+
+all: libvergc_gen.a libvergc_gen_native.a
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+%.n.o: %.c
+	$(CC) $(NATIVE_CFLAGS) -c $< -o $@
+
 libvergc_gen.a: $(OBJECTS)
+	$(AR) rcs $@ $^
+
+libvergc_gen_native.a: $(NATIVE_OBJECTS)
 	$(AR) rcs $@ $^
 
 clean:

@@ -31,7 +31,7 @@ noeq type chain_reach (g: heap)
   | ChainRefl : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
                 chain_reach g x x
   | ChainStep : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
-                (y: obj_addr{Seq.mem y (objects zero_addr g)}) ->
+                (y: obj_addr{Seq.mem y (objects zero_addr g) /\ is_blue y g}) ->
                 (z: obj_addr{Seq.mem z (objects zero_addr g) /\ fl_edge g y z}) ->
                 chain_reach g x y ->
                 chain_reach g x z
@@ -40,6 +40,43 @@ let chain_reachable (g: heap)
                     (x: obj_addr{Seq.mem x (objects zero_addr g)})
                     (y: obj_addr{Seq.mem y (objects zero_addr g)}) : prop =
   exists (r: chain_reach g x y). True
+
+val chain_reach_frame (g g': heap)
+  (x: obj_addr{Seq.mem x (objects zero_addr g)})
+  (y: obj_addr{Seq.mem y (objects zero_addr g)})
+  (r: chain_reach g x y)
+  : Lemma
+    (requires
+      objects zero_addr g' == objects zero_addr g /\
+      (forall (b: obj_addr).
+        Seq.mem b (objects zero_addr g) /\ is_blue b g ==>
+        read_word g' (b <: obj_addr) == read_word g (b <: obj_addr)) /\
+      (forall (b: obj_addr).
+        Seq.mem b (objects zero_addr g) /\ is_blue b g ==> is_blue b g'))
+    (ensures chain_reachable g' x y)
+    (decreases r)
+
+let rec chain_reach_frame g g' x y r =
+  match r with
+  | ChainRefl _ ->
+      let r' : chain_reach g' x x = ChainRefl x in
+      FStar.Classical.exists_intro (fun (_: chain_reach g' x y) -> True) r'
+  | ChainStep _ w z prev ->
+      chain_reach_frame g g' x w prev;
+      assert (is_blue w g);
+      assert (read_word g' (w <: obj_addr) == read_word g (w <: obj_addr));
+      assert (fl_edge g' w z);
+      let aux (r0: chain_reach g' x w)
+        : Lemma (chain_reachable g' x z)
+        = let r1 : chain_reach g' x z = ChainStep x w z r0 in
+          FStar.Classical.exists_intro (fun (_: chain_reach g' x z) -> True) r1
+      in
+      FStar.Classical.exists_elim
+        (chain_reachable g' x z)
+        #(chain_reach g' x w)
+        #(fun _ -> True)
+        ()
+        (fun r0 -> aux r0)
 
 let free_list_complete (g: heap) (fp: U64.t) : prop =
   fp = 0UL \/

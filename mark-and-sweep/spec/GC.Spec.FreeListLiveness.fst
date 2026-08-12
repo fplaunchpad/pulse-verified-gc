@@ -178,13 +178,24 @@ let rec sweep_establishes_complete h start objs fp =
     end
     else if is_white obj h then begin
       SpecSweep.sweep_object_preserves_objects h obj fp;
-      assert (Seq.mem obj (objects zero_addr h1));
-      let r : chain_reach h1 obj obj = ChainRefl obj in
-      FStar.Classical.exists_intro (fun (_: chain_reach h1 obj obj) -> True) r;
-      objects_member_size_bound zero_addr h obj;
-      wosize_of_object_spec obj h;
-      SpecSweep.sweep_object_white_field0 h obj fp;
-      assert (read_word h1 obj == fp);
+      assert (objects zero_addr h1 == objects zero_addr h);
+      is_blue_iff obj h;
+      is_white_iff obj h;
+      assert (forall (b: obj_addr).
+        Seq.mem b (objects zero_addr h) /\ is_blue b h ==> b <> obj);
+      let auxf (b: obj_addr)
+        : Lemma
+          (requires Seq.mem b (objects zero_addr h) /\ is_blue b h)
+          (ensures
+            read_word h1 (b <: obj_addr) == read_word h (b <: obj_addr) /\
+            is_blue b h1)
+        = SpecSweep.sweep_object_color_locality h obj b fp;
+          is_blue_iff b h;
+          is_blue_iff b h1;
+          wosize_of_object_spec b h;
+          SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires auxf);
       admit ()
     end
     else if is_black obj h then admit ()

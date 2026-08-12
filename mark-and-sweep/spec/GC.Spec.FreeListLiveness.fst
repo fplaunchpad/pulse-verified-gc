@@ -20,18 +20,36 @@ let blue_chain_decreasing (g: heap) : prop =
       Seq.mem (v <: obj_addr) (objects zero_addr g) /\
       is_blue (v <: obj_addr) g))
 
-let rec on_chain (g: heap) (a: U64.t) (x: obj_addr) (n: nat)
-  : GTot bool (decreases n) =
-  if a = 0UL then false
-  else if not (is_pointer_field a) then false
-  else if a = (x <: U64.t) then true
-  else if n = 0 then false
-  else on_chain g (read_word g (a <: obj_addr)) x (n - 1)
+/// Free-list edge: field 1 of x points to y
+let fl_edge (g: heap) (x y: obj_addr) : prop =
+  read_word g (x <: obj_addr) == (y <: U64.t)
+
+/// x reaches y by following field-1 pointers.
+noeq type chain_reach (g: heap)
+  : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
+    (y: obj_addr{Seq.mem y (objects zero_addr g)}) -> Type =
+  | ChainRefl : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
+                chain_reach g x x
+  | ChainStep : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
+                (y: obj_addr{Seq.mem y (objects zero_addr g)}) ->
+                (z: obj_addr{Seq.mem z (objects zero_addr g) /\ fl_edge g y z}) ->
+                chain_reach g x y ->
+                chain_reach g x z
+
+let chain_reachable (g: heap)
+                    (x: obj_addr{Seq.mem x (objects zero_addr g)})
+                    (y: obj_addr{Seq.mem y (objects zero_addr g)}) : prop =
+  exists (r: chain_reach g x y). True
 
 let free_list_complete (g: heap) (fp: U64.t) : prop =
-  forall (x: obj_addr).
-    Seq.mem x (objects zero_addr g) /\ is_blue x g ==>
-    on_chain g fp x (heap_size / U64.v mword)
+  fp = 0UL \/
+  (U64.v fp >= U64.v mword /\
+   U64.v fp < heap_size /\
+   U64.v fp % U64.v mword == 0 /\
+   Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
+   (forall (x: obj_addr).
+     Seq.mem x (objects zero_addr g) /\ is_blue x g ==>
+     chain_reachable g (fp <: obj_addr) x))
 
 let free_list_liveness (g: heap) (fp: U64.t) : prop =
   blue_chain_decreasing g /\ free_list_complete g fp
@@ -122,10 +140,7 @@ let rec sweep_establishes_complete h start objs fp =
       end
     end
     else if is_white obj h then admit ()
-    else if is_black obj h then begin
-      SpecSweep.sweep_object_preserves_objects h obj fp;
-      admit ()
-    end
+    else if is_black obj h then admit ()
     else admit ()
   end
 

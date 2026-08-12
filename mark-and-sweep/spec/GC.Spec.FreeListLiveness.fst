@@ -45,7 +45,9 @@ val sweep_establishes_complete
         Seq.mem x (objects zero_addr h) ==>
         U64.v (wosize_of_object x h) >= 1) /\
       free_list_complete h fp /\
-      (fp = 0UL \/ is_pointer_field fp))
+      (fp = 0UL \/ is_pointer_field fp) /\
+      well_formed_heap h /\
+      (forall (o: obj_addr). Seq.mem o objs ==> Seq.mem o (objects zero_addr h)))
     (ensures (let (h', fp') = SpecSweep.sweep_aux h objs fp in
               free_list_complete h' fp'))
     (decreases Seq.length objs)
@@ -63,6 +65,7 @@ val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
   : Lemma
     (requires
       (let h_mark = Mark.mark h_init st in
+       well_formed_heap h_mark /\
        (forall (x: obj_addr).
          Seq.mem x (objects zero_addr h_mark) ==>
          U64.v (wosize_of_object x h_mark) >= 1) /\
@@ -72,7 +75,60 @@ val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
               let (h_final, fp_final) = Coalesce.coalesce h_sweep in
               free_list_liveness h_final fp_final))
 
-let sweep_establishes_complete h start objs fp = admit ()
+let walk_next (h: heap) (start: hp_addr) : GTot nat =
+  U64.v start + (U64.v (getWosize (read_word h start)) + 1) * U64.v mword
+
+let walk_step_done (h: heap) (start: hp_addr) (objs: seq obj_addr)
+  : Lemma
+    (requires
+      objs == objects start h /\
+      Seq.length objs > 0 /\
+      walk_next h start >= heap_size)
+    (ensures Seq.tail objs == Seq.empty)
+  = objects_nonempty_next start h;
+    f_address_spec start;
+    Seq.lemma_eq_elim (Seq.tail objs) Seq.empty
+
+let walk_step_more (h: heap) (start: hp_addr) (objs: seq obj_addr)
+  : Lemma
+    (requires
+      objs == objects start h /\
+      Seq.length objs > 0 /\
+      walk_next h start < heap_size)
+    (ensures
+      (let next : hp_addr = U64.uint_to_t (walk_next h start) in
+       Seq.tail objs == objects next h /\
+       U64.v next > U64.v start))
+  = objects_nonempty_next start h;
+    f_address_spec start;
+    let next : hp_addr = U64.uint_to_t (walk_next h start) in
+    Seq.lemma_tl (f_address start) (objects next h)
+
+let rec sweep_establishes_complete h start objs fp =
+  if Seq.length objs = 0 then ()
+  else begin
+    let obj = Seq.head objs in
+    let rest = Seq.tail objs in
+    let (h1, fp1) = SpecSweep.sweep_object h obj fp in
+    if is_infix obj h then begin
+      assert (h1 == h);
+      assert (fp1 == fp);
+      if walk_next h start >= heap_size then
+        walk_step_done h start objs
+      else begin
+        walk_step_more h start objs;
+        let next : hp_addr = U64.uint_to_t (walk_next h start) in
+        sweep_establishes_complete h next rest fp
+      end
+    end
+    else if is_white obj h then admit ()
+    else if is_black obj h then begin
+      SpecSweep.sweep_object_preserves_objects h obj fp;
+      admit ()
+    end
+    else admit ()
+  end
+
 let coalesce_establishes_decreasing h = admit ()
 let coalesce_preserves_complete h fp = admit ()
 

@@ -36,7 +36,7 @@ let free_list_complete (g: heap) (fp: U64.t) : prop =
 let free_list_liveness (g: heap) (fp: U64.t) : prop =
   blue_chain_decreasing g /\ free_list_complete g fp
 
-val sweep_establishes_liveness
+val sweep_establishes_complete
   (h: heap) (start: hp_addr) (objs: seq obj_addr) (fp: U64.t)
   : Lemma
     (requires
@@ -44,20 +44,20 @@ val sweep_establishes_liveness
       (forall (x: obj_addr).
         Seq.mem x (objects zero_addr h) ==>
         U64.v (wosize_of_object x h) >= 1) /\
-      free_list_liveness h fp /\
+      free_list_complete h fp /\
       (fp = 0UL \/ is_pointer_field fp))
     (ensures (let (h', fp') = SpecSweep.sweep_aux h objs fp in
-              free_list_liveness h' fp'))
+              free_list_complete h' fp'))
     (decreases Seq.length objs)
 
-val coalesce_preserves_decreasing (h: heap)
-  : Lemma (requires blue_chain_decreasing h)
-          (ensures blue_chain_decreasing (fst (Coalesce.coalesce h)))
+val coalesce_establishes_decreasing (h: heap)
+  : Lemma (ensures blue_chain_decreasing (fst (Coalesce.coalesce h)))
 
 val coalesce_preserves_complete (h: heap) (fp: U64.t)
-  : Lemma (requires free_list_liveness h fp)
-          (ensures (let (h', fp') = Coalesce.coalesce h in
-                    free_list_complete h' fp'))
+  : Lemma
+    (requires free_list_complete h fp)
+    (ensures (let (h', fp') = Coalesce.coalesce h in
+              free_list_complete h' fp'))
 
 val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
   : Lemma
@@ -66,27 +66,19 @@ val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
        (forall (x: obj_addr).
          Seq.mem x (objects zero_addr h_mark) ==>
          U64.v (wosize_of_object x h_mark) >= 1) /\
-       free_list_liveness h_mark fp /\
+       free_list_complete h_mark fp /\
        (fp = 0UL \/ is_pointer_field fp)))
     (ensures (let h_sweep = fst (SpecSweep.sweep (Mark.mark h_init st) fp) in
               let (h_final, fp_final) = Coalesce.coalesce h_sweep in
               free_list_liveness h_final fp_final))
 
-let rec sweep_establishes_liveness h start objs fp =
-  if Seq.length objs = 0 then ()
-  else begin
-    let obj = Seq.head objs in
-    let rest = Seq.tail objs in
-    let (h1, fp1) = SpecSweep.sweep_object h obj fp in
-    admit ()
-  end
-
-let coalesce_preserves_decreasing h = admit ()
+let sweep_establishes_complete h start objs fp = admit ()
+let coalesce_establishes_decreasing h = admit ()
 let coalesce_preserves_complete h fp = admit ()
 
 let gc_free_list_liveness h_init st fp =
   let h_mark = Mark.mark h_init st in
   let (h_sweep, fp_sweep) = SpecSweep.sweep h_mark fp in
-  sweep_establishes_liveness h_mark zero_addr (objects zero_addr h_mark) fp;
-  coalesce_preserves_decreasing h_sweep;
+  sweep_establishes_complete h_mark zero_addr (objects zero_addr h_mark) fp;
+  coalesce_establishes_decreasing h_sweep;
   coalesce_preserves_complete h_sweep fp_sweep

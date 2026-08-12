@@ -78,6 +78,37 @@ let rec chain_reach_frame g g' x y r =
         ()
         (fun r0 -> aux r0)
 
+val chain_reach_prepend (g: heap)
+  (w: obj_addr{Seq.mem w (objects zero_addr g) /\ is_blue w g})
+  (x: obj_addr{Seq.mem x (objects zero_addr g)})
+  (y: obj_addr{Seq.mem y (objects zero_addr g)})
+  (r: chain_reach g x y)
+  : Lemma
+    (requires fl_edge g w x)
+    (ensures chain_reachable g w y)
+    (decreases r)
+
+let rec chain_reach_prepend g w x y r =
+  match r with
+  | ChainRefl _ ->
+      let r0 : chain_reach g w w = ChainRefl w in
+      let r1 : chain_reach g w x = ChainStep w w x r0 in
+      FStar.Classical.exists_intro (fun (_: chain_reach g w y) -> True) r1
+  | ChainStep _ u z prev ->
+      chain_reach_prepend g w x u prev;
+      let aux (r0: chain_reach g w u)
+        : Lemma (chain_reachable g w z)
+        = let r1 : chain_reach g w z = ChainStep w u z r0 in
+          FStar.Classical.exists_intro (fun (_: chain_reach g w z) -> True) r1
+      in
+      FStar.Classical.exists_elim
+        (chain_reachable g w z)
+        #(chain_reach g w u)
+        #(fun _ -> True)
+        ()
+        (fun r0 -> aux r0)
+
+
 let free_list_complete (g: heap) (fp: U64.t) : prop =
   fp = 0UL \/
   (U64.v fp >= U64.v mword /\
@@ -159,6 +190,55 @@ let walk_step_more (h: heap) (start: hp_addr) (objs: seq obj_addr)
     let next : hp_addr = U64.uint_to_t (walk_next h start) in
     Seq.lemma_tl (f_address start) (objects next h)
 
+#push-options "--z3rlimit 200 --fuel 2 --ifuel 1"
+let sweep_white_facts (h: heap) (obj: obj_addr) (fp: U64.t)
+  : Lemma
+    (requires
+      well_formed_heap h /\
+      Seq.mem obj (objects zero_addr h) /\
+      is_white obj h /\
+      ~(is_infix obj h) /\
+      U64.v (wosize_of_object obj h) >= 1 /\
+      SpecSweep.fp_in_heap fp h)
+    (ensures (
+      let h1 = fst (SpecSweep.sweep_object h obj fp) in
+      objects zero_addr h1 == objects zero_addr h /\
+      is_blue obj h1 /\
+      read_word h1 (obj <: obj_addr) == fp))
+  = SpecSweep.sweep_object_preserves_objects h obj fp;
+    SpecSweep.sweep_object_resets_self_color h obj fp;
+    is_blue_iff obj (fst (SpecSweep.sweep_object h obj fp));
+    objects_member_size_bound zero_addr h obj;
+    wosize_of_object_spec obj h;
+    SpecSweep.sweep_object_white_field0 h obj fp
+#pop-options
+
+#push-options "--z3rlimit 200 --fuel 2 --ifuel 1"
+let sweep_white_blue_frame (h: heap) (obj: obj_addr) (fp: U64.t) (b: obj_addr)
+  : Lemma
+    (requires
+      well_formed_heap h /\
+      Seq.mem obj (objects zero_addr h) /\
+      is_white obj h /\
+      SpecSweep.fp_in_heap fp h /\
+      Seq.mem b (objects zero_addr h) /\
+      is_blue b h)
+    (ensures (
+      let h1 = fst (SpecSweep.sweep_object h obj fp) in
+      is_blue b h1 /\
+      read_word h1 (b <: obj_addr) == read_word h (b <: obj_addr)))
+  = is_blue_iff obj h;
+    is_white_iff obj h;
+    is_blue_iff b h;
+    assert (obj <> b);
+    SpecSweep.sweep_object_color_locality h obj b fp;
+    is_blue_iff b (fst (SpecSweep.sweep_object h obj fp));
+    wosize_of_object_spec b h;
+    SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
+#pop-options
+
+#push-options "--z3rlimit 400 --fuel 2 --ifuel 1"
+
 let rec sweep_establishes_complete h start objs fp =
   if Seq.length objs = 0 then ()
   else begin
@@ -183,6 +263,14 @@ let rec sweep_establishes_complete h start objs fp =
       is_white_iff obj h;
       assert (forall (b: obj_addr).
         Seq.mem b (objects zero_addr h) /\ is_blue b h ==> b <> obj);
+      objects_member_size_bound zero_addr h obj;
+      wosize_of_object_spec obj h;
+      SpecSweep.sweep_object_white_field0 h obj fp;
+      assert (read_word h1 obj == fp);
+      SpecSweep.sweep_object_resets_self_color h obj fp;
+      is_blue_iff obj h1;
+      assert (is_blue obj h1);
+      assert (Seq.mem obj (objects zero_addr h1));
       let auxf (b: obj_addr)
         : Lemma
           (requires Seq.mem b (objects zero_addr h) /\ is_blue b h)
@@ -196,11 +284,60 @@ let rec sweep_establishes_complete h start objs fp =
           SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires auxf);
-      admit ()
+      let auxc (y: obj_addr{Seq.mem y (objects zero_addr h1)})
+        : Lemma
+          (requires is_blue y h1)
+          (ensures chain_reachable h1 obj y)
+        = if y = obj then begin
+            let r : chain_reach h1 obj obj = ChainRefl obj in
+            FStar.Classical.exists_intro
+              (fun (_: chain_reach h1 obj y) -> True) r
+          end
+          else begin
+            SpecSweep.sweep_object_color_locality h obj y fp;
+            is_blue_iff y h;
+            is_blue_iff y h1;
+            assert (is_blue y h);
+            if fp = 0UL then admit ()
+            else begin
+              assert (Seq.mem (fp <: obj_addr) (objects zero_addr h));
+              assert (chain_reachable h (fp <: obj_addr) y);
+              let aux2 (r0: chain_reach h (fp <: obj_addr) y)
+                : Lemma (chain_reachable h1 obj y)
+                = chain_reach_frame h h1 (fp <: obj_addr) y r0;
+                  let aux3 (r1: chain_reach h1 (fp <: obj_addr) y)
+                    : Lemma (chain_reachable h1 obj y)
+                    = chain_reach_prepend h1 obj (fp <: obj_addr) y r1
+                  in
+                  FStar.Classical.exists_elim
+                    (chain_reachable h1 obj y)
+                    #(chain_reach h1 (fp <: obj_addr) y)
+                    #(fun _ -> True)
+                    ()
+                    (fun r1 -> aux3 r1)
+              in
+              FStar.Classical.exists_elim
+                (chain_reachable h1 obj y)
+                #(chain_reach h (fp <: obj_addr) y)
+                #(fun _ -> True)
+                ()
+                (fun r0 -> aux2 r0)
+            end
+          end
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires auxc);
+      if walk_next h start >= heap_size then
+        walk_step_done h start objs
+      else begin
+        walk_step_more h start objs;
+        let next : hp_addr = U64.uint_to_t (walk_next h start) in
+        sweep_establishes_complete h1 next rest fp1
+      end
     end
     else if is_black obj h then admit ()
     else admit ()
   end
+#pop-options
 
 let coalesce_establishes_decreasing h = admit ()
 let coalesce_preserves_complete h fp = admit ()

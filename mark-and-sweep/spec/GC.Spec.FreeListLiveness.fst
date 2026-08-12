@@ -213,7 +213,7 @@ let sweep_white_facts (h: heap) (obj: obj_addr) (fp: U64.t)
     SpecSweep.sweep_object_white_field0 h obj fp
 #pop-options
 
-#push-options "--z3rlimit 200 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 200 --fuel 2 --ifuel 1 --split_queries always"
 let sweep_white_blue_frame (h: heap) (obj: obj_addr) (fp: U64.t) (b: obj_addr)
   : Lemma
     (requires
@@ -222,6 +222,7 @@ let sweep_white_blue_frame (h: heap) (obj: obj_addr) (fp: U64.t) (b: obj_addr)
       is_white obj h /\
       SpecSweep.fp_in_heap fp h /\
       Seq.mem b (objects zero_addr h) /\
+      U64.v (wosize_of_object b h) >= 1 /\
       is_blue b h)
     (ensures (
       let h1 = fst (SpecSweep.sweep_object h obj fp) in

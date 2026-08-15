@@ -330,10 +330,17 @@ let rec sweep_establishes_complete h start objs fp =
         assert (rest == objects next h);
         objects_addresses_gt_start zero_addr h obj;
         SpecSweep.sweep_object_preserves_wf h obj fp;
-        assume (objects next h1 == objects next h);
-        assume (forall (x: obj_addr).
-          Seq.mem x (objects zero_addr h1) ==>
-          U64.v (wosize_of_object x h1) >= 1);
+        SpecSweep.sweep_object_preserves_objects_suffix start h fp;
+        let auxw (x: obj_addr)
+          : Lemma
+            (requires Seq.mem x (objects zero_addr h))
+            (ensures U64.v (wosize_of_object x h1) >= 1)
+          = if x = obj then
+              SpecSweep.sweep_object_preserves_self_wosize h obj fp
+            else
+              SpecSweep.sweep_object_preserves_other_header h obj fp x
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires auxw);
         sweep_establishes_complete h1 next rest fp1
       end
     end

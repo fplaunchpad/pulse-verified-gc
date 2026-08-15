@@ -240,14 +240,16 @@ let sweep_white_blue_frame (h: heap) (obj: obj_addr) (fp: U64.t) (b: obj_addr)
     SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
 #pop-options
 
-#push-options "--z3rlimit 400 --fuel 2 --ifuel 1 --split_queries always"
-
+#push-options "--z3rlimit 800 --fuel 2 --ifuel 1 --split_queries always"
 let rec sweep_establishes_complete h start objs fp =
   if Seq.length objs = 0 then ()
   else begin
     let obj = Seq.head objs in
     let rest = Seq.tail objs in
     let (h1, fp1) = SpecSweep.sweep_object h obj fp in
+    objects_nonempty_next start h;
+    f_address_spec start;
+    assert (obj == f_address start);
     if is_infix obj h then begin
       assert (h1 == h);
       assert (fp1 == fp);
@@ -325,8 +327,6 @@ let rec sweep_establishes_complete h start objs fp =
       else begin
         walk_step_more h start objs;
         let next : hp_addr = U64.uint_to_t (walk_next h start) in
-        walk_step_more h start objs;
-        let next : hp_addr = U64.uint_to_t (walk_next h start) in
         assert (rest == objects next h);
         objects_addresses_gt_start zero_addr h obj;
         SpecSweep.sweep_object_preserves_wf h obj fp;
@@ -364,7 +364,41 @@ let rec sweep_establishes_complete h start objs fp =
           SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires auxb);
-      if fp = 0UL then admit ()
+      if fp = 0UL then begin
+        let auxz (y: obj_addr)
+          : Lemma
+            (requires Seq.mem y (objects zero_addr h1))
+            (ensures ~(is_blue y h1))
+          = SpecSweep.sweep_object_resets_self_color h obj fp;
+            is_white_iff obj h1;
+            is_blue_iff y h1;
+            if y = obj then ()
+            else begin
+              SpecSweep.sweep_object_color_locality h obj y fp;
+              is_blue_iff y h
+            end
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires auxz);
+        objects_addresses_gt_start zero_addr h obj;
+        SpecSweep.sweep_object_preserves_objects_suffix start h fp;
+        let auxw (x: obj_addr)
+          : Lemma
+            (requires Seq.mem x (objects zero_addr h))
+            (ensures U64.v (wosize_of_object x h1) >= 1)
+          = if x = obj then
+              SpecSweep.sweep_object_preserves_self_wosize h obj fp
+            else
+              SpecSweep.sweep_object_preserves_other_header h obj fp x
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires auxw);
+        if walk_next h start >= heap_size then
+          walk_step_done h start objs
+        else begin
+          walk_step_more h start objs;
+          let next : hp_addr = U64.uint_to_t (walk_next h start) in
+          sweep_establishes_complete h1 next rest fp1
+        end
+      end
       else begin
         assert (Seq.mem (fp <: obj_addr) (objects zero_addr h1));
         let auxd (y: obj_addr{Seq.mem y (objects zero_addr h1)})

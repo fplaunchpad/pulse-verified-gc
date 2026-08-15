@@ -344,7 +344,74 @@ let rec sweep_establishes_complete h start objs fp =
         sweep_establishes_complete h1 next rest fp1
       end
     end
-    else if is_black obj h then admit ()
+    else if is_black obj h then begin
+      SpecSweep.sweep_object_preserves_objects h obj fp;
+      SpecSweep.sweep_object_preserves_wf h obj fp;
+      assert (fp1 == fp);
+      assert (objects zero_addr h1 == objects zero_addr h);
+      let auxb (b: obj_addr)
+        : Lemma
+          (requires Seq.mem b (objects zero_addr h) /\ is_blue b h)
+          (ensures
+            is_blue b h1 /\
+            read_word h1 (b <: obj_addr) == read_word h (b <: obj_addr))
+        = is_blue_iff b h;
+          is_black_iff obj h;
+          assert (obj <> b);
+          SpecSweep.sweep_object_color_locality h obj b fp;
+          is_blue_iff b h1;
+          wosize_of_object_spec b h;
+          SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires auxb);
+      if fp = 0UL then admit ()
+      else begin
+        assert (Seq.mem (fp <: obj_addr) (objects zero_addr h1));
+        let auxd (y: obj_addr{Seq.mem y (objects zero_addr h1)})
+          : Lemma
+            (requires is_blue y h1)
+            (ensures chain_reachable h1 (fp <: obj_addr) y)
+          = SpecSweep.sweep_object_resets_self_color h obj fp;
+            is_white_iff obj h1;
+            is_blue_iff y h1;
+            assert (obj <> y);
+            SpecSweep.sweep_object_color_locality h obj y fp;
+            is_blue_iff y h;
+            assert (is_blue y h);
+            assert (chain_reachable h (fp <: obj_addr) y);
+            let aux2 (r0: chain_reach h (fp <: obj_addr) y)
+              : Lemma (chain_reachable h1 (fp <: obj_addr) y)
+              = chain_reach_frame h h1 (fp <: obj_addr) y r0
+            in
+            FStar.Classical.exists_elim
+              (chain_reachable h1 (fp <: obj_addr) y)
+              #(chain_reach h (fp <: obj_addr) y)
+              #(fun _ -> True)
+              ()
+              (fun r0 -> aux2 r0)
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires auxd);
+        objects_addresses_gt_start zero_addr h obj;
+        SpecSweep.sweep_object_preserves_objects_suffix start h fp;
+        let auxw (x: obj_addr)
+          : Lemma
+            (requires Seq.mem x (objects zero_addr h))
+            (ensures U64.v (wosize_of_object x h1) >= 1)
+          = if x = obj then
+              SpecSweep.sweep_object_preserves_self_wosize h obj fp
+            else
+              SpecSweep.sweep_object_preserves_other_header h obj fp x
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires auxw);
+        if walk_next h start >= heap_size then
+          walk_step_done h start objs
+        else begin
+          walk_step_more h start objs;
+          let next : hp_addr = U64.uint_to_t (walk_next h start) in
+          sweep_establishes_complete h1 next rest fp1
+        end
+      end
+    end
     else admit ()
   end
 #pop-options

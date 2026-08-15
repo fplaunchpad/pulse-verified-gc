@@ -446,7 +446,17 @@ let rec sweep_establishes_complete h start objs fp =
         end
       end
     end
-    else admit ()
+    else begin
+      assert (h1 == h);
+      assert (fp1 == fp);
+      if walk_next h start >= heap_size then
+        walk_step_done h start objs
+      else begin
+        walk_step_more h start objs;
+        let next : hp_addr = U64.uint_to_t (walk_next h start) in
+        sweep_establishes_complete h next rest fp
+      end
+    end
   end
 #pop-options
 

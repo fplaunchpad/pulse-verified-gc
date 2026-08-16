@@ -464,7 +464,38 @@ let rec sweep_establishes_complete h start objs fp =
   end
 #pop-options
 
-let coalesce_establishes_decreasing h = admit ()
+val coalesce_aux_decreasing
+  (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
+  (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  : Lemma
+    (requires
+      Coalesce.walk_pre g0 g start objs (objects zero_addr g0) first_blue run_words /\
+      (fp = 0UL \/ U64.v fp < U64.v start) /\
+      (forall (x: obj_addr).
+        Seq.mem x (objects zero_addr g) /\ is_blue x g /\
+        U64.v x < U64.v start ==>
+        (let v = read_word g x in
+         v = 0UL \/
+         (is_pointer_field v /\ U64.v v < U64.v x /\
+          Seq.mem (v <: obj_addr) (objects zero_addr g) /\
+          is_blue (v <: obj_addr) g))))
+    (ensures
+      blue_chain_decreasing (fst (Coalesce.coalesce_aux g0 g objs first_blue run_words fp)))
+    (decreases Seq.length objs)
+
+let coalesce_aux_decreasing g0 g start objs first_blue run_words fp = admit ()
+
+#push-options "--z3rlimit 200"
+let coalesce_establishes_decreasing h =
+  let aux (x: obj_addr)
+    : Lemma (requires Seq.mem x (objects zero_addr h))
+            (ensures ~(U64.v x < U64.v zero_addr))
+    = objects_addresses_gt_start zero_addr h x
+  in
+  FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
+  coalesce_aux_decreasing h h zero_addr (objects zero_addr h) 0UL 0 0UL
+#pop-options
+
 let coalesce_preserves_complete h fp = admit ()
 
 let gc_free_list_liveness h_init st fp =

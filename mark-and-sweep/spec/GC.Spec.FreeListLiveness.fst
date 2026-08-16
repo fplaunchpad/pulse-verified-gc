@@ -9,6 +9,7 @@ open GC.Spec.Fields
 module SpecSweep = GC.Spec.Sweep
 module Coalesce  = GC.Spec.Coalesce
 module Mark = GC.Spec.Mark
+module Correctness = GC.Spec.Correctness
 
 let blue_chain_decreasing (g: heap) : prop =
   forall (x: obj_addr).
@@ -141,7 +142,9 @@ val sweep_establishes_complete
     (decreases Seq.length objs)
 
 val coalesce_establishes_decreasing (h: heap)
-  : Lemma (ensures blue_chain_decreasing (fst (Coalesce.coalesce h)))
+  : Lemma
+    (requires Coalesce.post_sweep_strong h)
+    (ensures blue_chain_decreasing (fst (Coalesce.coalesce h)))
 
 val coalesce_preserves_complete (h: heap) (fp: U64.t)
   : Lemma
@@ -152,6 +155,7 @@ val coalesce_preserves_complete (h: heap) (fp: U64.t)
 val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
   : Lemma
     (requires
+      Correctness.mark_post h_init (Mark.mark h_init st) st fp /\
       (let h_mark = Mark.mark h_init st in
        well_formed_heap h_mark /\
        (forall (x: obj_addr).
@@ -467,5 +471,6 @@ let gc_free_list_liveness h_init st fp =
   let h_mark = Mark.mark h_init st in
   let (h_sweep, fp_sweep) = SpecSweep.sweep h_mark fp in
   sweep_establishes_complete h_mark zero_addr (objects zero_addr h_mark) fp;
+  Correctness.sweep_post_sweep_strong_gen h_init h_mark st fp;
   coalesce_establishes_decreasing h_sweep;
   coalesce_preserves_complete h_sweep fp_sweep

@@ -4,7 +4,9 @@
     "--cache_checked_modules",
     "--warn_error", "-321",
     "--report_assumes", "warn",
-    "--already_cached", "Prims FStar Pulse PulseCore -GC"
+    "--already_cached", "Prims FStar Pulse PulseCore -GC",
+    "--split_queries", "always",
+    "--z3refresh"
   ],
   "include_dirs": [
     "common/spec",

@@ -201,6 +201,27 @@ static void ensure_heap(void) {
     Caml_state->_young_alloc_start = Caml_state->_young_start;
     Caml_state->_young_alloc_end   = Caml_state->_young_end;
 
+    /* The two *trigger* fields must be re-derived against the buffer we just
+     * installed.  caml_init_gc() -> caml_set_minor_heap_size() already set
+     * both relative to the STOCK buffer we have now replaced, so they still
+     * point into unrelated memory, and caml_update_young_limit() takes the
+     * max of them as young_limit.  caml_do_pending_actions_exn() (signals.c)
+     * calls caml_update_young_limit() on every pending-action poll, so any
+     * program that runs long enough to poll trips this -- which is why the
+     * short benchmarks never showed it but compiling the stdlib does.
+     *
+     * caml_memprof_renew_minor_sample() ends by calling
+     * caml_update_young_limit() itself, so it is the correct single entry
+     * point and must come AFTER young_trigger is set (young_limit is derived
+     * from both).  With memprof off (lambda == 0) it just parks the trigger
+     * at young_alloc_start and never dereferences memprof's domain state.
+     *
+     * Done here rather than in vergc_native_minor_startup_init() so BOTH
+     * flavors get it: bytecode reaches this via the lazy first allocation,
+     * native via the eager startup call.  See COLDSTART_STDLIB_LOG.md. */
+    Caml_state->_young_trigger = Caml_state->_young_alloc_start;
+    caml_memprof_renew_minor_sample();
+
     /* Register our major heap in OCaml's page table so that Is_in_heap()
      * returns true for addresses inside it.  Without this, the write
      * barrier in caml_modify / caml_initialize skips the ref_table update
@@ -246,22 +267,15 @@ void vergc_native_minor_startup_init(void) {
     value *old_start = Caml_state->_young_start;
     value *old_end   = Caml_state->_young_end;
 
+    /* ensure_heap() installs our buffer AND re-derives young_trigger /
+     * caml_memprof_young_trigger against it (both were left pointing into
+     * the stock buffer abandoned below).  That used to be done here, native
+     * only, in the wrong order -- caml_update_young_limit() before
+     * caml_memprof_renew_minor_sample(), so it derived young_limit from a
+     * stale memprof trigger and tripped the debug runtime's assertion.
+     * Bytecode needed the same treatment anyway; see COLDSTART_STDLIB_LOG.md
+     * and NATIVE_MINOR_GC_LOG.md. */
     ensure_heap();
-
-    Caml_state->_young_trigger = Caml_state->_young_alloc_start;
-    caml_update_young_limit();
-
-    /* caml_init_gc() already ran caml_set_minor_heap_size() (and its own
-     * caml_memprof_renew_minor_sample()) against the real stock buffer we
-     * just abandoned above. caml_memprof_young_trigger is still pointing
-     * somewhere inside THAT old buffer -- comparing it against our new
-     * young_ptr is comparing addresses from two unrelated allocations, and
-     * can spuriously look "not yet reached" or "already passed" depending
-     * on where the two buffers happen to land in memory, triggering
-     * memprof's sampling callback on every allocation even though memprof
-     * was never started. Recompute it relative to the buffer we actually
-     * use now. (Found via a real crash: see NATIVE_MINOR_GC_LOG.md.) */
-    caml_memprof_renew_minor_sample();
 
     if (caml_page_table_add(In_young, minor_base,
                              minor_base + minor_heap_size_u64) != 0)

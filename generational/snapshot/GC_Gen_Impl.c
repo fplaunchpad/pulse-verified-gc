@@ -747,7 +747,15 @@ forward_if_minor(
           uint64_t hdr_addr0 = addr - 8ULL;
           uint64_t hdr = minor_read(minor, hdr_addr0);
           uint64_t tag = hdr & 0xFFULL;
-          if (tag == 249ULL)
+          /* HAND PATCH 15 (see ../PATCHES.md) -- UNVERIFIED.
+             `tag == 249` alone is unsound here: it is applied to a word that is not
+             known to be a header, and an OCaml integer can have low byte 0xf9 --
+             measured: Val_long(1788) == 0xdf9, an Object_tag object id, was taken for
+             an infix header. Require the implied parent to really be a Closure_tag(247)
+             block; mlvalues.h: "infix headers can only occur in blocks with tag
+             Closure_tag". */
+          if (tag == 249ULL &&
+              (minor_read(minor, (addr - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
           {
             uint64_t hdr_addr0 = addr - 8ULL;
             uint64_t hdr = minor_read(minor, hdr_addr0);
@@ -918,7 +926,15 @@ forward_roots(
             uint64_t hdr_addr0 = r - 8ULL;
             uint64_t hdr = minor_read(minor, hdr_addr0);
             uint64_t tag = hdr & 0xFFULL;
-            if (tag == 249ULL)
+            /* HAND PATCH 15 (see ../PATCHES.md) -- UNVERIFIED.
+               `tag == 249` alone is unsound here: it is applied to a word that is not
+               known to be a header, and an OCaml integer can have low byte 0xf9 --
+               measured: Val_long(1788) == 0xdf9, an Object_tag object id, was taken for
+               an infix header. Require the implied parent to really be a Closure_tag(247)
+               block; mlvalues.h: "infix headers can only occur in blocks with tag
+               Closure_tag". */
+            if (tag == 249ULL &&
+                (minor_read(minor, (r - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
             {
               uint64_t hdr_addr0 = r - 8ULL;
               uint64_t hdr = minor_read(minor, hdr_addr0);
@@ -1119,7 +1135,15 @@ scan_loop(
                   uint64_t hdr_addr0 = child - 8ULL;
                   uint64_t hdr = minor_read(minor, hdr_addr0);
                   uint64_t tag = hdr & 0xFFULL;
-                  if (tag == 249ULL)
+                  /* HAND PATCH 15 (see ../PATCHES.md) -- UNVERIFIED.
+                     `tag == 249` alone is unsound here: it is applied to a word that is not
+                     known to be a header, and an OCaml integer can have low byte 0xf9 --
+                     measured: Val_long(1788) == 0xdf9, an Object_tag object id, was taken for
+                     an infix header. Require the implied parent to really be a Closure_tag(247)
+                     block; mlvalues.h: "infix headers can only occur in blocks with tag
+                     Closure_tag". */
+                  if (tag == 249ULL &&
+                      (minor_read(minor, (child - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
                   {
                     uint64_t hdr_addr0 = child - 8ULL;
                     uint64_t hdr = minor_read(minor, hdr_addr0);

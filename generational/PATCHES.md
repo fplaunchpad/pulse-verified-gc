@@ -28,6 +28,8 @@ F\*/Pulse source so the extraction is usable directly.
 | 2  | Configurable heap_size | ✅ **ELIMINATED** | `heap_size_u64` is now `extern` from `GC.Spec.ZeroAddr.fsti`; defined in `compat.c` |
 | 3,4 | Scan range / HWM | ✅ **ELIMINATED** | Bridge now walks fwd_arr + calls `update_one_object`; `update_all_objects` reverted to clean extraction |
 | 9  | Infix forwarding | ✅ **DONE** | Phased calls + infix fwd fixup in bridge |
+| 14 | Infix-aware `check_and_darken_bounded` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Currently edited directly in `snapshot/GC_Gen_Impl.c`, so **`make snapshot` will silently revert it**. |
+| 15 | Guard the infix tag test with `Closure_tag` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Same file, same caveat. Exposed only after 14. |
 
 ### Extern Configuration (GC.Spec.ZeroAddr + GC.Gen.Base)
 
@@ -871,3 +873,254 @@ leverage change for closing the performance gap with stock OCaml.
    or accept as 1-word bridge patch
 5. **Verified alloc/init** (B1, B12) — move heap init and retry loop into
    verified Pulse code
+
+---
+
+## How the snapshot hand patches survive regeneration
+
+`make -C generational snapshot` overwrites `snapshot/` with a plain `cp` from
+`_extract/`, so hand edits to the extracted C were silently lost on every
+regeneration. They are now kept as patch files and re-applied automatically:
+
+```
+generational/patches/snapshot/*.patch      the hand patches
+make -C generational snapshot              extract -> cp -> apply-snapshot-patches
+make -C generational apply-snapshot-patches  idempotent; hard error if a patch no
+                                             longer applies (that means the
+                                             extraction changed underneath it)
+make -C generational verify-snapshot-patches assert the tree carries them (CI)
+```
+
+This keeps the committed snapshot equal to "extraction + documented hand
+patches", so the `git diff --quiet -- generational/snapshot/` check in
+`.github/workflows/verify.yml` stays meaningful instead of flagging the patches
+as drift. `.github/workflows/testsuite.yml` runs `verify-snapshot-patches` as a
+cheap early step. Neither target pulls in F* (the `-include .depend` is guarded),
+so they work in a CI job with only a C toolchain.
+
+The mechanism is deliberately noisy on conflict: if re-extraction changes the
+surrounding code, the build stops rather than producing a snapshot that quietly
+lacks a soundness fix.
+
+---
+
+## Patch 14 — infix-aware darkening in the major mark phase (OPEN)
+
+**Status: hand patch applied to `snapshot/GC_Gen_Impl.c`. Unverified, and
+lost on the next `make snapshot`.** This is the highest-priority item in this
+document: it is a *soundness* patch, not a plumbing one.
+
+### The bug
+
+`check_and_darken_bounded` darkens the block whose header is at `v - 8`:
+
+```c
+uint64_t target_hdr_raw = v - 8ULL;
+darken_if_white_bounded(heap, st, target_hdr_raw);
+```
+
+For an **infix pointer** — a pointer to a mutually-recursive function, aimed
+at an `Infix_tag` (249) header *inside* an enclosing closure — `v - 8` is that
+inner infix header, not the closure's own header. Two consequences:
+
+1. The enclosing closure is never darkened, so if it is reachable only via
+   infix pointers it stays white and the sweep frees it while live.
+2. The recolouring is applied to the infix header instead.
+
+Stock OCaml's `caml_darken` (`runtime/major_gc.c`) handles this explicitly:
+
+```c
+if (t == Infix_tag) { v -= Infix_offset_val(v); h = Hd_val(v); t = Tag_hd(h); }
+```
+
+Patch 9 fixed the analogous problem for the **minor** collector's forwarding
+path. The **major** mark phase never got the same treatment.
+
+### Impact
+
+This is what broke `make coldstart`; see `ocaml-integration/COLDSTART_STDLIB_LOG.md`.
+`camlinternalFormat.ml` is dense with mutually recursive functions, so the
+compiler's heap carries hundreds of live infix pointers (219 measured at the
+failing collection). One full GC freed 53 still-referenced objects; the
+program later loaded a closure whose code pointer had been overwritten and
+jumped to NULL.
+
+**`mark-and-sweep/` shares this code and therefore has the same bug** — the
+extraction bundles `GC.Impl.MarkBounded` for both collectors.
+
+### The applied patch
+
+```c
+uint64_t ih = read_word(heap, target_hdr_raw);
+if ((ih & 0xFFULL) == 249ULL)
+  target_hdr = (v - ((ih >> 10U) * 8ULL)) - 8ULL;   /* wosize field = offset in words */
+```
+
+### Plan to eliminate
+
+Fix the verified source, in `mark-and-sweep/impl/GC.Impl.MarkBounded.fst`:
+
+- extend `check_and_darken_bounded_spec` to normalise an infix pointer to its
+  enclosing closure before darkening;
+- the existing lemma `check_and_darken_bounded_preserves_inv` (and the
+  `SpecMark.check_and_darken_field_preserves_wf` / `SpecObject.makeGray_eq`
+  steps it relies on) will need the infix case;
+- the larger part of the work: **`well_formed_heap` explicitly excludes infix
+  blocks.**
+
+  *This gap was already known and recorded in this document* — see PATCH 9
+  ("the verified spec's `well_formed_heap_part4` currently assumes no infix
+  objects"), PATCH 11's elimination plan ("relax the `well_formed_heap_part4`
+  assumption and prove correctness with infix objects"), and BRIDGE 6, which
+  is an unverified bridge workaround for exactly this gap on the *minor* side.
+  What patch 14 adds is that the **major** collector needs the same treatment,
+  which none of those entries covers: they are all about Cheney promotion.
+
+  For reference, the conjunct in question, `common/spec/GC.Spec.Fields.fst:694-719`:
+
+  ```fstar
+  let well_formed_heap_part2 (g: heap) : prop =
+    (forall (src dst: obj_addr).
+      (Seq.mem src (objects zero_addr g) /\ ...
+       exists_field_pointing_to_unchecked g src wz dst)) ==>
+      Seq.mem dst (objects zero_addr g))        // every target is an object START
+
+  let well_formed_heap_part3 (g: heap) : prop =
+    GC.Spec.Object.infix_wf g (objects zero_addr g)
+
+  let well_formed_heap_part4 (g: heap) : prop =
+    (forall (obj: obj_addr). Seq.mem obj (objects zero_addr g) ==>
+       ~(GC.Spec.Object.is_infix obj g))        // NO OBJECT IS INFIX
+
+  let well_formed_heap (g: heap) : prop =
+    part1 /\ part2 /\ part3 /\ part4
+  ```
+
+  with `is_infix h g = (tag_of_object h g = infix_tag)`
+  (`GC.Spec.Object.fst:447`).
+
+  **Part 4 says the heap contains no tag-249 object.** Every OCaml program with
+  mutually recursive functions violates it. Part 2 excludes the same thing from
+  the other direction: every pointer field must target a member of `objects`,
+  i.e. a block *start*, so an interior pointer is ruled out twice over.
+
+  Consequences worth being precise about:
+
+  - The proofs are **sound**, and `GC.Spec.Mark.fsti:636
+    pointer_field_resolve_identity` (resolving a pointer field is the identity)
+    is a *theorem* under parts 2+4, not a mistake. It is the lemma
+    `GC.Impl.MarkBounded.fst:975` uses to justify darkening `v - 8` directly —
+    correct under the hypotheses, false in a real OCaml heap.
+  - The infix vocabulary is present and **correct**: `is_infix`,
+    `parent_closure_addr_nat`, and `infix_wf` (`GC.Spec.Object.fst:963`) with
+    proper elim/intro lemmas. Part 3 states exactly the right invariant — an
+    infix object's parent is in `objects` and satisfies `is_closure`. Part 4
+    then makes part 3 vacuous, which is what the proofs report:
+    `GC.Spec.Allocator.Lemmas.Split.fst:116` "infix_wf (vacuous: no infix
+    objects exist)", `:1422`, `GC.Spec.Coalesce.fst:2830`.
+  - So this is a **known, deliberate simplifying assumption** with the
+    machinery already staged for lifting it. The minor side has a bridge-level
+    workaround (BRIDGE 6 injects parent closures as extra Cheney roots); the
+    major side has none, which is what patch 14 supplies — and it supplies it
+    in the extracted C rather than the bridge, which is worse, because the
+    bridge is at least an acknowledged unverified layer.
+
+  **The defect is therefore in the join, not the proof.** `well_formed_heap` is
+  a precondition and nothing checks it where the bridge calls into the
+  extracted code, so a hypothesis that is false at runtime degraded into silent
+  heap corruption instead of a failed proof or an assertion. That is the same
+  shape as the bridge bugs in `ocaml-integration/COLDSTART_STDLIB_LOG.md`, one
+  level up: an assumption satisfied on paper and by nothing in particular at
+  run time.
+
+  Lifting part 4 is not local. Everything currently discharging the infix cases
+  as vacuous must be re-proved for real (`Allocator.Lemmas.Split`, `Coalesce`,
+  `Sweep`), and part 2 has to be weakened at the same time to admit
+  interior-pointing fields — which touches every lemma concluding "target is in
+  `objects`".
+
+  Note the **minor** collector does model infix properly
+  (`GC.Gen.CheneyPreservation.Forwarding.fst` and friends,
+  `forward_if_minor_infix`). The asymmetry is the bug.
+
+Until that lands, re-apply this patch by hand after any `make snapshot`.
+
+---
+
+## Patch 15 — the infix tag test is unsound (OPEN)
+
+**Status: hand patch in `snapshot/GC_Gen_Impl.c`. Unverified; reverted by
+`make snapshot`.** Three sites in the Cheney minor collector (`tag == 249ULL`
+at what were lines 750, 921, 1122).
+
+### The bug
+
+```c
+uint64_t hdr = minor_read(minor, addr - 8ULL);
+uint64_t tag = hdr & 0xFFULL;
+if (tag == 249ULL) { parent = addr - (hdr >> 10U) * 8ULL; ... }
+```
+
+This decides "the word at `addr - 8` is an `Infix_tag` header" from its low
+byte alone, on a word that is **not known to be a header**. `Infix_tag` is 249
+= `0xf9`, which is odd — deliberately, so a scanner treating it as a value sees
+an integer (`mlvalues.h`: *"Infix_tag must be odd so that the infix header is
+scanned as an integer"*). The converse is the problem: an OCaml **integer**
+whose low byte is `0xf9` is indistinguishable from an infix header by this test.
+
+Measured at the failure — minor heap dump around the false positive:
+
+```
+off 6120 : 0x8f8  -> wosize=2, tag=248 (Object_tag)   <- real block header
+off 6128 : pointer                                     <- field 0 (class)
+off 6136 : 0xdf9  -> read as "wosize=3, tag=249"       <- taken for infix header
+off 6144 : 0x400                                       <- "child"
+```
+
+`0xdf9` == 3577 == `Val_long(1788)` — the object id in field 1 of an
+`Object_tag` block. The collector then computed `parent = child - 3*8`, landed
+mid-object, read a pointer word as a header, and requested a `wosize` of
+136,625,216,709 (≈1 TB). `allocate_part1` failed, and the caller reported that
+as `promotion failed — major heap full`, which is why it looked like a
+heap-sizing problem and was immune to raising `MIN_EXPANSION_WORDSIZE`.
+
+### The applied patch
+
+Uses OCaml's own invariant (`mlvalues.h:224`: *"infix headers can only occur in
+blocks with tag Closure_tag"*):
+
+```c
+if (tag == 249ULL &&
+    (minor_read(minor, (addr - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
+```
+
+### Two things this does NOT fix
+
+1. **Why was `child` scanned as an object address at all?** Per the linear
+   parse, 6144 is the *header* word of the next block, not an object address.
+   Something upstream produced a pointer that does not point at an object. The
+   guard makes the consequence harmless; it does not explain the cause. This
+   should be understood before trusting this area.
+2. **`new_parent_addr == 0` conflates three conditions** — real allocator
+   exhaustion, a zero wosize, and a nonsense size request — and reports all of
+   them as "major heap full". That misdiagnosis cost three full builds. Worth
+   separating regardless.
+
+### Note: this is a *different* problem from `well_formed_heap_part4`
+
+PATCH 9 / PATCH 11 / BRIDGE 6 all concern the spec **assuming infix objects do
+not exist**. Patch 15 is orthogonal: even with full infix support, deciding
+"this word is an infix header" from `tag == 249` alone is unsound, because an
+OCaml integer can have low byte `0xf9`. Lifting `well_formed_heap_part4` would
+not fix it; the test needs the `Closure_tag` side condition regardless.
+
+### Plan to eliminate
+
+Same shape as patch 14: the fix belongs in the verified source. The minor
+collector's infix handling lives in `generational/impl/GC.Gen.Impl.Cheney.fst`
+and `GC.Gen.Impl.MinorHeap.fst`, with the spec in
+`generational/spec/GC.Gen.Cheney*.fst*` — that side *does* model infix (unlike
+the major collector, see patch 14), so the work here is establishing that a
+candidate infix header is only trusted when the implied parent is a
+`Closure_tag` block, rather than making the test soundness-critical on a raw
+tag comparison.

@@ -1,5 +1,5 @@
 diff --git a/runtime/Makefile b/runtime/Makefile
-index b62a579..6903ddb 100644
+index b62a579..881ab29 100644
 --- a/runtime/Makefile
 +++ b/runtime/Makefile
 @@ -176,6 +176,8 @@ endif
@@ -11,7 +11,7 @@ index b62a579..6903ddb 100644
  	rm -f *.o *.obj *.a *.lib *.so *.dll ld.conf
  	rm -f ocamlrun ocamlrund ocamlruni ocamlruns sak
  	rm -f ocamlrun.exe ocamlrund.exe ocamlruni.exe ocamlruns.exe sak.exe
-@@ -268,7 +270,17 @@ build_config.h: $(ROOTDIR)/Makefile.config sak$(EXE)
+@@ -268,25 +270,46 @@ build_config.h: $(ROOTDIR)/Makefile.config sak$(EXE)
  
  # Libraries and programs
  
@@ -30,7 +30,24 @@ index b62a579..6903ddb 100644
  	$(MKEXE) -o $@ $^ $(LIBS)
  
  ocamlruns$(EXE): prims.$(O) libcamlrun_non_shared.$(A)
-@@ -280,13 +292,13 @@ libcamlrun.$(A): $(libcamlrun_OBJECTS)
+ 	$(call MKEXE_USING_COMPILER,$@,$^ $(LIBS))
+ 
+-libcamlrun.$(A): $(libcamlrun_OBJECTS)
+-	$(call MKLIB,$@, $^)
++# Verified GC: embed the verified collector's objects the same way
++# libasmrun.a does. The patched interp.c/memory.h in $(libcamlrun_OBJECTS)
++# reference vergc_minor_base / vergc_minor_bump_ref / vergc_minor_size /
++# verified_allocate_minor, which live in libvergc_gen.a. ocamlrun itself links
++# both archives explicitly, so it was fine -- but ANY `-custom` link (ocamlc
++# -custom, and hence ocamltest, which builds a custom runtime) links only
++# libcamlrun.a and failed with undefined references to those symbols.
++libcamlrun.$(A): $(libcamlrun_OBJECTS) libvergc_gen.a
++	rm -rf vergc_byte_objs
++	mkdir -p vergc_byte_objs
++	cd vergc_byte_objs && $(AR) x ../libvergc_gen.a
++	$(call MKLIB,$@, $(libcamlrun_OBJECTS) vergc_byte_objs/*.o)
++	rm -rf vergc_byte_objs
+ 
  libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS)
  	$(call MKLIB,$@, $^)
  
@@ -46,7 +63,7 @@ index b62a579..6903ddb 100644
  	$(MKEXE) -o $@ $^ $(INSTRUMENTED_RUNTIME_LIBS) $(LIBS)
  
  libcamlruni.$(A): $(libcamlruni_OBJECTS)
-@@ -298,8 +310,12 @@ libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS)
+@@ -298,8 +321,12 @@ libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS)
  libcamlrun_shared.$(SO): $(libcamlrunpic_OBJECTS)
  	$(MKDLL) -o $@ $^ $(BYTECCLIBS)
  

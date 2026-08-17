@@ -11,7 +11,7 @@ module Coalesce  = GC.Spec.Coalesce
 module Mark = GC.Spec.Mark
 module Correctness = GC.Spec.Correctness
 
-let blue_chain_decreasing (g: heap) : prop =
+(*let blue_chain_decreasing (g: heap) : prop =
   forall (x: obj_addr).
     Seq.mem x (objects zero_addr g) /\ is_blue x g ==>
     (let v = read_word g x in
@@ -19,7 +19,9 @@ let blue_chain_decreasing (g: heap) : prop =
      (is_pointer_field v /\
       U64.v v < U64.v x /\
       Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-      is_blue (v <: obj_addr) g))
+      is_blue (v <: obj_addr) g))*)
+
+let blue_chain_decreasing = Coalesce.blue_chain_decreasing
 
 /// Free-list edge: field 1 of x points to y
 let fl_edge (g: heap) (x y: obj_addr) : prop =
@@ -470,7 +472,9 @@ val coalesce_aux_decreasing
   : Lemma
     (requires
       Coalesce.walk_pre g0 g start objs (objects zero_addr g0) first_blue run_words /\
-      (fp = 0UL \/ U64.v fp < U64.v start) /\
+      (fp = 0UL \/
+       (U64.v fp < U64.v start /\
+        (run_words > 0 ==> U64.v fp < U64.v first_blue))) /\
       (Seq.length objs = 0 ==>
         (forall (x: obj_addr).
           Seq.mem x (objects zero_addr g) ==> U64.v x < U64.v start)) /\
@@ -486,34 +490,7 @@ val coalesce_aux_decreasing
       blue_chain_decreasing (fst (Coalesce.coalesce_aux g0 g objs first_blue run_words fp)))
     (decreases Seq.length objs)
 
-#push-options "--z3rlimit 200 --fuel 1 --ifuel 1"
-let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp =
-  if Seq.length objs = 0 then begin
-    assert (Seq.equal objs Seq.empty);
-    Seq.lemma_eq_elim objs Seq.empty;
-    Coalesce.coalesce_aux_empty g0 g first_blue run_words fp;
-    if run_words = 0 then begin
-      let aux (x: obj_addr)
-        : Lemma
-          (requires Seq.mem x (objects zero_addr g) /\ is_blue x g)
-          (ensures
-            (let v = read_word g x in
-             v = 0UL \/
-             (is_pointer_field v /\ U64.v v < U64.v x /\
-              Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-              is_blue (v <: obj_addr) g)))
-        = assert (U64.v x < U64.v start)
-      in
-      FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
-    end
-    else admit ()
-  end
-  else begin
-    let obj = Seq.head objs in
-    if is_blue obj g0 then admit ()
-    else admit ()
-  end
-#pop-options
+
 
 #push-options "--z3rlimit 200"
 let coalesce_establishes_decreasing h =

@@ -43,6 +43,16 @@ let post_sweep (g: heap) : prop =
   (forall (x: obj_addr). Seq.mem x (objects zero_addr g) ==>
     is_white x g \/ is_blue x g)
 
+let blue_chain_decreasing (g: heap) : prop =
+  forall (x: obj_addr).
+    Seq.mem x (objects zero_addr g) /\ is_blue x g ==>
+    (let v = read_word g x in
+     v = 0UL \/
+     (is_pointer_field v /\
+      U64.v v < U64.v x /\
+      Seq.mem (v <: obj_addr) (objects zero_addr g) /\
+      is_blue (v <: obj_addr) g))
+
 /// ---------------------------------------------------------------------------
 /// Flush a blue run
 /// ---------------------------------------------------------------------------
@@ -3478,4 +3488,63 @@ val coalesce_objects_subset (g: heap) (y: obj_addr)
 let coalesce_objects_subset g y =
   coalesce_heap_unfold g g (objects zero_addr g) 0UL 0 0UL;
   coalesce_aux_objects_subset g g zero_addr (objects zero_addr g) 0UL 0 0UL (objects zero_addr g) y
+#pop-options
+
+val coalesce_aux_decreasing
+  (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
+  (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  : Lemma
+    (requires
+      walk_pre g0 g start objs (objects zero_addr g0) first_blue run_words /\
+      (fp = 0UL \/
+       (U64.v fp < U64.v start /\
+        (run_words > 0 ==> U64.v fp < U64.v first_blue))) /\
+      (Seq.length objs = 0 ==>
+        (forall (x: obj_addr).
+          Seq.mem x (objects zero_addr g) ==> U64.v x < U64.v start)) /\
+      (forall (x: obj_addr).
+        Seq.mem x (objects zero_addr g) /\ is_blue x g /\
+        U64.v x < U64.v start ==>
+        (let v = read_word g x in
+         v = 0UL \/
+         (is_pointer_field v /\ U64.v v < U64.v x /\
+          Seq.mem (v <: obj_addr) (objects zero_addr g) /\
+          is_blue (v <: obj_addr) g))))
+    (ensures
+      blue_chain_decreasing (fst (coalesce_aux g0 g objs first_blue run_words fp)))
+    (decreases Seq.length objs)
+
+#push-options "--z3rlimit 200 --fuel 1 --ifuel 1"
+let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp =
+  if Seq.length objs = 0 then begin
+    assert (Seq.equal objs Seq.empty);
+    Seq.lemma_eq_elim objs Seq.empty;
+    coalesce_aux_empty g0 g first_blue run_words fp;
+    if run_words = 0 then begin
+      let aux (x: obj_addr)
+        : Lemma
+          (requires Seq.mem x (objects zero_addr g) /\ is_blue x g)
+          (ensures
+            (let v = read_word g x in
+             v = 0UL \/
+             (is_pointer_field v /\ U64.v v < U64.v x /\
+              Seq.mem (v <: obj_addr) (objects zero_addr g) /\
+              is_blue (v <: obj_addr) g)))
+        = assert (U64.v x < U64.v start)
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+    end
+    else if run_words = 1 then admit ()
+    else begin
+      hd_address_spec (first_blue <: obj_addr);
+      run_words_bound first_blue run_words start;
+      flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
+      admit ()
+    end
+  end
+  else begin
+    let obj = Seq.head objs in
+    if is_blue obj g0 then admit ()
+    else admit ()
+  end
 #pop-options

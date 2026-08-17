@@ -476,6 +476,35 @@ static void do_minor_gc_core(void) {
     /* If we reach here, all promotions succeeded (we abort in 5d.1 otherwise) */
 }
 
+#ifdef NATIVE_CODE
+/* Translate native's allocation state into bump_ref.
+ *
+ * Native's compiled code allocates top-down (young_ptr descends from
+ * young_alloc_end); bump_ref counts bytes used, bottom-up.  The two
+ * conventions differ in DIRECTION, but "how many bytes are in use" is the
+ * same number in both, so the translation is the identity on that count --
+ * NOT its complement.  This is only ever a scalar: nothing in the native
+ * path allocates through the verified bump allocator (memory.h's native
+ * Alloc_small_aux uses stock young_ptr; verified_allocate_minor is reached
+ * only from the bytecode branch), and cheney_promote_phase finds objects by
+ * root-driven BFS over the whole minor window, not by walking [0, bump).
+ *
+ * Bytecode must never call this: there young_ptr is not the allocation
+ * pointer (it is parked at young_alloc_end by ensure_heap and never moves),
+ * so this would compute used == 0 and destroy the real bump value. */
+static void vergc_sync_bump_from_young_ptr(void) {
+    uint64_t used_bytes = (uint64_t)((uint8_t *)Caml_state->_young_alloc_end
+                                      - (uint8_t *)Caml_state->_young_ptr);
+    /* Native decrements young_ptr BEFORE its bounds check (matching Ialloc),
+     * so on a trap young_ptr can legitimately sit below young_alloc_start
+     * until caml_alloc_small_dispatch's "undo" step runs.  Clamp rather than
+     * let bump exceed the heap size (the old complement form underflowed to a
+     * huge uint64 here).  See NATIVE_MINOR_GC_LOG.md, Phase 2. */
+    if (used_bytes > minor_heap_size_u64) used_bytes = minor_heap_size_u64;
+    *gc_gen_heap.minor.bump_ref = used_bytes;
+}
+#endif /* NATIVE_CODE */
+
 static void do_minor_gc(void) {
     ensure_heap();
     if (*gc_gen_heap.minor.bump_ref == 0) return;  /* nothing to collect */
@@ -527,12 +556,10 @@ static void do_minor_gc(void) {
  * header) -- see the log for the full trace. Redirecting this one
  * shared call site instead covers both paths at once. */
 void vergc_native_run_minor_collection(void) {
-    /* Translate in: native's top-down "how much used" into our
-     * bottom-up bump_ref -- both describe the SAME buffer (ensure_heap()
-     * points young_alloc_start/end at minor_base, see Phase 3). */
-    uint64_t used_bytes = (uint64_t)((uint8_t *)Caml_state->_young_alloc_end
-                                      - (uint8_t *)Caml_state->_young_ptr);
-    *gc_gen_heap.minor.bump_ref = minor_heap_size_u64 - used_bytes;
+    /* Translate in: publish native's used-byte count as bump_ref -- both
+     * describe the SAME buffer (ensure_heap() points young_alloc_start/end
+     * at minor_base, see Phase 3), so the count carries over unchanged. */
+    vergc_sync_bump_from_young_ptr();
 
     do_minor_gc(); /* the same, already-proven collection path bytecode uses */
 
@@ -555,6 +582,18 @@ static int full_gc_count = 0;
 static void do_full_gc(void) {
     ensure_heap();
     in_full_gc = 1;
+
+#ifdef NATIVE_CODE
+    /* A full GC can be entered without passing through
+     * vergc_native_run_minor_collection() -- verified_allocate() runs one
+     * when a major allocation needs space, and caml_trigger_verified_gc()
+     * exposes it to OCaml.  On those paths bump_ref still holds whatever the
+     * last collection left (0 after minor_heap_reset), so the minor-heap
+     * accounting below and in do_minor_gc() would be reading a stale value.
+     * Idempotent when we DID come via the minor path: young_ptr has not
+     * moved, so this recomputes the same count. */
+    vergc_sync_bump_from_young_ptr();
+#endif
 
     PROF_INC(major_gc_count);
     PROF_START(major_gc);

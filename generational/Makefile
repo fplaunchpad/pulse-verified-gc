@@ -69,11 +69,16 @@ VERIFY_CHECKED ?= $(ROOT_CHECKED)
 
 # --- Default goal -----------------------------------------------------------
 
-.PHONY: all verify check-orphans extract snapshot clean
+.PHONY: all verify check-orphans extract snapshot clean apply-snapshot-patches verify-snapshot-patches
 
 all: verify
 
+# Targets that only touch files on disk must not drag in F* dependency
+# generation -- CI jobs that run the OCaml testsuite have no F* toolchain.
+NO_DEPEND_GOALS = clean apply-snapshot-patches verify-snapshot-patches
+ifeq (,$(filter $(NO_DEPEND_GOALS),$(MAKECMDGOALS)))
 -include .depend
+endif
 
 REACHABLE_SRC = $(patsubst %.checked,%,$(VERIFY_CHECKED))
 ORPHAN_SRC = $(filter-out $(REACHABLE_SRC),$(ALL_SRC))
@@ -204,7 +209,34 @@ snapshot: extract
 	@cp -r $(KRML_HOME)/krmllib/dist/minimal/* $(SNAPSHOT_DIR)/krmllib/ 2>/dev/null || true
 	@cp $(KRML_HOME)/include/krml/*.h $(SNAPSHOT_DIR)/krmllib/krml/ 2>/dev/null || true
 	@cp $(KRML_HOME)/include/krml/internal/*.h $(SNAPSHOT_DIR)/krmllib/krml/internal/ 2>/dev/null || true
+	@$(MAKE) --no-print-directory apply-snapshot-patches
 	@echo "=== Snapshot updated ==="
+
+# --- Hand patches on top of the extraction ------------------------------------
+#
+# `snapshot` overwrites $(SNAPSHOT_DIR) with a plain cp from $(EXTRACT_DIR), so
+# any hand edit to the extracted C is lost on regeneration. The patches in
+# $(SNAPSHOT_PATCH_DIR) are re-applied here so the committed snapshot is always
+# "extraction + documented hand patches", and the `git diff --quiet` check in
+# .github/workflows/verify.yml stays meaningful.
+#
+# Every patch here is UNVERIFIED code in proof-extracted files; each one must
+# have an entry in PATCHES.md with a plan to eliminate it. Applying is
+# idempotent, and a patch that neither applies nor is already applied is a hard
+# error -- that is the signal that re-extraction changed the surrounding code
+# and the patch (or, better, the F* source) needs revisiting.
+
+SNAPSHOT_PATCH_DIR = patches/snapshot
+GIT_ROOT := $(shell git rev-parse --show-toplevel 2>/dev/null)
+
+.PHONY: apply-snapshot-patches
+apply-snapshot-patches:
+	@if [ -z "$(GIT_ROOT)" ]; then 	  echo "  (not a git checkout, skipping snapshot patches)"; 	else 	  for p in $(SNAPSHOT_PATCH_DIR)/*.patch; do 	    [ -e "$$p" ] || continue; 	    abs="$(CURDIR)/$$p"; 	    if git -C "$(GIT_ROOT)" apply --check "$$abs" >/dev/null 2>&1; then 	      git -C "$(GIT_ROOT)" apply "$$abs" && echo "  applied  $$p"; 	    elif git -C "$(GIT_ROOT)" apply --reverse --check "$$abs" >/dev/null 2>&1; then 	      echo "  already applied  $$p"; 	    else 	      echo ""; 	      echo "ERROR: $$p neither applies nor is already applied."; 	      echo "       The extraction changed underneath it. Fix the patch (or"; 	      echo "       better, the F* source) -- see PATCHES.md."; 	      exit 1; 	    fi; 	  done; 	fi
+
+# CI/dev assertion: the snapshot in the tree carries the hand patches.
+.PHONY: verify-snapshot-patches
+verify-snapshot-patches:
+	@rc=0; 	for p in $(SNAPSHOT_PATCH_DIR)/*.patch; do 	  [ -e "$$p" ] || continue; 	  abs="$(CURDIR)/$$p"; 	  if git -C "$(GIT_ROOT)" apply --reverse --check "$$abs" >/dev/null 2>&1; then 	    echo "  present  $$p"; 	  else 	    echo "  MISSING  $$p"; rc=1; 	  fi; 	done; 	if [ $$rc -ne 0 ]; then 	  echo "Snapshot is missing hand patches; run 'make -C generational apply-snapshot-patches'."; 	fi; 	exit $$rc
 
 # --- Cleanup ----------------------------------------------------------------
 

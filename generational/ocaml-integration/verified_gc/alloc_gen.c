@@ -589,6 +589,42 @@ void vergc_native_run_minor_collection(void) {
 }
 #endif /* NATIVE_CODE */
 
+/* Flavor-independent "empty the minor heap now", for runtime callers that
+ * need the nursery drained on demand rather than when it fills up:
+ * caml_minor_collection(), caml_empty_minor_heap() and everything behind
+ * them (caml_make_vect, the Gc.* entry points, caml_set_minor_heap_size...).
+ *
+ * These used to be stubbed out ("we use our own verified GC"), which was
+ * silently wrong rather than merely incomplete.  caml_make_vect relies on
+ * caml_minor_collection() actually running -- it forces one so that a young
+ * `init` is promoted, then fills a major array with PLAIN stores, skipping
+ * caml_initialize precisely because it has proven init is no longer young:
+ *
+ *     if (Is_block(init) && Is_young(init)) caml_minor_collection();
+ *     res = caml_alloc_shr(size, 0);
+ *     // "no need to call caml_initialize"  <-- only true if the above ran
+ *
+ * With the stub, init stayed young and every element became an unrecorded
+ * major->minor pointer: no ref_table entry, so nothing promoted them and
+ * nothing rewrote them, and minor_heap_reset() then zeroed what they pointed
+ * at.  Array.make/init of any size > Max_young_wosize with a boxed initial
+ * value produced a whole array of dangling pointers.  See
+ * COLDSTART_STDLIB_LOG.md. */
+void vergc_run_minor_collection(void) {
+    ensure_heap();
+#ifdef NATIVE_CODE
+    /* Native keeps the authoritative state in young_ptr; the helper does the
+     * young_ptr <-> bump_ref translation and resets young_ptr afterwards. */
+    if (Caml_state->_young_ptr != Caml_state->_young_alloc_end)
+        vergc_native_run_minor_collection();
+#else
+    /* Bytecode allocates through bump_ref directly (young_ptr is parked at
+     * young_alloc_end by ensure_heap and never moves), so no translation is
+     * needed; do_minor_gc() already no-ops when bump_ref == 0. */
+    do_minor_gc();
+#endif
+}
+
 /* --- Full GC (minor + major) --- */
 
 static int full_gc_count = 0;

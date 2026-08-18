@@ -3518,7 +3518,12 @@ val coalesce_aux_decreasing
 
 #push-options "--z3rlimit 400 --fuel 1 --ifuel 1 --split_queries always"
 let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs x =
-  if Seq.length objs = 0 then admit ()
+  if Seq.length objs = 0 then begin
+    assert (Seq.equal objs Seq.empty);
+    coalesce_heap_empty g0 g first_blue run_words fp;
+    if run_words = 0 then admit ()
+    else admit ()
+  end
   else begin
     let obj = Seq.head objs in
     if is_blue obj g0 then admit ()

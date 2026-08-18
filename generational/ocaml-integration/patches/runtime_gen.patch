@@ -379,7 +379,7 @@ index 66d1c50..e37a2b6 100644
  }
  
 diff --git a/runtime/minor_gc.c b/runtime/minor_gc.c
-index 18cfe3e..c0c806f 100644
+index 18cfe3e..85cd0da 100644
 --- a/runtime/minor_gc.c
 +++ b/runtime/minor_gc.c
 @@ -352,6 +352,30 @@ void caml_oldify_mopup (void)
@@ -441,7 +441,7 @@ index 18cfe3e..c0c806f 100644
    }
  
    /* Re-do the allocation: we now have enough space in the minor heap. */
-@@ -564,17 +601,22 @@ void caml_alloc_small_dispatch (intnat wosize, int flags,
+@@ -564,17 +601,50 @@ void caml_alloc_small_dispatch (intnat wosize, int flags,
  */
  CAMLexport void caml_minor_collection (void)
  {
@@ -463,11 +463,36 @@ index 18cfe3e..c0c806f 100644
  CAMLexport value caml_check_urgent_gc (value extra_root)
  {
 -  if (Caml_state->requested_major_slice || Caml_state->requested_minor_gc){
--    CAMLparam1 (extra_root);
++  /* Verified GC: service a requested minor collection with OUR collector.
++     This was stubbed out; the reason to stub it was never that these are
++     unsafe points -- they are the opposite. Callers pass their live value
++     *through* this function (`result = caml_check_urgent_gc(result)`) or call
++     it inside a CAMLparam/CAMLreturn block, precisely so the value is
++     registered as a root and updated across a moving collection. Stock's
++     collector promotes objects here too.
++
++     The real reason to avoid stock's version is that it services the request
++     via caml_gc_dispatch(), which runs caml_major_collection_slice() -- stock's
++     incremental major GC, which knows nothing about our heap. Were it to run,
++     caml_gc_phase would leave Phase_idle and caml_modify would start calling
++     stock's caml_darken on our objects. So call our collector directly and
++     never go through caml_gc_dispatch().
++
++     Cost of leaving it stubbed, for the record: the request is mostly set by
++     realloc_generic_table() when the remembered set hits its threshold ("drain
++     me"). Never servicing it meant ref_table simply doubled instead, growing
++     larger between collections than stock would ever allow. */
++  if (Caml_state->requested_minor_gc) {
+     CAMLparam1 (extra_root);
 -    caml_gc_dispatch();
--    CAMLdrop;
--  }
-+  /* Disabled: we use our own verified GC */
++    Caml_state->requested_minor_gc = 0;
++    vergc_run_minor_collection();
+     CAMLdrop;
+   }
++  /* We have no incremental major slice: major pressure is handled by
++     do_minor_gc()'s proactive threshold and by verified_allocate() running a
++     full GC and retrying. Clear the flag rather than let it accumulate. */
++  Caml_state->requested_major_slice = 0;
    return extra_root;
  }
  

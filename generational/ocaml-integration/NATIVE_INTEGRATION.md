@@ -188,9 +188,26 @@ Two traps for the unwary here:
   parks `young_ptr` there. It silently did nothing while looking like working
   code, which is worse than an obvious stub.
 
-`caml_check_urgent_gc()` remains deliberately stubbed: it would introduce new
-collection points, and the allocation path already collects when the nursery
-fills.
+`caml_check_urgent_gc()` now routes here too. It had been stubbed, and the
+stated reason ("it would introduce new collection points") was wrong twice
+over. These are *safe* points by construction: callers pass their live value
+through the function (`result = caml_check_urgent_gc(result)`) or call it inside
+a `CAMLparam`/`CAMLreturn` block, precisely so the value is registered as a root
+and updated across a moving collection — stock's collector promotes objects here
+too.
+
+The real hazard is narrower: stock services the request via
+`caml_gc_dispatch()`, which runs `caml_major_collection_slice()` — stock's
+*incremental major* GC, which knows nothing about our heap. If it ran,
+`caml_gc_phase` would leave `Phase_idle` and `caml_modify` would begin calling
+stock's `caml_darken` on our objects. So we call our collector directly and
+never go through `caml_gc_dispatch()`.
+
+What the stub had been costing: the request is mostly set by
+`realloc_generic_table()` when the remembered set hits its threshold — a "drain
+me" signal. Unserviced, `ref_table` doubled instead, growing far larger between
+collections than stock would allow. Not a correctness bug, but a silent
+divergence with no reason behind it.
 
 ### 2.6 The `young_ptr` ↔ `bump_ref` translation
 

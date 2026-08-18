@@ -9,7 +9,7 @@ UNCHANGED_OCAMLRUN    ?= ../ocaml-4.14-unchanged/runtime/ocamlrun
 
 # Native smoke tests link the stock ocamlopt straight against the verified
 # GC's own libasmrun.a (no compiler rebuild -- ocamlopt just needs -I
-# pointed at a directory containing it). See NATIVE_MINOR_GC_LOG.md.
+# pointed at a directory containing it). See NATIVE_INTEGRATION.md.
 VERGC_NATIVE_RUNTIME_DIR ?= ../ocaml-4.14-verified-gen/runtime
 
 # Optional: M&S runtime for 3-way comparison

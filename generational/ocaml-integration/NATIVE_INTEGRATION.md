@@ -400,8 +400,15 @@ allocator's state variable. Catalogued as B15 in `../PATCHES.md`.
 `caml_memprof_young_trigger` and never arms sampling. ~24 testsuite failures.
 
 **Fixed, non-expanding major heap, no compaction.** Sized by
-`MIN_EXPANSION_WORDSIZE` (default 32M words = 256 MB); exhaustion is fatal
-rather than survivable, and fragmentation is never recovered.
+`MIN_EXPANSION_WORDSIZE` (default 32M words = 256 MB), and fragmentation is
+never recovered. Exhaustion now raises a catchable `Out_of_memory` from the
+allocation path, with a one-time stderr hint naming the knob — it used to abort
+the process, because `verified_allocate()` called `caml_fatal_error()` and
+`caml_alloc_shr_aux()` had lost stock's `wosize > Max_wosize` and NULL guards,
+so `check_oom()` never received the 0 it needed. Exhaustion detected *during
+promotion* is still fatal, and correctly so: you cannot raise mid-collection,
+which is the same distinction stock's own `check_oom()` makes via
+`Caml_state->in_minor_collection`.
 
 **Two soundness fixes are unverified.** Patches 14 and 15 edit proof-extracted C
 and are outside every proof. `make snapshot` re-applies them (§2.8), but they

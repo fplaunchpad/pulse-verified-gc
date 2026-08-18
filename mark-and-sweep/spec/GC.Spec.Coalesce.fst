@@ -3499,6 +3499,10 @@ val coalesce_aux_decreasing
       walk_pre g0 g start objs all_objs first_blue run_words /\
       (forall (addr: hp_addr). U64.v addr >= U64.v start ==>
         read_word g addr == read_word g0 addr) /\
+      (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g0) ==>
+        U64.v (wosize_of_object y g0) >= 1) /\
+      (run_words > 0 ==> run_words >= 2) /\
       (fp = 0UL \/
        (is_pointer_field fp /\
         U64.v fp < U64.v start /\
@@ -3534,7 +3538,11 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
       let g' = coalesce_heap g0 g objs first_blue run_words fp in
       merged_block_decompose g' (first_blue <: obj_addr) run_words start x;
       if x = (first_blue <: obj_addr) then begin
-        if run_words = 1 then admit ()
+        if run_words = 1 then begin
+           (* vacuous: run_words > 0 implies run_words >= 2 by hypothesis,
+             since every object contributes wosize + 1 >= 2 words *)
+          ()
+        end
         else begin
           flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
           assert (read_word g' x == fp);

@@ -409,16 +409,35 @@ val color_change_preserves_other_color : (obj1: obj_addr) -> (obj2: obj_addr) ->
 
 /// Raw computation of parent closure address from infix object.
 /// For an infix object at obj_addr `a` with wosize (offset) `w`:
-///   infix_hdr = a - 8 (hd_address a)
-///   parent_obj_addr = infix_hdr - w * 8
-/// The offset in the infix header's wosize field is from the parent closure's
-/// first-field address to the infix header.
+///   parent_obj_addr = a - w * 8
+///
+/// The offset in the infix header's wosize field is measured BODY-to-BODY: from
+/// the parent closure's first-field (obj_addr) to the infix sub-object's own
+/// first-field (obj_addr). This is OCaml's convention, not a choice --
+/// runtime/caml/mlvalues.h defines
+///   #define Infix_offset_hd(hd) (Bosize_hd(hd))
+/// and runtime/major_gc.c:288 recovers the parent with
+///   v -= Infix_offset_val(v);
+/// where `v` is a value (obj_addr, i.e. first-field) on both sides.
+///
+/// NB: this previously subtracted an extra 8, i.e. it read the offset as running
+/// to the infix *header* rather than to the infix *body*, and so returned an
+/// address one word below the parent's first field -- while `objects` stores
+/// first-field addresses (`f_address start = start + 8`). Both existing
+/// implementations of the same computation already used the body-to-body form:
+/// GC.Impl.Closure.parent_closure_of_infix_opt computes
+/// `(infix_hdr + 8) - offset*8`, and the hand-patched C in
+/// generational/snapshot computes `addr - (hdr >> 10) * 8`. Only this definition
+/// disagreed. It went unnoticed on both sides: that executable function has no
+/// functional postcondition relating it to `resolve_object`, and
+/// well_formed_heap_part4 forbids infix objects in `objects`, so every consumer
+/// of infix_wf is vacuous.
 val parent_closure_addr_nat (infix_obj: obj_addr) (g: heap) : GTot int
 
 /// parent_closure_addr_nat specification: depends only on wosize_of_object
 val parent_closure_addr_nat_spec : (infix_obj: obj_addr) -> (g: heap) ->
   Lemma (parent_closure_addr_nat infix_obj g ==
-         U64.v infix_obj - 8 - (U64.v (wosize_of_object infix_obj g) * 8))
+         U64.v infix_obj - (U64.v (wosize_of_object infix_obj g) * 8))
 
 /// Resolve an address: if infix, return parent closure; otherwise return self.
 /// Defensive: if the computed parent address is invalid, returns the input unchanged.

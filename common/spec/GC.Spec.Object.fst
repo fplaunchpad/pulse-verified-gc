@@ -929,15 +929,16 @@ let color_change_preserves_other_color (obj1: hp_addr{U64.v obj1 >= U64.v mword}
 /// ---------------------------------------------------------------------------
 
 /// Raw computation: parent closure address from infix object.
-/// The infix header's wosize = offset (in words) from parent's obj_addr to infix header.
-///   infix_hdr = hd_address(infix_obj) = infix_obj - 8
-///   parent_obj_addr = infix_hdr - offset * 8 = infix_obj - 8 - wosize * 8
+/// The infix header's wosize = offset (in words) measured BODY-to-BODY, from the
+/// parent's obj_addr to the infix sub-object's obj_addr (OCaml's convention; see
+/// the .fsti for the mlvalues.h / major_gc.c citations).
+///   parent_obj_addr = infix_obj - wosize * 8
 let parent_closure_addr_nat (infix_obj: obj_addr) (g: heap) : GTot int =
-  U64.v infix_obj - 8 - (U64.v (wosize_of_object infix_obj g) * 8)
+  U64.v infix_obj - (U64.v (wosize_of_object infix_obj g) * 8)
 
 let parent_closure_addr_nat_spec (infix_obj: obj_addr) (g: heap)
   : Lemma (parent_closure_addr_nat infix_obj g ==
-           U64.v infix_obj - 8 - (U64.v (wosize_of_object infix_obj g) * 8))
+           U64.v infix_obj - (U64.v (wosize_of_object infix_obj g) * 8))
   = ()
 
 /// Resolve: if infix with valid parent, return parent; otherwise return self.

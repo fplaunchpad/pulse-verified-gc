@@ -3506,7 +3506,9 @@ val coalesce_aux_decreasing
       (fp = 0UL \/
        (is_pointer_field fp /\
         U64.v fp < U64.v start /\
-        (run_words > 0 ==> U64.v fp < U64.v first_blue))) /\
+        (run_words > 0 ==> U64.v fp < U64.v first_blue) /\
+        Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
+        is_blue (fp <: obj_addr) g)) /\
       (let sync : hp_addr =
          if run_words > 0 then hd_address (first_blue <: obj_addr) else start in
        Seq.mem x (objects sync (coalesce_heap g0 g objs first_blue run_words fp))))
@@ -3519,6 +3521,17 @@ val coalesce_aux_decreasing
         Seq.mem (v <: obj_addr) (objects zero_addr g') /\
         is_blue (v <: obj_addr) g'))))
     (decreases Seq.length objs)
+
+private let blue_preserved_by_header (g g': heap) (y: obj_addr)
+  : Lemma
+    (requires
+      read_word g' (hd_address y) == read_word g (hd_address y) /\
+      is_blue y g)
+    (ensures is_blue y g')
+  = is_blue_iff y g;
+    is_blue_iff y g';
+    color_of_object_spec y g;
+    color_of_object_spec y g'
 
 #push-options "--z3rlimit 400 --fuel 1 --ifuel 1 --split_queries always"
 let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs x =
@@ -3546,7 +3559,20 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
         else begin
           flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
           assert (read_word g' x == fp);
-          admit ()
+          if fp = 0UL then ()
+           else begin
+            assert (U64.v fp < U64.v first_blue);
+            assert (is_pointer_field fp);
+            hd_address_spec (fp <: obj_addr);
+            assert (U64.v fp + U64.v mword <= U64.v first_blue);
+            assert (g' == fst (flush_blue g first_blue run_words fp));
+            flush_blue_preserves_outside g first_blue run_words fp (hd_address (fp <: obj_addr));
+            assert (read_word g' (hd_address (fp <: obj_addr)) == read_word g (hd_address (fp <: obj_addr)));
+            blue_preserved_by_header g g' (fp <: obj_addr);
+            assert (is_blue (fp <: obj_addr) g');
+            assert (Seq.mem (fp <: obj_addr) (objects zero_addr g'));
+            admit ()
+          end
         end
       end
       else admit ()

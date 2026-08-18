@@ -755,6 +755,13 @@ forward_if_minor(
              block; mlvalues.h: "infix headers can only occur in blocks with tag
              Closure_tag". */
           if (tag == 249ULL &&
+              /* HAND PATCH 15b: bound the offset before dereferencing. A word whose
+                 low byte is 0xf9 need not be a header at all, so hdr >> 10 is
+                 unconstrained garbage -- measured 2005312 words (15.3 MiB) against a
+                 2 MiB nursery, which read past the end of the mapping and killed the
+                 process. addr >= 8 and addr < minor_heap_size_u64 hold above, so this
+                 keeps parent - 8 inside [0, addr). */
+              (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (addr - 8ULL) / 8ULL &&
               (minor_read(minor, (addr - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
           {
             uint64_t hdr_addr0 = addr - 8ULL;
@@ -934,6 +941,13 @@ forward_roots(
                block; mlvalues.h: "infix headers can only occur in blocks with tag
                Closure_tag". */
             if (tag == 249ULL &&
+                /* HAND PATCH 15b: bound the offset before dereferencing. A word whose
+                   low byte is 0xf9 need not be a header at all, so hdr >> 10 is
+                   unconstrained garbage -- measured 2005312 words (15.3 MiB) against a
+                   2 MiB nursery, which read past the end of the mapping and killed the
+                   process. r >= 8 and r < minor_heap_size_u64 hold above, so this
+                   keeps parent - 8 inside [0, r). */
+                (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (r - 8ULL) / 8ULL &&
                 (minor_read(minor, (r - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
             {
               uint64_t hdr_addr0 = r - 8ULL;
@@ -1112,6 +1126,18 @@ scan_loop(
         scan = s + (size_t)1U;
       else if (obj + wosize * 8ULL > minor_heap_size_u64)
         scan = s + (size_t)1U;
+      /* HAND PATCH 16 (see ../PATCHES.md) -- UNVERIFIED.
+         No_scan_tag guard. cheney_scan_step scans minor_wosize fields of every
+         queued object regardless of tag, but the payload of a Custom_tag,
+         String_tag or Double_array_tag block is raw data, not values. A boxed
+         Int64 whose payload happened to be 8-aligned and inside
+         [8, minor_heap_size) was accepted as a nursery offset and enqueued as an
+         object; its "header" then read back as &caml_int64_ops (tag 224,
+         wosize 4411), over-scanning 35 KB of unrelated nursery. This mirrors the
+         is_scannable test update_promoted_objects already applies on the major
+         side -- the minor BFS was the only field scan that lacked it. */
+      else if (!((hdr & 0xFFULL) < 251ULL && (hdr & 0xFFULL) != 249ULL))
+        scan = s + (size_t)1U;
       else
       {
         uint64_t field_idx = 0ULL;
@@ -1143,6 +1169,13 @@ scan_loop(
                      block; mlvalues.h: "infix headers can only occur in blocks with tag
                      Closure_tag". */
                   if (tag == 249ULL &&
+                      /* HAND PATCH 15b: bound the offset before dereferencing. A word whose
+                         low byte is 0xf9 need not be a header at all, so hdr >> 10 is
+                         unconstrained garbage -- measured 2005312 words (15.3 MiB) against a
+                         2 MiB nursery, which read past the end of the mapping and killed the
+                         process. child >= 8 and child < minor_heap_size_u64 hold above, so this
+                         keeps parent - 8 inside [0, child). */
+                      (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (child - 8ULL) / 8ULL &&
                       (minor_read(minor, (child - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
                   {
                     uint64_t hdr_addr0 = child - 8ULL;

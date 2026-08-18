@@ -3521,7 +3521,11 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
   if Seq.length objs = 0 then begin
     assert (Seq.equal objs Seq.empty);
     coalesce_heap_empty g0 g first_blue run_words fp;
-    if run_words = 0 then admit ()
+    if run_words = 0 then begin
+      (* vacuous: objs empty and run_words = 0 means objects start g' is empty,
+         so the sync-membership hypothesis cannot hold *)
+      ()
+    end
     else admit ()
   end
   else begin

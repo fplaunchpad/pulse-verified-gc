@@ -39,6 +39,15 @@ bench_stats.cmo: bench_stats.ml
 
 BENCHMARKS = binarytrees fasta quicksort fannkuchredux count_change nbodies spectralnorm mandelbrot
 
+# Regression tests, as opposed to benchmarks: each one targets a specific GC
+# bug and is expected to exit 0. They are not timed and not part of the
+# three-way comparison. Kept separate from BENCHMARKS so a regression never
+# silently disappears into benchmark noise.
+REGRESSIONS = noscan_stress
+REGRESSION_BYTE   = $(addsuffix .byte, $(REGRESSIONS))
+REGRESSION_NATIVE = $(addsuffix .native, $(REGRESSIONS))
+NOSCAN_STRESS_ITERS ?= 300000
+
 BYTE_FILES = $(addsuffix .byte, $(BENCHMARKS))
 NATIVE_FILES = $(addsuffix .native, $(BENCHMARKS))
 BENCH_TARGETS = $(addsuffix .bench, $(BENCHMARKS))
@@ -68,6 +77,7 @@ test: $(BYTE_FILES)
 	MIN_EXPANSION_WORDSIZE=$(SPECTRALNORM_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) spectralnorm.byte 100
 	@echo "--- mandelbrot ---"
 	MIN_EXPANSION_WORDSIZE=$(MANDELBROT_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) mandelbrot.byte 100
+	@$(MAKE) test-regression
 	@echo "=== All smoke tests passed ==="
 
 # ---- Smoke tests, native (ocamlopt + verified gen GC's libasmrun.a) ----
@@ -94,7 +104,33 @@ test-native: $(NATIVE_FILES)
 	MIN_EXPANSION_WORDSIZE=$(SPECTRALNORM_MAJOR_WORDS) ./spectralnorm.native 100
 	@echo "--- mandelbrot ---"
 	MIN_EXPANSION_WORDSIZE=$(MANDELBROT_MAJOR_WORDS) ./mandelbrot.native 100
+	@$(MAKE) test-regression-native
 	@echo "=== All native smoke tests passed ==="
+
+# ---- Regression tests ------------------------------------------------------
+#
+# noscan_stress: the minor BFS used to scan the fields of every queued object
+# regardless of tag, so the raw payload of a Custom_tag block (a boxed Int64)
+# was interpreted as a value. A payload that happened to be 8-aligned and
+# inside [8, minor_heap_size) was enqueued as an object, its "header" read
+# back as &caml_int64_ops (tag 224, wosize 4411), and ~35 KB of unrelated
+# nursery over-scanned -- which crashed the compiler roughly once per 2000
+# ocamlopt invocations. Before hand patch 16 this program segfaulted 40/40
+# runs; after it, 0/40. See ../../PATCHES.md and NATIVE_INTEGRATION.md.
+
+.PHONY: test-regression test-regression-native
+
+test-regression: $(REGRESSION_BYTE)
+	@echo "=== Regression tests (verified generational GC) ==="
+	@echo "--- noscan_stress: Custom_tag payloads must not be scanned as fields ---"
+	$(VERIFIED_GEN_OCAMLRUN) noscan_stress.byte $(NOSCAN_STRESS_ITERS)
+	@echo "=== All regression tests passed ==="
+
+test-regression-native: $(REGRESSION_NATIVE)
+	@echo "=== Regression tests, native (verified generational GC) ==="
+	@echo "--- noscan_stress: Custom_tag payloads must not be scanned as fields ---"
+	./noscan_stress.native $(NOSCAN_STRESS_ITERS)
+	@echo "=== All native regression tests passed ==="
 
 # ---- Benchmarks with hyperfine (3-way comparison) ----
 

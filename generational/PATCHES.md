@@ -1097,11 +1097,12 @@ if (tag == 249ULL &&
 
 ### Two things this does NOT fix
 
-1. **Why was `child` scanned as an object address at all?** Per the linear
-   parse, 6144 is the *header* word of the next block, not an object address.
-   Something upstream produced a pointer that does not point at an object. The
-   guard makes the consequence harmless; it does not explain the cause. This
-   should be understood before trusting this area.
+1. ~~**Why was `child` scanned as an object address at all?**~~ **Answered by
+   patch 16 below.** Something upstream produced a pointer that does not point
+   at an object: the minor BFS scanned the raw payload of `Custom_tag` blocks as
+   if it were a value field, so a boxed `Int64` whose payload happened to look
+   like a nursery offset was enqueued as an "object". Patch 15 makes the
+   consequence harmless; patch 16 removes the cause.
 2. **`new_parent_addr == 0` conflates three conditions** — real allocator
    exhaustion, a zero wosize, and a nonsense size request — and reports all of
    them as "major heap full". That misdiagnosis cost three full builds. Worth
@@ -1125,6 +1126,168 @@ the major collector, see patch 14), so the work here is establishing that a
 candidate infix header is only trusted when the implied parent is a
 `Closure_tag` block, rather than making the test soundness-critical on a raw
 tag comparison.
+
+---
+
+## Patch 15b — the infix parent read was unbounded (OPEN)
+
+**Status: hand patch in `snapshot/GC_Gen_Impl.c`. Unverified; reverted by
+`make snapshot`.** Same three sites as patch 15.
+
+Patch 15 added a `Closure_tag` side condition, but the read that *tests* it was
+itself unbounded:
+
+```c
+if (tag == 249ULL &&
+    (minor_read(minor, (addr - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
+```
+
+If the word at `addr - 8` is not a header, `hdr >> 10` is not an offset — it is
+whatever the upper 54 bits of an unrelated value happen to be. Measured at the
+crash: `hdr == 0x7a6500f9`, so `hdr >> 10 == 2005312` words == 15.3 MiB, against
+a 2 MiB nursery. `minor_read` then read 15.3 MiB below the mapping and the
+process died with `SIGSEGV` at `scan_loop+572`.
+
+Note the ordering hazard: the guard patch 15 introduced could not run, because
+computing its own operand crashed first. A soundness test that dereferences
+unvalidated arithmetic is not a guard.
+
+The patch bounds the offset before dereferencing. All three sites already
+establish `addr >= 8`, `addr < minor_heap_size_u64` and `addr % 8 == 0`, so:
+
+```c
+if (tag == 249ULL &&
+    (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (addr - 8ULL) / 8ULL &&
+    (minor_read(minor, (addr - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
+```
+
+which keeps `parent - 8` inside `[0, addr)`. A genuine infix header always
+satisfies this — its parent closure lies at a lower offset in the same block —
+so the bound never rejects a legitimate case. It is defence in depth: with
+patch 16 applied, the garbage words that reached here should no longer exist.
+
+---
+
+## Patch 16 — the minor BFS scans no-scan blocks (OPEN)
+
+**Status: hand patch in `snapshot/GC_Gen_Impl.c`. Unverified; reverted by
+`make snapshot`.** One site, in `scan_loop`. **This was the root cause of the
+intermittent compiler segfault** that made `make world.opt` fail roughly once
+per 2000 `ocamlopt` invocations, on both flavours and both CI and local
+machines.
+
+### The bug
+
+`cheney_scan_step` (`spec/GC.Gen.Cheney.fsti`) scans every field of every
+queued object, with no reference to its tag:
+
+```
+let obj = Seq.index cs.cs_queue scan in
+let wz = minor_wosize minor obj in
+let cs' = cheney_forward_fields minor cs obj 0 wz in
+```
+
+But the payload of a `Custom_tag`, `String_tag` or `Double_array_tag` block is
+raw data, not values. This is **a bug in the specification**, not something lost
+in extraction — the implementation faithfully implements what the spec says. The
+major side already gets this right: `update_promoted_objects` tests
+`is_scannable = tag < 251 && tag != 249` before touching fields. The minor BFS
+was the only field scan in the collector that lacked the test.
+
+### The failure chain, from the core dump
+
+A boxed `Int64` is a `Custom_tag` block: `header | &caml_int64_ops | payload`.
+
+1. `scan_loop` reads the payload word as if it were a value.
+2. `scan_loop` accepts a word as a nursery address when it is 8-aligned and in
+   `[8, minor_heap_size)`. An `Int64` payload of, say, `0xcd180` satisfies that,
+   so the payload is **enqueued as an object**.
+3. The scanner later reads that "object's" header from `payload - 8` — which is
+   the `&caml_int64_ops` pointer, `0x44ede0`. Decoded as a header that is
+   tag 224, **wosize 4411**, and it passes the existing bounds checks.
+4. So `scan_loop` over-scans ~35 KB of unrelated nursery. Somewhere in there it
+   read `0x7a6500f9` — an *odd* word, hence an OCaml integer (1026201724), whose
+   low byte is nonetheless `0xf9` — patch 15 fired, and patch 15b's missing
+   bound turned it into a wild read. `SIGSEGV`.
+
+Evidence, from `coredumpctl` cores of two real build failures:
+
+| observation | value |
+|---|---|
+| faulting instruction, bytecode `ocamlrun` | `scan_loop+572` (`+0x265c`) |
+| faulting instruction, native `ocamlopt.opt` | `+0xb25c` — **same** `+0x25c` offset |
+| nursery | base `0x7f0b73e47010`, size 2 MiB, `bump` `0x1fffd0` |
+| faulting address | `0x7f0b72efa680` — 15.3 MiB *below* the nursery |
+| nursery object chain | **clean**: 90578 objects walked to `bump` |
+| roots | **clean**: 588, none bogus |
+| invalid queue entries | 8 of 35806 |
+| traced to `field#1` of a wosize-2 `Custom_tag` block | **7 of 8** |
+
+So neither the allocator nor the root scanner was at fault: the nursery and the
+root set were both well-formed, and the only bad addresses in the system were
+manufactured by the scan itself.
+
+### The applied patch
+
+```c
+else if (!((hdr & 0xFFULL) < 251ULL && (hdr & 0xFFULL) != 249ULL))
+  scan = s + (size_t)1U;
+```
+
+placed after the existing `wosize` bounds checks in `scan_loop`, mirroring the
+major side's `is_scannable`.
+
+### Why it took so long to find
+
+The rate is what made this hard. Instrumenting the guard while compiling
+`middle_end/flambda/inline_and_simplify.ml` — one of the units that crashed —
+gives:
+
+```
+[vergc] no-scan objects skipped=31370  bogus children prevented=3028
+```
+
+3028 bogus enqueues in a *single* compilation, yet the crash needs one of them
+to also land on a `0xf9` low byte *and* produce an offset that leaves the
+mapping. Almost all of them over-scan harmlessly, so the observable failure rate
+collapses to ~1 in 2000 invocations: enough to fail a 900-invocation build often,
+never enough to reproduce on a fixed input (0/30, 0/20, 0/25 attempts). Two
+wrong conclusions came out of that — blaming CI's environment, then blaming
+commit `e0aecc7` — both from treating single runs as measurements.
+
+### Confirmation
+
+A targeted reproducer (`ocaml-integration/tests/noscan_stress.ml`) allocates
+boxed `Int64`s whose payloads are 8-aligned values inside `[8, 2 MiB)` and keeps
+them live across minor collections:
+
+| runtime | runs | segfaults |
+|---|---|---|
+| pre-fix | 40 | **40** |
+| post-fix | 40 | **0** |
+
+The pre-fix crash is at `+0x265c`, the same instruction as the real build
+failures. It runs in `make test` and `make test-native` via `test-regression`.
+
+### Caveat: this was not only a crash
+
+An over-scan reads unrelated words and forwards any that look like minor
+pointers, writing rewritten addresses back. Silent heap corruption was therefore
+possible, not merely a segfault, and a build that *succeeded* under the old code
+is not proof that it was uncorrupted. Anything built before this fix — including
+the bootstrap fixpoint and the testsuite baselines in `ci/expected-failures.txt`
+— is worth re-establishing.
+
+### Plan to eliminate
+
+The fix belongs in `cheney_scan_step` and `cheney_forward_fields` in
+`spec/GC.Gen.Cheney.fsti`: field scanning should be conditioned on
+`tag < no_scan_tag`, with the BFS preservation lemmas in
+`spec/GC.Gen.CheneyPreservation.*` following. Note that
+`well_formed_heap_part2` requires pointer fields to target objects, which a real
+OCaml heap containing `Custom_tag` blocks does **not** satisfy under the current
+"every field is a value" reading — so the spec's notion of a well-formed heap
+needs the no-scan distinction regardless of this crash.
 
 ---
 

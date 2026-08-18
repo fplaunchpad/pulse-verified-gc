@@ -296,6 +296,8 @@ quietly lacks a soundness fix.
 | 9 | Major darken did not normalise infix pointers | live closures swept; NULL code pointer in the interpreter | see §2.7 |
 | 10 | Infix detected by a bare `tag == 249` | `Val_long(1788)` = `0xdf9` taken for an infix header; a ~1 TB allocation request reported as "major heap full" | a tag test needs the word to *be* a header |
 | 11 | `libcamlrun.a` missing the verified objects | all `-custom` links failed; testsuite unrunnable | both runtime archives need the same treatment |
+| 12 | Minor BFS scanned no-scan blocks | a boxed `Int64`'s payload enqueued as an object; ~35 KB over-scan; `ocamlopt` segfaulted ~1 per 2000 invocations | the *spec* said "scan every field of every object"; raw payloads are not fields |
+| 13 | Patch 15's `Closure_tag` guard dereferenced an unvalidated offset | `hdr >> 10` = 15.3 MiB against a 2 MiB nursery → wild read | a soundness test that dereferences its own unchecked operand is not a guard |
 
 Bugs 9 and 10 interact: while 9 was destroying live closures, the minor
 collector never had to promote surviving infix structure, so 10 was unreachable.
@@ -306,6 +308,16 @@ Bug 10 also explains a misdiagnosis worth guarding against: `new_parent_addr ==
 0` conflates genuine allocator exhaustion, a zero size, and a nonsense size
 request, reporting all three as "major heap full". That sent three builds chasing
 `MIN_EXPANSION_WORDSIZE`.
+
+Bugs 12 and 13 chain, and the ordering matters: 12 manufactured addresses that
+were not objects, and 13 turned reading one of them into a fatal wild access.
+Patch 15's guard was *supposed* to reject exactly this, but it crashed while
+computing its own operand — so the guard never ran. Both were found from a
+`coredumpctl` core of a real build failure, after six rounds of inference from
+*where* the crash landed had produced two wrong conclusions (CI's environment,
+then commit `e0aecc7`). The core answered in one read what the inference could
+not: the nursery chain was clean (90578 objects), the 588 roots were clean, and
+every bad address in the system had been manufactured by the scan itself.
 
 ---
 
@@ -481,31 +493,43 @@ It is worth re-adding, env-gated, whenever this area is touched.
 
 ## 7. Open work
 
-**Two environment-dependent crashes.** Both appear on GitHub's Ubuntu 24.04
-runners and neither reproduces locally (0/30 on Fedora/glibc 2.43, 0/25 in an
-Ubuntu 24.04 container sharing the host kernel, so glibc is exonerated):
+**~~Two environment-dependent crashes.~~ The compiler segfault is fixed
+(patches 15b and 16, bugs 12 and 13).** It was never environment-dependent —
+that reading came from comparing single runs across machines. It was
+data-dependent, at ~1 in 2000 `ocamlopt` invocations, which is why it hit a
+900-invocation build often, appeared on whichever unit happened to be unlucky
+(`tast_mapper`, `ast_helper`, `stdlib__Set` on CI; `inline_and_simplify`,
+`odoc_texi` locally), and never reproduced on a fixed input. Two jobs on the
+identical commit `9b659dc` — one failing, one clean — is what finally ruled the
+environment out. Reproducer and A/B (40/40 → 0/40) in
+`tests/noscan_stress.ml`; details in `../PATCHES.md` patch 16.
 
-1. **Bytecode.** `ocamlrun` running `ocamlopt` segfaults during `opt.opt`, ~50%
-   of runs, at a different compilation unit each time (`tast_mapper.cmx`,
-   `ast_helper.cmx`).
-2. **Native.** `tests/ast-invariants/test.ml` compiles fine, then the resulting
-   *native binary* dies on signal 11. Notably this is the one test in 3141 that
-   flipped to passing when patch 14 was hardened, which makes the infix darkening
-   path the first place to look.
+Still open:
 
-Ruled out for these: glibc version; stock's incremental major GC leaking in
-(`caml_alloc_small_dispatch` is reachable only from `signals_nat.c` and the
-native `Alloc_small_aux`, so in bytecode `caml_gc_phase` never leaves
-`Phase_idle` and `caml_modify`'s stock-`caml_darken` branch never fires).
-Remaining differences are kernel, CPU and contention. The productive next step is
-an env-gated heap checker in `alloc_gen.c` plus a CI run with it enabled against
-that single test.
+1. **Native.** `tests/ast-invariants/test.ml` compiles fine, then the resulting
+   *native binary* dies on signal 11. This may well be the same bug — the native
+   `ocamlopt.opt` core crashed at the same instruction as the bytecode one — so
+   the first step is simply to re-run it against the fixed runtime before
+   investigating further. It is also the one test in 3141 that flipped to passing
+   when patch 14 was hardened, which keeps the infix darkening path on the list.
+
+Ruled out along the way: glibc version; kernel and CPU differences; stock's
+incremental major GC leaking in (`caml_alloc_small_dispatch` is reachable only
+from `signals_nat.c` and the native `Alloc_small_aux`, so in bytecode
+`caml_gc_phase` never leaves `Phase_idle` and `caml_modify`'s stock-`caml_darken`
+branch never fires).
 
 **Push patches 14 and 15 into the F\* source.** Requires weakening
 `well_formed_heap_part4` to admit infix objects and part2 to admit
 interior-pointing fields, then re-proving everything that currently discharges
 the infix cases as vacuous (`Allocator.Lemmas.Split`, `Coalesce`, `Sweep`). See
 `../PATCHES.md`.
+
+**Re-establish everything measured before patch 16.** An over-scan could forward
+garbage and write rewritten addresses back, so silent corruption was possible and
+a build succeeding under the old code proves nothing about its output. The
+bootstrap fixpoint, the differential `.cmo` comparison and
+`ci/expected-failures.txt` should all be re-run on the fixed runtime.
 
 **Separate the OOM signal from corruption.** `new_parent_addr == 0` should not
 report a nonsense size request as "major heap full".

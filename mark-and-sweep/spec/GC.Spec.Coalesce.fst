@@ -3526,7 +3526,23 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
          so the sync-membership hypothesis cannot hold *)
       ()
     end
-    else admit ()
+    else begin
+      flush_blue_preserves_length g first_blue run_words fp;
+      hd_address_spec (first_blue <: obj_addr);
+      run_words_bound first_blue run_words start;
+      flush_blue_header_spec g (first_blue <: obj_addr) run_words fp;
+      let g' = coalesce_heap g0 g objs first_blue run_words fp in
+      merged_block_decompose g' (first_blue <: obj_addr) run_words start x;
+      if x = (first_blue <: obj_addr) then begin
+        if run_words = 1 then admit ()
+        else begin
+          flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
+          assert (read_word g' x == fp);
+          admit ()
+        end
+      end
+      else admit ()
+    end
   end
   else begin
     let obj = Seq.head objs in

@@ -114,6 +114,7 @@ infix parent relationship in the formal heap model.
 | B9  | Ref_table fwd rewriting | ✅ **DONE** | Verified `rewrite_heap_slots` replaces manual loop |
 | B11 | Full GC wrapper | — Keep as-is | 46 lines, orchestrates major GC |
 | B12 | Allocation entry point | — Keep as-is | 56 lines, hot path |
+| B15 | **Inline bytecode allocation fast path** | ⚠️ **UNVERIFIED — hot path** | `Alloc_small_aux` in `runtime/caml/memory.h` reimplements bump allocation in C rather than calling verified `minor_alloc()`. See below. |
 | B13 | compat.c stub | ✅ **DONE** | Empty — no more externs needed |
 | B14 | verified_do_minor_gc | — Keep as-is | 5 lines, inherently OCaml-specific |
 
@@ -1124,3 +1125,70 @@ the major collector, see patch 14), so the work here is establishing that a
 candidate infix header is only trusted when the implied parent is a
 `Closure_tag` block, rather than making the test soundness-critical on a raw
 tag comparison.
+
+---
+
+## BRIDGE 15 — the inline bytecode allocation fast path (OPEN)
+
+**Status: unverified, and on the hot path.** Not previously catalogued here,
+which is itself the problem — the whole point of this document is that every
+difference from the extraction is recorded as unverified code, and this one is
+executed more often than anything else in the system.
+
+### What it is
+
+The bytecode branch of `Alloc_small_aux` (`runtime/caml/memory.h`) does not call
+the verified allocator. It open-codes bump allocation:
+
+```c
+if (vergc_minor_bump_ref != NULL && vergc_minor_base != NULL) {
+  uint64_t vergc_bump = *vergc_minor_bump_ref;
+  if (vergc_bump <= vergc_minor_size &&
+      vergc_needed <= vergc_minor_size - vergc_bump) {
+    vergc_alloc_hp = (value)(vergc_minor_base + vergc_bump);   /* address    */
+    *vergc_minor_bump_ref = vergc_bump + vergc_needed;         /* bump       */
+    vergc_fast_alloc = 1;
+  }
+}
+...
+if (VERGC_SHOULD_WRITE_SMALL_HEADER(vergc_fast_alloc, vergc_alloc_hp))
+  Hd_hp (vergc_alloc_hp) = Make_header_with_profinfo(...);     /* header     */
+```
+
+Bounds check, address computation, bump, and header write — all hand-written,
+sharing only the `bump_ref`/`base`/`size` variables with the verified allocator.
+`verified_allocate_minor()` (which does reach the verified `minor_alloc()`) is
+called only when the fast path declines, i.e. when the nursery is full.
+
+### Why it matters
+
+The fast path is taken for essentially **every** bytecode allocation; the
+verified `minor_alloc()` runs roughly **once per nursery-full event**. So the
+claim "bytecode runs on the verified allocator" is false as usually stated. The
+verified code owns *collection*; allocation in the common case does not go
+through it.
+
+Combined with the native side — where `minor_alloc()` is never called at all,
+because native allocates inline against `young_ptr` (see
+`ocaml-integration/NATIVE_INTEGRATION.md` §2.4) — the honest summary is that the
+verified minor **allocator** is exercised only on the bytecode slow path, in
+both flavours the verified minor and major **collectors** do the real work, and
+allocation is bridge code.
+
+### Plan to eliminate
+
+Calling `minor_alloc()` per allocation would mean a function call into extracted
+code on the hottest path in the interpreter, which is presumably why it was
+written this way. Options, none free:
+
+1. Prove the inline form equivalent to `minor_alloc()` — the honest fix, and it
+   is a small, self-contained obligation: same bounds condition, same resulting
+   address, same post-state for `bump_ref`.
+2. Have the extraction emit an inlinable form (`inline_for_extraction`) so the
+   fast path *is* the verified code.
+3. Measure first. If the call costs little against the interpreter's dispatch
+   overhead, just call `verified_allocate_minor()` unconditionally and delete the
+   fast path.
+
+Until one of those lands, this should be stated explicitly wherever the project
+describes what is verified.

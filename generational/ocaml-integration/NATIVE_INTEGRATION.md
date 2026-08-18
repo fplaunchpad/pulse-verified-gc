@@ -124,12 +124,21 @@ otherwise leak 2 MB per process.
 `Alloc_small_aux` (`runtime/caml/memory.h`) is flavour-split, and the split
 matters:
 
-- **bytecode** uses the verified bump allocator: an inline fast path over
-  `vergc_minor_bump_ref`, falling back to `verified_allocate_minor()`. The slow
-  path is wrapped in `Setup_for_gc`/`Restore_after_gc` so the interpreter's `sp`
-  and `accu` are visible to the root scan.
+- **bytecode** allocates through a hand-written inline fast path in the macro
+  itself, *not* through the verified allocator. It reimplements bump allocation
+  in C — bounds check, pointer computation, bump of `vergc_minor_bump_ref`, and
+  writing the header — and only falls back to `verified_allocate_minor()`
+  (which does call the verified `minor_alloc()`) when the nursery is full. The
+  slow path is wrapped in `Setup_for_gc`/`Restore_after_gc` so the interpreter's
+  `sp` and `accu` are visible to the root scan.
+
+  Be precise about what that means for the trust story: the fast path is taken
+  for essentially every bytecode allocation, and the verified `minor_alloc()`
+  runs roughly once per nursery-full event. **The hot allocation path in
+  bytecode is unverified hand-written C**, sharing only the `bump_ref` variable
+  with the verified allocator. See `../PATCHES.md` B15.
 - **native** uses genuinely stock allocation against the real
-  `young_ptr`/`young_limit`. Redirecting it into the verified bump allocator
+  `young_ptr`/`young_limit`. Redirecting it into the bridge's bump allocation
   would create two disjoint nurseries in one process, which `Is_young()` cannot
   reconcile. (This was found the hard way — see "cross-contamination" in the bug
   table.)
@@ -246,7 +255,7 @@ quietly lacks a soundness fix.
 
 | # | Bug | Symptom | Lesson |
 |---|-----|---------|--------|
-| 1 | `Alloc_small_aux` redirected native allocation into the verified bump allocator | two disjoint nurseries in one process | `Is_young()` cannot reconcile two nurseries; native must use stock allocation |
+| 1 | `Alloc_small_aux` redirected native allocation into the bridge's bump path | two disjoint nurseries in one process | `Is_young()` cannot reconcile two nurseries; native must use stock allocation |
 | 2 | Domain-state layout shifted by a new `temp` field | every native allocation compared `young_ptr` against a scratch word | changing a struct the unmodified compiler has offsets for is an ABI break |
 | 3 | Stale `caml_memprof_young_trigger` | memprof sampling fired on every allocation; debug-runtime assertion | trigger fields must be re-derived against the installed buffer |
 | 4 | Stock's minor buffer never freed | 2 MB leak per native process | if you replace an allocation, reclaim the original |
@@ -348,6 +357,14 @@ the testsuite failures. Measured as *not* involved in the bootstrap:
 `ephe_list_head` was empty across all 65 collections of a failing stdlib compile,
 and no compiler source, tool, or ocamldoc file uses `Weak`/`Ephemeron`/
 `Gc.finalise`.
+
+**The bytecode hot allocation path is unverified.** `Alloc_small_aux`'s inline
+fast path (`runtime/caml/memory.h`) is hand-written C that bumps
+`vergc_minor_bump_ref` and writes the header directly; the verified
+`minor_alloc()` is reached only via the slow path, i.e. about once per
+nursery-full event. So "bytecode runs on the verified allocator" is false as
+stated — it runs on an unverified reimplementation that shares the verified
+allocator's state variable. Catalogued as B15 in `../PATCHES.md`.
 
 **No statistical memory profiling.** `ensure_heap()` parks
 `caml_memprof_young_trigger` and never arms sampling. ~24 testsuite failures.

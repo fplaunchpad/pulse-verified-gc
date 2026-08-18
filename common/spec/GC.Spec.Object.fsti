@@ -294,22 +294,15 @@ val makeBlue_spec : (obj: obj_addr) -> (g: heap) ->
   Lemma (makeBlue obj g == write_word g (hd_address obj) (colorHeader (read_word g (hd_address obj)) Blue))
 
 /// ---------------------------------------------------------------------------
-/// Object Enumeration
+/// Object Enumeration -- NOT HERE
 /// ---------------------------------------------------------------------------
-
-/// Enumerate objects starting from address
-val objects (start: hp_addr) (g: heap) : GTot (seq hp_addr)
-
-/// Get all allocated blocks
-val allocated_blocks (g: heap) : GTot (seq hp_addr)
-
-/// Coerce hp_addr to obj_addr when >= 8 is known
-val hp_to_obj (h: hp_addr{U64.v h >= U64.v mword}) : obj_addr
-
-/// All objects in objects zero_addr g have addresses >= zero_addr + mword
-val objects_addresses_ge_8 (g: heap) (x: hp_addr)
-  : Lemma (requires Seq.mem x (objects zero_addr g))
-          (ensures U64.v x >= U64.v zero_addr + U64.v mword)
+///
+/// The live heap enumeration is `GC.Spec.Fields.objects`, along with its
+/// `allocated_blocks` and `objects_addresses_ge_8`. This module used to export a
+/// parallel copy returning `seq hp_addr` instead of `seq obj_addr`; it had zero
+/// clients (314 references go to the Fields version, none came here) and was
+/// removed. Add enumeration lemmas to GC.Spec.Fields, not here -- a lemma proved
+/// against a second copy typechecks, verifies, and helps nobody.
 
 /// ---------------------------------------------------------------------------
 /// Color Mutation Correctness Lemmas

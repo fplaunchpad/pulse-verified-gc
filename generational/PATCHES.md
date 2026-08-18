@@ -1177,18 +1177,63 @@ allocation is bridge code.
 
 ### Plan to eliminate
 
-Calling `minor_alloc()` per allocation would mean a function call into extracted
-code on the hottest path in the interpreter, which is presumably why it was
-written this way. Options, none free:
+Simply calling `minor_alloc()` per allocation is not a serious option and should
+not be presented as one. It is not "a call instead of inline code" in the
+abstract: it is a call that cannot be inlined across the extraction boundary,
+forcing spills of exactly the registers the interpreter keeps hot (`pc`, `sp`,
+`accu`), at a site executed on a large fraction of bytecode instructions. The
+fast path exists for a reason.
 
-1. Prove the inline form equivalent to `minor_alloc()` — the honest fix, and it
-   is a small, self-contained obligation: same bounds condition, same resulting
-   address, same post-state for `bump_ref`.
-2. Have the extraction emit an inlinable form (`inline_for_extraction`) so the
-   fast path *is* the verified code.
-3. Measure first. If the call costs little against the interpreter's dispatch
-   overhead, just call `verified_allocate_minor()` unconditionally and delete the
-   fast path.
+**Preferred: make the extraction emit an inlinable allocator**
+(`inline_for_extraction` on `minor_alloc`, or a small `minor_alloc_fast`
+carrying just the bounds test / address / bump / header write), so the fast path
+*is* the verified code rather than a hand-written twin of it. This eliminates the
+patch instead of documenting it.
 
-Until one of those lands, this should be stated explicitly wherever the project
-describes what is verified.
+**Second: prove the existing inline form equivalent** to `minor_alloc()` — same
+bounds condition, same resulting address, same post-state for `bump_ref`, same
+header. A small, self-contained obligation, but it leaves two copies of the logic
+that must be kept in step by hand, which is how this kind of drift starts.
+
+### Related: flipping the verified allocator to end→start
+
+Worth sequencing before either option. The verified minor heap currently grows
+**upward** — `GC.Gen.MinorHeap.fsti` states it outright:
+
+```
+///   [obj1_hdr][obj1_fields...][obj2_hdr][obj2_fields...]...[free space...]
+///    ^                                                       ^
+///    0 (start)                                               bump_ptr
+```
+
+Native grows **downward** from `young_alloc_end`. That mismatch is the sole
+reason `vergc_sync_bump_from_young_ptr()` exists, and it is what produced the
+worst bug in the integration (a count published as its complement; see
+`ocaml-integration/NATIVE_INTEGRATION.md` §3). If the verified frontier descended
+from `size` instead, `bump_ref` would simply *be* `young_ptr - minor_base`: the
+translation disappears, and that bug class becomes unrepresentable rather than
+fixed-and-commented.
+
+It would also let one inlinable allocator serve both flavours, since the
+bytecode fast path and native's emitted sequence would finally have the same
+shape — which makes the preferred option above a one-time job rather than a
+per-flavour one.
+
+**Scope is smaller than it sounds.** The direction assumption is confined to the
+minor-heap module; the collector does not depend on it:
+
+| module | `bump` references |
+|---|---|
+| `spec/GC.Gen.MinorHeap.fst` | 319 |
+| `spec/GC.Gen.Cheney.fst` | 0 |
+| `spec/GC.Gen.CheneyPreservation.fst` | 0 |
+| `spec/GC.Gen.CheneyBFS.fst` | 0 |
+
+Cheney promotion is a root-driven BFS that classifies pointers by a window test,
+so it is genuinely direction-agnostic (the same property that made patch 14 a
+one-line fix rather than a rewrite). What inverts is `GC.Gen.MinorHeap`'s layout
+predicate and chain-validity walk, `minor_alloc`, `minor_heap_reset`, and the
+handful of consumers that assume offset ordering.
+
+Until one of these lands, the unverified status of the fast path should be
+stated explicitly wherever the project describes what is verified.

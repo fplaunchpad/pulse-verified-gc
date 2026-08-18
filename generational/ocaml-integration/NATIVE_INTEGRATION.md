@@ -147,6 +147,19 @@ Consequence worth remembering: in native, `verified_allocate_minor()` and
 `minor_alloc()` are never called. The verified minor *allocator* is
 bytecode-only; for native the nursery is purely a collection input.
 
+And this is permanent, not a gap to be closed. Native's allocation is emitted by
+`ocamlopt`'s amd64 backend for `Ialloc` — subtract from `%r15`, compare against
+`young_limit`, branch to `caml_call_gc`, write the header inline — and enters
+runtime code only on the trap. It cannot call *any* allocator of ours. Verifying
+it would mean verifying OCaml's code generator, a different project entirely.
+
+The useful thing to do instead is state its contract explicitly — `young_ptr`
+descends from `young_alloc_end`, traps when it falls below `young_limit`, writes
+a well-formed header — and make the collector's proofs depend on that as a
+*written* assumption. `well_formed_heap` should have been doing exactly that for
+infix blocks and was not (§2.7), which is how an unexamined assumption became
+silent corruption.
+
 ### 2.5 Trap redirection
 
 Every path that wants "empty the nursery" must reach our collector, never

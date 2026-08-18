@@ -1190,6 +1190,15 @@ carrying just the bounds test / address / bump / header write), so the fast path
 *is* the verified code rather than a hand-written twin of it. This eliminates the
 patch instead of documenting it.
 
+Note this buys **bytecode only**. Native's allocation is emitted by `ocamlopt`'s
+amd64 backend for `Ialloc` — subtract from `%r15`, compare against
+`young_limit`, branch to `caml_call_gc`, write the header inline — and enters
+runtime code only on the trap. It cannot call an inlinable allocator, or any
+allocator. Verifying it would mean verifying OCaml's code generator, which is a
+different project (cf. CakeML). Native allocation is therefore permanently
+outside this proof effort, and should be described that way rather than as
+"unverified" — the latter implies it is on a list of things to get to.
+
 **Second: prove the existing inline form equivalent** to `minor_alloc()` — same
 bounds condition, same resulting address, same post-state for `bump_ref`, same
 header. A small, self-contained obligation, but it leaves two copies of the logic
@@ -1219,21 +1228,54 @@ bytecode fast path and native's emitted sequence would finally have the same
 shape — which makes the preferred option above a one-time job rather than a
 per-flavour one.
 
-**Scope is smaller than it sounds.** The direction assumption is confined to the
-minor-heap module; the collector does not depend on it:
+**Scope: not confined to the minor-heap module.** A first pass counted `bump`
+references — 319 in `spec/GC.Gen.MinorHeap.fst`, 0 in `Cheney.fst`,
+`CheneyPreservation.fst` and `CheneyBFS.fst` — and concluded the collector was
+independent of the direction. That conclusion was wrong. Cheney does
+`open GC.Gen.MinorHeap`, so it uses those names *unqualified*; never spelling
+`bump` proves nothing.
 
-| module | `bump` references |
+Comparing MinorHeap's 54 exported names against the 26 Cheney spec files, Cheney
+references 26 of them, including:
+
+| name | references in Cheney |
 |---|---|
-| `spec/GC.Gen.MinorHeap.fst` | 319 |
-| `spec/GC.Gen.Cheney.fst` | 0 |
-| `spec/GC.Gen.CheneyPreservation.fst` | 0 |
-| `spec/GC.Gen.CheneyBFS.fst` | 0 |
+| `minor_state` | 515 |
+| `minor_objects` | 197 |
+| `minor_wf` | 114 |
 
-Cheney promotion is a root-driven BFS that classifies pointers by a window test,
-so it is genuinely direction-agnostic (the same property that made patch 14 a
-one-line fix rather than a rewrite). What inverts is `GC.Gen.MinorHeap`'s layout
-predicate and chain-validity walk, `minor_alloc`, `minor_heap_reset`, and the
-handful of consumers that assume offset ordering.
+and those *are* the layout:
+
+```fstar
+let minor_wf (ms: minor_state) : prop =
+  U64.v ms.bump % 8 == 0 /\
+  U64.v ms.bump <= minor_heap_size /\
+  minor_chain_valid    ms.data 0 (U64.v ms.bump) == true /\
+  minor_chain_no_infix ms.data 0 (U64.v ms.bump) == true
+```
+
+`minor_wf` is a chain walk **from 0 to bump**; `minor_objects` is the sequence
+that walk yields. Cheney's specification is written over both, plus
+`minor_objects_valid`, `minor_objects_body_bound`, `minor_objects_not_infix` and
+`infix_parent_in_minor_objects`. Flipping the direction changes what those
+predicates mean, so every lemma quantified over `minor_objects` or requiring
+`minor_wf` needs re-checking — even though none mentions `bump`.
+
+**But the shape of the work may still be small, and there is a cheap test.**
+`minor_wf` and `minor_objects` are `val`-declared in the `.fsti`, i.e. abstract
+to Cheney. If the flip preserves their *meaning* — "the live objects in the
+nursery, in walk order" — and changes only their definition (walk from `bump` up
+to `size` rather than 0 up to `bump`), Cheney's proofs may go through unchanged,
+because they were written against the abstraction rather than the
+representation. Establish that before committing to the work: change
+`minor_wf`, `minor_objects`, `minor_alloc` and `minor_heap_reset`, and see what
+breaks in `Cheney*`. If the abstraction holds, the blast radius really is one
+module; if Cheney's proofs reach through to the ordering, it is not.
+
+Cheney promotion being a root-driven BFS that classifies pointers by a window
+test (the property that made patch 14 a one-line fix) is what makes the
+abstraction plausible — but it is not the same claim as "the proofs do not
+depend on the layout", and the two should not be conflated again.
 
 Until one of these lands, the unverified status of the fast path should be
 stated explicitly wherever the project describes what is verified.

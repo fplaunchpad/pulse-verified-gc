@@ -79,7 +79,7 @@ index b62a579..881ab29 100644
  libasmrund.$(A): $(libasmrund_OBJECTS)
  	$(call MKLIB,$@, $^)
 diff --git a/runtime/caml/memory.h b/runtime/caml/memory.h
-index d9e58bc..63d3a09 100644
+index d9e58bc..a42edac 100644
 --- a/runtime/caml/memory.h
 +++ b/runtime/caml/memory.h
 @@ -217,6 +217,47 @@ extern void caml_alloc_small_dispatch (intnat wosize, int flags,
@@ -98,7 +98,7 @@ index d9e58bc..63d3a09 100644
 + * body: in bytecode young_ptr is parked at young_alloc_end and the real
 + * state lives in bump_ref, so stock's `young_ptr != young_alloc_end` guard
 + * reads "already empty" and silently does nothing.  See
-+ * COLDSTART_STDLIB_LOG.md. */
++ * NATIVE_INTEGRATION.md. */
 +void vergc_run_minor_collection(void);
 +
 +extern uint64_t *vergc_minor_bump_ref;
@@ -126,7 +126,7 @@ index d9e58bc..63d3a09 100644
 + * vergc minor buffer would create two disjoint "minor heaps" active in
 + * the same process (the real one native's own instructions use, and this
 + * one), which Is_young() and friends have no way to reconcile. See
-+ * NATIVE_MINOR_GC_LOG.md, "Alloc_small_aux cross-contamination" entry. */
++ * NATIVE_INTEGRATION.md, "Alloc_small_aux cross-contamination" entry. */
  #define Alloc_small_aux(result, wosize, tag, profinfo, track) do {     \
    CAMLassert ((wosize) >= 1);                                          \
    CAMLassert ((tag_t) (tag) < 256);                                    \
@@ -155,7 +155,7 @@ index d9e58bc..63d3a09 100644
 +  if (!vergc_fast_alloc) {                                             \
 +    Setup_for_gc;                                                      \
 +    /* Scratch slot to survive Setup_for_gc/Restore_after_gc (real work \
-+     * only inside interp.c, see NATIVE_MINOR_GC_LOG.md). Uses          \
++     * only inside interp.c, see NATIVE_INTEGRATION.md). Uses          \
 +     * extra_params[0] -- a 64-word array reserved in STOCK OCaml's own \
 +     * domain_state.tbl for exactly this kind of extension, already     \
 +     * unused anywhere in the tree. Deliberately NOT a new named field: \
@@ -379,7 +379,7 @@ index 66d1c50..e37a2b6 100644
  }
  
 diff --git a/runtime/minor_gc.c b/runtime/minor_gc.c
-index 18cfe3e..5a70b3a 100644
+index 18cfe3e..c0c806f 100644
 --- a/runtime/minor_gc.c
 +++ b/runtime/minor_gc.c
 @@ -352,6 +352,30 @@ void caml_oldify_mopup (void)
@@ -393,7 +393,7 @@ index 18cfe3e..5a70b3a 100644
 +   * gc_ctrl.c (Gc.full_major, Gc.compact, Gc.major, Gc.set with a
 +   * changed allocation policy) and compact.c. Redirecting each call
 +   * site individually is a whack-a-mole (memprof.c's direct call was
-+   * missed once already -- see NATIVE_MINOR_GC_LOG.md, Phase 5).
++   * missed once already -- see NATIVE_INTEGRATION.md).
 +   * Redirecting here instead covers all current and future callers by
 +   * construction: none of them can reach stock's incompatible
 +   * semispace/in-place-forwarding body below.
@@ -403,7 +403,7 @@ index 18cfe3e..5a70b3a 100644
 +   * young_alloc_end` guard reads "already empty", because bytecode parks
 +   * young_ptr at young_alloc_end and keeps the real state in bump_ref. So
 +   * every bytecode caller asking for a drained nursery silently got
-+   * nothing. See COLDSTART_STDLIB_LOG.md. */
++   * nothing. See NATIVE_INTEGRATION.md. */
 +  vergc_run_minor_collection();
 +}
 +
@@ -433,7 +433,7 @@ index 18cfe3e..5a70b3a 100644
 +     * etc.) end up here. Redirecting only caml_garbage_collection left
 +     * this second path running stock's caml_empty_minor_heap() against
 +     * our buffer, desyncing young_ptr from our own bump counter -- see
-+     * NATIVE_MINOR_GC_LOG.md, Phase 4. */
++     * NATIVE_INTEGRATION.md. */
 +    vergc_native_run_minor_collection();
 +#else
      caml_gc_dispatch ();
@@ -456,7 +456,7 @@ index 18cfe3e..5a70b3a 100644
 +     unrecorded major->minor pointer -- no ref_table entry, so nothing
 +     promoted the target and nothing rewrote the field, and the next
 +     minor_heap_reset() zeroed what they pointed at.
-+     See COLDSTART_STDLIB_LOG.md. */
++     See NATIVE_INTEGRATION.md. */
 +  vergc_run_minor_collection();
  }
  
@@ -472,7 +472,7 @@ index 18cfe3e..5a70b3a 100644
  }
  
 diff --git a/runtime/signals_nat.c b/runtime/signals_nat.c
-index 1dd8289..ca908df 100644
+index 1dd8289..64e1069 100644
 --- a/runtime/signals_nat.c
 +++ b/runtime/signals_nat.c
 @@ -93,6 +93,10 @@ void caml_garbage_collection(void)
@@ -481,7 +481,7 @@ index 1dd8289..ca908df 100644
  
 +    /* caml_alloc_small_dispatch itself is redirected for native, inside
 +     * its own retry loop (runtime/minor_gc.c) -- see
-+     * NATIVE_MINOR_GC_LOG.md, Phase 4, for why the redirect belongs
++     * NATIVE_INTEGRATION.md, for why the redirect belongs
 +     * there and not here (this call site isn't the only caller). */
      caml_alloc_small_dispatch(allocsz, CAML_DO_TRACK | CAML_FROM_CAML,
                                nallocs, alloc_len);

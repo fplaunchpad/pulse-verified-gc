@@ -938,7 +938,7 @@ path. The **major** mark phase never got the same treatment.
 
 ### Impact
 
-This is what broke `make coldstart`; see `ocaml-integration/COLDSTART_STDLIB_LOG.md`.
+This is what broke `make coldstart`; see `ocaml-integration/NATIVE_INTEGRATION.md`.
 `camlinternalFormat.ml` is dense with mutually recursive functions, so the
 compiler's heap carries hundreds of live infix pointers (219 measured at the
 failing collection). One full GC freed 53 still-referenced objects; the
@@ -1029,7 +1029,7 @@ Fix the verified source, in `mark-and-sweep/impl/GC.Impl.MarkBounded.fst`:
   a precondition and nothing checks it where the bridge calls into the
   extracted code, so a hypothesis that is false at runtime degraded into silent
   heap corruption instead of a failed proof or an assertion. That is the same
-  shape as the bridge bugs in `ocaml-integration/COLDSTART_STDLIB_LOG.md`, one
+  shape as the bridge bugs in `ocaml-integration/NATIVE_INTEGRATION.md`, one
   level up: an assumption satisfied on paper and by nothing in particular at
   run time.
 

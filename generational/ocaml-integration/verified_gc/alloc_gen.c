@@ -218,7 +218,7 @@ static void ensure_heap(void) {
      *
      * Done here rather than in vergc_native_minor_startup_init() so BOTH
      * flavors get it: bytecode reaches this via the lazy first allocation,
-     * native via the eager startup call.  See COLDSTART_STDLIB_LOG.md. */
+     * native via the eager startup call.  See NATIVE_INTEGRATION.md. */
     Caml_state->_young_trigger = Caml_state->_young_alloc_start;
     caml_memprof_renew_minor_sample();
 
@@ -273,8 +273,8 @@ void vergc_native_minor_startup_init(void) {
      * only, in the wrong order -- caml_update_young_limit() before
      * caml_memprof_renew_minor_sample(), so it derived young_limit from a
      * stale memprof trigger and tripped the debug runtime's assertion.
-     * Bytecode needed the same treatment anyway; see COLDSTART_STDLIB_LOG.md
-     * and NATIVE_MINOR_GC_LOG.md. */
+     * Bytecode needed the same treatment anyway; see NATIVE_INTEGRATION.md
+     * and NATIVE_INTEGRATION.md. */
     ensure_heap();
 
     if (caml_page_table_add(In_young, minor_base,
@@ -513,7 +513,7 @@ static void vergc_sync_bump_from_young_ptr(void) {
      * so on a trap young_ptr can legitimately sit below young_alloc_start
      * until caml_alloc_small_dispatch's "undo" step runs.  Clamp rather than
      * let bump exceed the heap size (the old complement form underflowed to a
-     * huge uint64 here).  See NATIVE_MINOR_GC_LOG.md, Phase 2. */
+     * huge uint64 here).  See NATIVE_INTEGRATION.md. */
     if (used_bytes > minor_heap_size_u64) used_bytes = minor_heap_size_u64;
     *gc_gen_heap.minor.bump_ref = used_bytes;
 }
@@ -555,7 +555,7 @@ static void do_minor_gc(void) {
 /* Native minor-collection trigger. Called from ONE place:
  * caml_alloc_small_dispatch's retry loop (runtime/minor_gc.c), in place
  * of stock's caml_gc_dispatch() -- NOT called directly by us elsewhere.
- * See NATIVE_MINOR_GC_LOG.md, Phase 4.
+ * See NATIVE_INTEGRATION.md.
  *
  * Why here and not in caml_garbage_collection (signals_nat.c): that
  * function is only reached via the COMPILED-CODE trap (caml_call_gc).
@@ -609,7 +609,7 @@ void vergc_native_run_minor_collection(void) {
  * nothing rewrote them, and minor_heap_reset() then zeroed what they pointed
  * at.  Array.make/init of any size > Max_young_wosize with a boxed initial
  * value produced a whole array of dangling pointers.  See
- * COLDSTART_STDLIB_LOG.md. */
+ * NATIVE_INTEGRATION.md. */
 void vergc_run_minor_collection(void) {
     ensure_heap();
 #ifdef NATIVE_CODE

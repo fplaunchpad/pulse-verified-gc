@@ -1,6 +1,6 @@
 /* Standalone spike: proves the young_ptr translation/exactness invariant
  * needed for native minor-heap nursery-aliasing, WITHOUT touching the real
- * OCaml runtime or the real verified GC. See NATIVE_MINOR_GC_LOG.md.
+ * OCaml runtime or the real verified GC. See NATIVE_INTEGRATION.md.
  *
  * The real trap chain (native, top-down, decided by frozen machine code):
  *   young_ptr -= n; if (young_ptr < young_limit) trap;
@@ -74,7 +74,7 @@ static void trap_handler(uint64_t requested_bytes) {
      *    triggered the trap already subtracted its size before the
      *    bounds check ran), which would make the translation below
      *    underflow. Found by this spike failing its own assertion on
-     *    first run -- see NATIVE_MINOR_GC_LOG.md. */
+     *    first run -- see NATIVE_INTEGRATION.md. */
     young_ptr += requested_bytes;
 
     /* 1. Translate in: top-down used-bytes -> bottom-up bump_ref. */

@@ -3493,89 +3493,32 @@ let coalesce_objects_subset g y =
 val coalesce_aux_decreasing
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (all_objs: seq obj_addr) (x: obj_addr)
   : Lemma
     (requires
-      walk_pre g0 g start objs (objects zero_addr g0) first_blue run_words /\
+      walk_pre g0 g start objs all_objs first_blue run_words /\
+      (forall (addr: hp_addr). U64.v addr >= U64.v start ==>
+        read_word g addr == read_word g0 addr) /\
       (fp = 0UL \/
        (is_pointer_field fp /\
         U64.v fp < U64.v start /\
-        (run_words > 0 ==> U64.v fp < U64.v first_blue) /\
-        Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
-        is_blue (fp <: obj_addr) g))  /\
-      (Seq.length objs = 0 ==>
-        (forall (x: obj_addr).
-          Seq.mem x (objects zero_addr g) ==> U64.v x < U64.v start)) /\
-      (forall (x: obj_addr).
-        Seq.mem x (objects zero_addr g) /\ is_blue x g /\
-        U64.v x < U64.v start ==>
-        (let v = read_word g x in
-         v = 0UL \/
-         (is_pointer_field v /\ U64.v v < U64.v x /\
-          Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-          is_blue (v <: obj_addr) g))))
-    (ensures
-      blue_chain_decreasing (fst (coalesce_aux g0 g objs first_blue run_words fp)))
+        (run_words > 0 ==> U64.v fp < U64.v first_blue))) /\
+      (let sync : hp_addr =
+         if run_words > 0 then hd_address (first_blue <: obj_addr) else start in
+       Seq.mem x (objects sync (coalesce_heap g0 g objs first_blue run_words fp))))
+    (ensures (
+      let g' = coalesce_heap g0 g objs first_blue run_words fp in
+      is_blue x g' ==>
+      (let v = read_word g' x in
+       v = 0UL \/
+       (is_pointer_field v /\ U64.v v < U64.v x /\
+        Seq.mem (v <: obj_addr) (objects zero_addr g') /\
+        is_blue (v <: obj_addr) g'))))
     (decreases Seq.length objs)
 
-#push-options "--z3rlimit 200 --fuel 1 --ifuel 1"
-let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp =
-  if Seq.length objs = 0 then begin
-    assert (Seq.equal objs Seq.empty);
-    Seq.lemma_eq_elim objs Seq.empty;
-    coalesce_aux_empty g0 g first_blue run_words fp;
-    if run_words = 0 then begin
-      let aux (x: obj_addr)
-        : Lemma
-          (requires Seq.mem x (objects zero_addr g) /\ is_blue x g)
-          (ensures
-            (let v = read_word g x in
-             v = 0UL \/
-             (is_pointer_field v /\ U64.v v < U64.v x /\
-              Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-              is_blue (v <: obj_addr) g)))
-        = assert (U64.v x < U64.v start)
-      in
-      FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
-    end
-    else if run_words = 1 then admit ()
-    else begin
-      hd_address_spec (first_blue <: obj_addr);
-      run_words_bound first_blue run_words start;
-      flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
-      let g' = fst (flush_blue g first_blue run_words fp) in
-      let aux (x: obj_addr)
-        : Lemma
-          (requires Seq.mem x (objects zero_addr g') /\ is_blue x g')
-          (ensures
-            (let v = read_word g' x in
-             v = 0UL \/
-             (is_pointer_field v /\ U64.v v < U64.v x /\
-              Seq.mem (v <: obj_addr) (objects zero_addr g') /\
-              is_blue (v <: obj_addr) g')))
-        = if x = (first_blue <: obj_addr) then begin
-            assert (read_word g' x == fp);
-            if fp = 0UL then ()
-            else begin
-              assert (U64.v fp < U64.v first_blue);
-              assert (is_pointer_field fp);
-              hd_address_spec (fp <: obj_addr);
-              assert (U64.v fp % U64.v mword == 0);
-              assert (U64.v fp + U64.v mword <= U64.v first_blue);
-              flush_blue_preserves_outside g first_blue run_words fp (hd_address (fp <: obj_addr));
-              flush_blue_preserves_length g first_blue run_words fp;
-              is_blue_iff (fp <: obj_addr) g;
-              is_blue_iff (fp <: obj_addr) g';
-              color_of_object_spec (fp <: obj_addr) g;
-              color_of_object_spec (fp <: obj_addr) g';
-              assert (is_blue (fp <: obj_addr) g');
-              admit ()
-            end
-          end
-          else admit ()
-      in
-      FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
-    end
-  end
+#push-options "--z3rlimit 400 --fuel 1 --ifuel 1 --split_queries always"
+let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs x =
+  if Seq.length objs = 0 then admit ()
   else begin
     let obj = Seq.head objs in
     if is_blue obj g0 then admit ()

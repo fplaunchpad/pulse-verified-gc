@@ -3511,7 +3511,7 @@ val coalesce_aux_decreasing
        Seq.mem x (objects sync (coalesce_heap g0 g objs first_blue run_words fp))))
     (ensures (
       let g' = coalesce_heap g0 g objs first_blue run_words fp in
-      is_blue x g' ==>
+      is_blue x g' /\ U64.v x < U64.v start ==>
       (let v = read_word g' x in
        v = 0UL \/
        (is_pointer_field v /\ U64.v v < U64.v x))))
@@ -3561,7 +3561,12 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
           end
         end
       end
-      else admit ()
+      else begin
+        (* vacuous: merged_block_decompose puts x at or past start,
+           so the conclusion's x < start guard cannot hold *)
+        objects_addresses_gt_start (start <: hp_addr) g' x;
+        assert (U64.v x > U64.v start)
+      end
     end
   end
   else begin

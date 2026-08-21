@@ -145,7 +145,11 @@ val sweep_establishes_complete
 
 val coalesce_establishes_decreasing (h: heap)
   : Lemma
-    (requires Coalesce.post_sweep_strong h)
+    (requires
+      Coalesce.post_sweep_strong h /\
+      (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr h) ==>
+        U64.v (wosize_of_object y h) >= 1))
     (ensures blue_chain_decreasing (fst (Coalesce.coalesce h)))
 
 val coalesce_preserves_complete (h: heap) (fp: U64.t)
@@ -245,6 +249,29 @@ let sweep_white_blue_frame (h: heap) (obj: obj_addr) (fp: U64.t) (b: obj_addr)
     wosize_of_object_spec b h;
     SpecSweep.sweep_object_preserves_other_body_read h obj fp b b
 #pop-options
+
+val chain_decreasing_gives_all
+  (g: heap) (fp: U64.t)
+  : Lemma
+    (requires
+      free_list_complete g fp /\
+      (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g) /\ is_blue y g /\
+        (fp <> 0UL ==> chain_reachable g (fp <: obj_addr) y) ==>
+        (let v = read_word g y in
+         v = 0UL \/ (is_pointer_field v /\ U64.v v < U64.v y))))
+    (ensures blue_chain_decreasing g)
+
+let chain_decreasing_gives_all g fp =
+  let aux (y: obj_addr)
+    : Lemma
+      (requires Seq.mem y (objects zero_addr g) /\ is_blue y g)
+      (ensures
+        (let v = read_word g y in
+         v = 0UL \/ (is_pointer_field v /\ U64.v v < U64.v y)))
+    = ()
+  in
+  FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
 
 #push-options "--z3rlimit 800 --fuel 2 --ifuel 1 --split_queries always"
 let rec sweep_establishes_complete h start objs fp =
@@ -466,41 +493,22 @@ let rec sweep_establishes_complete h start objs fp =
   end
 #pop-options
 
-val coalesce_aux_decreasing
-  (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
-  (first_blue: U64.t) (run_words: nat) (fp: U64.t)
-  : Lemma
-    (requires
-      Coalesce.walk_pre g0 g start objs (objects zero_addr g0) first_blue run_words /\
-      (fp = 0UL \/
-       (U64.v fp < U64.v start /\
-        (run_words > 0 ==> U64.v fp < U64.v first_blue))) /\
-      (Seq.length objs = 0 ==>
-        (forall (x: obj_addr).
-          Seq.mem x (objects zero_addr g) ==> U64.v x < U64.v start)) /\
-      (forall (x: obj_addr).
-        Seq.mem x (objects zero_addr g) /\ is_blue x g /\
-        U64.v x < U64.v start ==>
-        (let v = read_word g x in
-         v = 0UL \/
-         (is_pointer_field v /\ U64.v v < U64.v x /\
-          Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-          is_blue (v <: obj_addr) g))))
-    (ensures
-      blue_chain_decreasing (fst (Coalesce.coalesce_aux g0 g objs first_blue run_words fp)))
-    (decreases Seq.length objs)
-
-
-
 #push-options "--z3rlimit 200"
 let coalesce_establishes_decreasing h =
   let aux (x: obj_addr)
-    : Lemma (requires Seq.mem x (objects zero_addr h))
-            (ensures ~(U64.v x < U64.v zero_addr))
-    = objects_addresses_gt_start zero_addr h x
+    : Lemma
+      (requires Seq.mem x (objects zero_addr (fst (Coalesce.coalesce h))))
+      (ensures
+        (let g' = fst (Coalesce.coalesce h) in
+         is_blue x g' ==>
+         (let v = read_word g' x in
+          v = 0UL \/
+          (is_pointer_field v /\ U64.v v < U64.v x))))
+    = Coalesce.coalesce_heap_unfold h h (objects zero_addr h) 0UL 0 0UL;
+      Coalesce.coalesce_aux_decreasing h h zero_addr (objects zero_addr h)
+        0UL 0 0UL (objects zero_addr h) x
   in
-  FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
-  coalesce_aux_decreasing h h zero_addr (objects zero_addr h) 0UL 0 0UL
+  FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
 #pop-options
 
 let coalesce_preserves_complete h fp = admit ()

@@ -3487,6 +3487,17 @@ let coalesce_objects_subset g y =
   coalesce_aux_objects_subset g g zero_addr (objects zero_addr g) 0UL 0 0UL (objects zero_addr g) y
 #pop-options
 
+private let blue_preserved_by_header (g g': heap) (y: obj_addr)
+  : Lemma
+    (requires
+      read_word g' (hd_address y) == read_word g (hd_address y) /\
+      is_blue y g)
+    (ensures is_blue y g')
+  = is_blue_iff y g;
+    is_blue_iff y g';
+    color_of_object_spec y g;
+    color_of_object_spec y g'
+    
 val coalesce_aux_decreasing
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3500,6 +3511,12 @@ val coalesce_aux_decreasing
         Seq.mem y (objects zero_addr g0) ==>
         U64.v (wosize_of_object y g0) >= 1) /\
       (run_words > 0 ==> run_words >= 2) /\
+      (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g) /\ is_blue y g /\
+        U64.v y < U64.v start ==>
+        (let v = read_word g y in
+         v = 0UL \/
+         (is_pointer_field v /\ U64.v v < U64.v y))) /\
       (fp = 0UL \/
        (is_pointer_field fp /\
         U64.v fp < U64.v start /\
@@ -3511,24 +3528,15 @@ val coalesce_aux_decreasing
        Seq.mem x (objects sync (coalesce_heap g0 g objs first_blue run_words fp))))
     (ensures (
       let g' = coalesce_heap g0 g objs first_blue run_words fp in
-      is_blue x g' /\ U64.v x < U64.v start ==>
+      is_blue x g' ==>
       (let v = read_word g' x in
        v = 0UL \/
        (is_pointer_field v /\ U64.v v < U64.v x))))
     (decreases Seq.length objs)
 
-private let blue_preserved_by_header (g g': heap) (y: obj_addr)
-  : Lemma
-    (requires
-      read_word g' (hd_address y) == read_word g (hd_address y) /\
-      is_blue y g)
-    (ensures is_blue y g')
-  = is_blue_iff y g;
-    is_blue_iff y g';
-    color_of_object_spec y g;
-    color_of_object_spec y g'
 
-#push-options "--z3rlimit 400 --fuel 1 --ifuel 1 --split_queries always"
+
+#push-options "--z3rlimit 800 --fuel 1 --ifuel 1 --split_queries always"
 let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs x =
   if Seq.length objs = 0 then begin
     assert (Seq.equal objs Seq.empty);
@@ -3562,8 +3570,7 @@ let rec coalesce_aux_decreasing g0 g start objs first_blue run_words fp all_objs
         end
       end
       else begin
-        (* vacuous: merged_block_decompose puts x at or past start,
-           so the conclusion's x < start guard cannot hold *)
+        assert (U64.v start < heap_size /\ Seq.mem x (objects (start <: hp_addr) g'));
         objects_addresses_gt_start (start <: hp_addr) g' x;
         assert (U64.v x > U64.v start)
       end

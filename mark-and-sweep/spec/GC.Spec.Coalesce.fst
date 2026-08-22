@@ -3615,6 +3615,12 @@ val coalesce_aux_chain_dec
         U64.v fp < U64.v start /\
         (run_words > 0 ==> U64.v fp < U64.v first_blue) /\
         Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
+        (forall (b: obj_addr).
+          Seq.mem b (objects zero_addr g) /\ is_blue b g /\
+          chain_reachable g (fp <: obj_addr) b ==>
+          U64.v b < U64.v (if run_words > 0
+                           then hd_address (first_blue <: obj_addr)
+                           else start)) /\
         (forall (y: obj_addr).
           Seq.mem y (objects zero_addr g) /\ is_blue y g /\
           chain_reachable g (fp <: obj_addr) y ==>
@@ -3622,7 +3628,7 @@ val coalesce_aux_chain_dec
            v = 0UL \/
            (is_pointer_field v /\ U64.v v < U64.v y))))))
     (ensures (
-      let (g', fp') = Coalesce.coalesce_aux g0 g objs first_blue run_words fp in
+      let (g', fp') = coalesce_aux g0 g objs first_blue run_words fp in
       fp' = 0UL \/
       (U64.v fp' >= U64.v mword /\
        U64.v fp' < heap_size /\
@@ -3636,7 +3642,7 @@ val coalesce_aux_chain_dec
           (is_pointer_field v /\ U64.v v < U64.v y))))))
     (decreases Seq.length objs)
 
-(*let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs =
+let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs =
   if Seq.length objs = 0 then admit ()
   else begin
     objects_nonempty_next start g0;
@@ -3742,4 +3748,3 @@ val coalesce_aux_chain_dec
       else admit ()
     end
   end
-  *)

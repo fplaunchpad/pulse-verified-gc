@@ -160,3 +160,58 @@ let rec chain_reach_frame_shrink g g' x y r =
         #(fun _ -> True)
         ()
         (fun r0 -> aux r0)
+
+val chain_reach_head_cases (g: heap)
+  (x: obj_addr{Seq.mem x (objects zero_addr g)})
+  (y: obj_addr{Seq.mem y (objects zero_addr g)})
+  (r: chain_reach g x y)
+  : Lemma
+    (ensures
+      x == y \/
+      (exists (z: obj_addr).
+        Seq.mem z (objects zero_addr g) /\
+        fl_edge g x z /\
+        chain_reachable g z y))
+    (decreases r)
+
+ 
+let rec chain_reach_head_cases g x y r =
+  match r with
+  | ChainRefl _ -> ()
+  | ChainStep _ w z prev ->
+      chain_reach_head_cases g x w prev;
+      if x = w then begin
+        let r0 : chain_reach g z z = ChainRefl z in
+        FStar.Classical.exists_intro (fun (_: chain_reach g z z) -> True) r0
+      end
+            else begin
+        let aux (s: obj_addr)
+          : Lemma
+            (requires
+              Seq.mem s (objects zero_addr g) /\
+              fl_edge g x s /\
+              chain_reachable g s w)
+            (ensures
+              exists (s': obj_addr).
+                Seq.mem s' (objects zero_addr g) /\
+                fl_edge g x s' /\
+                chain_reachable g s' z)
+          = let aux2 (r0: chain_reach g s w)
+              : Lemma (chain_reachable g s z)
+              = let r1 : chain_reach g s z = ChainStep s w z r0 in
+                FStar.Classical.exists_intro (fun (_: chain_reach g s z) -> True) r1
+            in
+            FStar.Classical.exists_elim
+              (chain_reachable g s z)
+              #(chain_reach g s w)
+              #(fun _ -> True)
+              ()
+              (fun r0 -> aux2 r0);
+            FStar.Classical.exists_intro
+              (fun (s': obj_addr) ->
+                Seq.mem s' (objects zero_addr g) /\
+                fl_edge g x s' /\
+                chain_reachable g s' z) s
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+      end

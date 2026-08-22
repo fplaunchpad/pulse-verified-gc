@@ -75,35 +75,6 @@ val gc_free_list_liveness (h_init: heap) (st: seq obj_addr) (fp: U64.t)
               let (h_final, fp_final) = Coalesce.coalesce h_sweep in
               free_list_liveness h_final fp_final))
 
-let walk_next (h: heap) (start: hp_addr) : GTot nat =
-  U64.v start + (U64.v (getWosize (read_word h start)) + 1) * U64.v mword
-
-let walk_step_done (h: heap) (start: hp_addr) (objs: seq obj_addr)
-  : Lemma
-    (requires
-      objs == objects start h /\
-      Seq.length objs > 0 /\
-      walk_next h start >= heap_size)
-    (ensures Seq.tail objs == Seq.empty)
-  = objects_nonempty_next start h;
-    f_address_spec start;
-    Seq.lemma_eq_elim (Seq.tail objs) Seq.empty
-
-let walk_step_more (h: heap) (start: hp_addr) (objs: seq obj_addr)
-  : Lemma
-    (requires
-      objs == objects start h /\
-      Seq.length objs > 0 /\
-      walk_next h start < heap_size)
-    (ensures
-      (let next : hp_addr = U64.uint_to_t (walk_next h start) in
-       Seq.tail objs == objects next h /\
-       U64.v next > U64.v start))
-  = objects_nonempty_next start h;
-    f_address_spec start;
-    let next : hp_addr = U64.uint_to_t (walk_next h start) in
-    Seq.lemma_tl (f_address start) (objects next h)
-
 #push-options "--z3rlimit 200 --fuel 2 --ifuel 1"
 let sweep_white_facts (h: heap) (obj: obj_addr) (fp: U64.t)
   : Lemma

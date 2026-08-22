@@ -414,6 +414,34 @@ let coalesce_establishes_decreasing h =
 
 let coalesce_preserves_complete h fp = admit ()
 
+val sweep_aux_preserves_wosize_member
+  (g: heap) (objs: seq obj_addr) (fp: U64.t) (x: obj_addr)
+  : Lemma
+    (requires
+      well_formed_heap g /\
+      (forall (o: obj_addr). Seq.mem o objs ==> Seq.mem o (objects zero_addr g)) /\
+      SpecSweep.fp_in_heap fp g /\
+      Seq.mem x (objects zero_addr g))
+    (ensures
+      wosize_of_object x (fst (SpecSweep.sweep_aux g objs fp)) ==
+      wosize_of_object x g)
+    (decreases Seq.length objs)
+
+let rec sweep_aux_preserves_wosize_member g objs fp x =
+  if Seq.length objs = 0 then ()
+  else begin
+    let obj = Seq.head objs in
+    let rest = Seq.tail objs in
+    let (g1, fp1) = SpecSweep.sweep_object g obj fp in
+    if x = obj then
+      SpecSweep.sweep_object_preserves_self_wosize g obj fp
+    else
+    SpecSweep.sweep_object_preserves_other_header g obj fp x;
+    SpecSweep.sweep_object_preserves_wf g obj fp;
+    SpecSweep.sweep_object_preserves_objects g obj fp;
+    sweep_aux_preserves_wosize_member g1 rest fp1 x
+  end
+
 val sweep_preserves_wosize_all (g: heap) (fp: U64.t) (x: obj_addr)
   : Lemma
     (requires
@@ -423,7 +451,8 @@ val sweep_preserves_wosize_all (g: heap) (fp: U64.t) (x: obj_addr)
     (ensures
       wosize_of_object x (fst (SpecSweep.sweep g fp)) == wosize_of_object x g)
 
-let sweep_preserves_wosize_all g fp x = admit ()
+let sweep_preserves_wosize_all g fp x =
+  sweep_aux_preserves_wosize_member g (objects zero_addr g) fp x
 
 let gc_free_list_liveness h_init st fp =
   let h_mark = Mark.mark h_init st in

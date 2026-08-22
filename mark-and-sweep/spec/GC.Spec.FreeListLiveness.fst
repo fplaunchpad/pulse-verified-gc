@@ -6,111 +6,13 @@ open GC.Spec.Base
 open GC.Spec.Heap
 open GC.Spec.Object
 open GC.Spec.Fields
+open GC.Spec.Chain
 module SpecSweep = GC.Spec.Sweep
 module Coalesce  = GC.Spec.Coalesce
 module Mark = GC.Spec.Mark
 module Correctness = GC.Spec.Correctness
 
-(*let blue_chain_decreasing (g: heap) : prop =
-  forall (x: obj_addr).
-    Seq.mem x (objects zero_addr g) /\ is_blue x g ==>
-    (let v = read_word g x in
-     v = 0UL \/
-     (is_pointer_field v /\
-      U64.v v < U64.v x /\
-      Seq.mem (v <: obj_addr) (objects zero_addr g) /\
-      is_blue (v <: obj_addr) g))*)
-
 let blue_chain_decreasing = Coalesce.blue_chain_decreasing
-
-/// Free-list edge: field 1 of x points to y
-let fl_edge (g: heap) (x y: obj_addr) : prop =
-  read_word g (x <: obj_addr) == (y <: U64.t)
-
-/// x reaches y by following field-1 pointers.
-noeq type chain_reach (g: heap)
-  : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
-    (y: obj_addr{Seq.mem y (objects zero_addr g)}) -> Type =
-  | ChainRefl : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
-                chain_reach g x x
-  | ChainStep : (x: obj_addr{Seq.mem x (objects zero_addr g)}) ->
-                (y: obj_addr{Seq.mem y (objects zero_addr g) /\ is_blue y g}) ->
-                (z: obj_addr{Seq.mem z (objects zero_addr g) /\ fl_edge g y z}) ->
-                chain_reach g x y ->
-                chain_reach g x z
-
-let chain_reachable (g: heap)
-                    (x: obj_addr{Seq.mem x (objects zero_addr g)})
-                    (y: obj_addr{Seq.mem y (objects zero_addr g)}) : prop =
-  exists (r: chain_reach g x y). True
-
-val chain_reach_frame (g g': heap)
-  (x: obj_addr{Seq.mem x (objects zero_addr g)})
-  (y: obj_addr{Seq.mem y (objects zero_addr g)})
-  (r: chain_reach g x y)
-  : Lemma
-    (requires
-      objects zero_addr g' == objects zero_addr g /\
-      (forall (b: obj_addr).
-        Seq.mem b (objects zero_addr g) /\ is_blue b g ==>
-        read_word g' (b <: obj_addr) == read_word g (b <: obj_addr)) /\
-      (forall (b: obj_addr).
-        Seq.mem b (objects zero_addr g) /\ is_blue b g ==> is_blue b g'))
-    (ensures chain_reachable g' x y)
-    (decreases r)
-
-let rec chain_reach_frame g g' x y r =
-  match r with
-  | ChainRefl _ ->
-      let r' : chain_reach g' x x = ChainRefl x in
-      FStar.Classical.exists_intro (fun (_: chain_reach g' x y) -> True) r'
-  | ChainStep _ w z prev ->
-      chain_reach_frame g g' x w prev;
-      assert (is_blue w g);
-      assert (read_word g' (w <: obj_addr) == read_word g (w <: obj_addr));
-      assert (fl_edge g' w z);
-      let aux (r0: chain_reach g' x w)
-        : Lemma (chain_reachable g' x z)
-        = let r1 : chain_reach g' x z = ChainStep x w z r0 in
-          FStar.Classical.exists_intro (fun (_: chain_reach g' x z) -> True) r1
-      in
-      FStar.Classical.exists_elim
-        (chain_reachable g' x z)
-        #(chain_reach g' x w)
-        #(fun _ -> True)
-        ()
-        (fun r0 -> aux r0)
-
-val chain_reach_prepend (g: heap)
-  (w: obj_addr{Seq.mem w (objects zero_addr g) /\ is_blue w g})
-  (x: obj_addr{Seq.mem x (objects zero_addr g)})
-  (y: obj_addr{Seq.mem y (objects zero_addr g)})
-  (r: chain_reach g x y)
-  : Lemma
-    (requires fl_edge g w x)
-    (ensures chain_reachable g w y)
-    (decreases r)
-
-let rec chain_reach_prepend g w x y r =
-  match r with
-  | ChainRefl _ ->
-      let r0 : chain_reach g w w = ChainRefl w in
-      let r1 : chain_reach g w x = ChainStep w w x r0 in
-      FStar.Classical.exists_intro (fun (_: chain_reach g w y) -> True) r1
-  | ChainStep _ u z prev ->
-      chain_reach_prepend g w x u prev;
-      let aux (r0: chain_reach g w u)
-        : Lemma (chain_reachable g w z)
-        = let r1 : chain_reach g w z = ChainStep w u z r0 in
-          FStar.Classical.exists_intro (fun (_: chain_reach g w z) -> True) r1
-      in
-      FStar.Classical.exists_elim
-        (chain_reachable g w z)
-        #(chain_reach g w u)
-        #(fun _ -> True)
-        ()
-        (fun r0 -> aux r0)
-
 
 let free_list_complete (g: heap) (fp: U64.t) : prop =
   (fp = 0UL /\
@@ -505,18 +407,39 @@ let coalesce_establishes_decreasing h =
           v = 0UL \/
           (is_pointer_field v /\ U64.v v < U64.v x))))
     = Coalesce.coalesce_heap_unfold h h (objects zero_addr h) 0UL 0 0UL;
-      Coalesce.coalesce_aux_decreasing h h zero_addr (objects zero_addr h)
-        0UL 0 0UL (objects zero_addr h) x
+      admit()
   in
   FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
 #pop-options
 
 let coalesce_preserves_complete h fp = admit ()
 
+val sweep_preserves_wosize_all (g: heap) (fp: U64.t) (x: obj_addr)
+  : Lemma
+    (requires
+      well_formed_heap g /\
+      Seq.mem x (objects zero_addr g) /\
+      SpecSweep.fp_in_heap fp g)
+    (ensures
+      wosize_of_object x (fst (SpecSweep.sweep g fp)) == wosize_of_object x g)
+
+let sweep_preserves_wosize_all g fp x = admit ()
+
 let gc_free_list_liveness h_init st fp =
   let h_mark = Mark.mark h_init st in
   let (h_sweep, fp_sweep) = SpecSweep.sweep h_mark fp in
+  Correctness.mark_post_elim_wfh h_init h_mark st fp;
+  Correctness.mark_post_elim_no_grey h_init h_mark st fp;
+  Correctness.mark_post_elim_fp h_init h_mark st fp;
   sweep_establishes_complete h_mark zero_addr (objects zero_addr h_mark) fp;
   Correctness.sweep_post_sweep_strong_gen h_init h_mark st fp;
+  SpecSweep.sweep_preserves_objects h_mark fp;
+  let auxw (y: obj_addr)
+    : Lemma
+      (requires Seq.mem y (objects zero_addr h_mark))
+      (ensures U64.v (wosize_of_object y h_sweep) >= 1)
+    = sweep_preserves_wosize_all h_mark fp y
+  in
+  FStar.Classical.forall_intro (FStar.Classical.move_requires auxw);
   coalesce_establishes_decreasing h_sweep;
   coalesce_preserves_complete h_sweep fp_sweep

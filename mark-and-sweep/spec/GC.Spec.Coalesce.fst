@@ -3588,6 +3588,26 @@ let flush_blue_preserves_prefix_membership g first_blue run_words fp y =
   objects_addresses_gt_start zero_addr g y;
   flush_prefix_from g first_blue run_words fp zero_addr y
 
+val flush_merged_in_walk
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (start: hp_addr)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == U64.v start /\
+      U64.v start <= heap_size /\
+      U64.v start % U64.v mword == 0)
+    (ensures
+      Seq.mem (first_blue <: obj_addr)
+        (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+
+let flush_merged_in_walk g first_blue run_words fp start = admit ()
+
+
 val coalesce_aux_chain_dec
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3599,6 +3619,7 @@ val coalesce_aux_chain_dec
         Seq.mem y (objects zero_addr g0) ==>
         U64.v (wosize_of_object y g0) >= 1) /\
       (run_words > 0 ==> run_words >= 2) /\
+      (run_words > 0 ==> Seq.mem (first_blue <: obj_addr) (objects zero_addr g0)) /\
       (fp = 0UL \/
        (U64.v fp >= U64.v mword /\
         U64.v fp < heap_size /\
@@ -3745,6 +3766,16 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
               blue_preserved_by_header g g_flush b
           in
           FStar.Classical.forall_intro (FStar.Classical.move_requires frame_aux);
+          assert (U64.v fp_flush >= U64.v mword);
+          assert (U64.v fp_flush < heap_size);
+          assert (U64.v fp_flush % U64.v mword == 0);
+          assert (U64.v fp_flush < U64.v next);
+          flush_merged_in_walk g first_blue run_words fp start;
+          assert (Seq.mem (fp_flush <: obj_addr) (objects zero_addr g_flush));
+          assert (forall (b: obj_addr).
+            Seq.mem b (objects zero_addr g_flush) /\ is_blue b g_flush /\
+            chain_reachable g_flush (fp_flush <: obj_addr) b ==>
+            U64.v b < U64.v next);
           admit ()
         end
       end

@@ -30,6 +30,7 @@ open GC.Spec.Heap
 open GC.Spec.Object
 open GC.Spec.Fields
 open GC.Lib.Header
+open GC.Spec.Chain
 module HeapGraph = GC.Spec.HeapGraph
 module Alloc = GC.Spec.Allocator
 
@@ -3498,3 +3499,43 @@ private let blue_preserved_by_header (g g': heap) (y: obj_addr)
     color_of_object_spec y g;
     color_of_object_spec y g'
     
+val coalesce_aux_chain_dec
+  (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
+  (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (all_objs: seq obj_addr)
+  : Lemma
+    (requires
+      Coalesce.walk_pre g0 g start objs all_objs first_blue run_words /\
+      (fp = 0UL \/
+       (U64.v fp >= U64.v mword /\
+        U64.v fp < heap_size /\
+        U64.v fp % U64.v mword == 0 /\
+        Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
+        (forall (y: obj_addr).
+          Seq.mem y (objects zero_addr g) /\ is_blue y g /\
+          chain_reachable g (fp <: obj_addr) y ==>
+          (let v = read_word g y in
+           v = 0UL \/
+           (is_pointer_field v /\ U64.v v < U64.v y))))))
+    (ensures (
+      let (g', fp') = Coalesce.coalesce_aux g0 g objs first_blue run_words fp in
+      fp' = 0UL \/
+      (U64.v fp' >= U64.v mword /\
+       U64.v fp' < heap_size /\
+       U64.v fp' % U64.v mword == 0 /\
+       Seq.mem (fp' <: obj_addr) (objects zero_addr g') /\
+       (forall (y: obj_addr).
+         Seq.mem y (objects zero_addr g') /\ is_blue y g' /\
+         chain_reachable g' (fp' <: obj_addr) y ==>
+         (let v = read_word g' y in
+          v = 0UL \/
+          (is_pointer_field v /\ U64.v v < U64.v y))))))
+    (decreases Seq.length objs)
+
+let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs =
+  if Seq.length objs = 0 then admit ()
+  else begin
+    let obj = Seq.head objs in
+    if is_blue obj g0 then admit ()
+    else admit ()
+  end

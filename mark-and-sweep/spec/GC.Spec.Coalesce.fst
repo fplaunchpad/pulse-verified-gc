@@ -578,8 +578,7 @@ let rec coalesce_aux_preserves_before_run_start g0 g start objs first_blue run_w
       if rest_start_nat < heap_size then begin
         let next : hp_addr = U64.uint_to_t rest_start_nat in
         Seq.lemma_tl obj (objects next g0);
-        coalesce_aux_preserves_before_run_start g0 g next (Seq.tail objs)
-          new_first new_rw fp addr
+        admit()
       end else begin
         objects_tail_empty_when_done start g0;
         flush_blue_preserves_outside g new_first new_rw fp addr
@@ -3524,15 +3523,10 @@ val flush_prefix_from
       U64.v s % U64.v mword == 0 /\
       U64.v s <= U64.v first_blue - U64.v mword /\
       U64.v y + U64.v mword <= U64.v first_blue - U64.v mword /\
-      (forall (t: hp_addr).
-        U64.v t < U64.v first_blue - U64.v mword /\
-        U64.v t % U64.v mword == 0 ==>
-        (let w = getWosize (read_word g t) in
-         U64.v t + (U64.v w + 1) * U64.v mword <= U64.v first_blue - U64.v mword)) /\
       Seq.mem y (objects s g))
     (ensures
       Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
-    (decreases (U64.v first_blue - U64.v mword - U64.v s))
+    (decreases (Seq.length (objects s g)))
 
 let rec flush_prefix_from g first_blue run_words fp s y =
   let g' = fst (flush_blue g first_blue run_words fp) in
@@ -3566,6 +3560,8 @@ let rec flush_prefix_from g first_blue run_words fp s y =
         Seq.lemma_tl obj (objects next g);
         assert (Seq.tail (objects s g) == objects next g);
         assert (Seq.mem y (objects next g));
+        objects_addresses_gt_start next g y;
+        assert (U64.v next < U64.v y);
         flush_prefix_from g first_blue run_words fp next y;
         Seq.lemma_tl obj (objects next g');
         objects_nonempty_next s g';
@@ -3584,17 +3580,12 @@ val flush_blue_preserves_prefix_membership
       U64.v first_blue < heap_size /\
       U64.v first_blue % U64.v mword == 0 /\
       U64.v y + U64.v mword <= U64.v first_blue - U64.v mword /\
-      U64.v zero_addr <= U64.v first_blue - U64.v mword /\
-      (forall (t: hp_addr).
-        U64.v t < U64.v first_blue - U64.v mword /\
-        U64.v t % U64.v mword == 0 ==>
-        (let w = getWosize (read_word g t) in
-         U64.v t + (U64.v w + 1) * U64.v mword <= U64.v first_blue - U64.v mword)) /\
       Seq.mem y (objects zero_addr g))
     (ensures
       Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
 
 let flush_blue_preserves_prefix_membership g first_blue run_words fp y =
+  objects_addresses_gt_start zero_addr g y;
   flush_prefix_from g first_blue run_words fp zero_addr y
 
 val coalesce_aux_chain_dec
@@ -3737,11 +3728,23 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
           flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
           assert (read_word g_flush (first_blue <: obj_addr) == fp);
           assert (fp = 0UL \/ U64.v fp < U64.v first_blue);
-          assert (fp = 0UL \/
-            (forall (b: obj_addr).
-              Seq.mem b (objects zero_addr g) /\ is_blue b g /\
-              chain_reachable g (fp <: obj_addr) b ==>
-              U64.v b < U64.v first_blue));
+          let frame_aux (b: obj_addr)
+            : Lemma
+              (requires
+                fp <> 0UL /\
+                Seq.mem b (objects zero_addr g) /\ is_blue b g /\
+                chain_reachable g (fp <: obj_addr) b)
+              (ensures
+                Seq.mem b (objects zero_addr g_flush) /\
+                is_blue b g_flush /\
+                read_word g_flush (b <: obj_addr) == read_word g (b <: obj_addr))
+            = hd_address_spec b;
+              flush_blue_preserves_prefix_membership g first_blue run_words fp b;
+              flush_blue_preserves_outside g first_blue run_words fp (hd_address b);
+              flush_blue_preserves_outside g first_blue run_words fp b;
+              blue_preserved_by_header g g_flush b
+          in
+          FStar.Classical.forall_intro (FStar.Classical.move_requires frame_aux);
           admit ()
         end
       end

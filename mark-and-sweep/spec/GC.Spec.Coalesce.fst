@@ -3574,5 +3574,40 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
       end
       else admit ()
     end
-    else admit ()
+    else begin
+      mem_cons_lemma obj obj (Seq.tail objs);
+      assert (Seq.mem obj all_objs);
+      is_blue_iff obj g0; is_white_iff obj g0;
+      assert (is_white obj g0);
+
+      let (g_flush, fp_flush) = flush_blue g first_blue run_words fp in
+      flush_blue_preserves_length g first_blue run_words fp;
+      flush_blue_snd_cases_local g first_blue run_words fp;
+      assert (fp_flush == fp \/ fp_flush == first_blue);
+
+      coalesce_heap_white_step g0 g objs first_blue run_words fp g_flush fp_flush;
+      let g' = coalesce_heap g0 g objs first_blue run_words fp in
+      coalesce_heap_preserves_length g0 g_flush (Seq.tail objs) 0UL 0 fp_flush;
+      assert (Seq.length g' == heap_size);
+
+      if rest_start_nat < heap_size then begin
+        let next : hp_addr = U64.uint_to_t rest_start_nat in
+        Seq.lemma_tl obj (objects next g0);
+        assert (Seq.tail objs == objects next g0);
+
+        let tail_white_inv2 (o: obj_addr)
+          : Lemma
+            (requires Seq.mem o (Seq.tail objs) /\ is_white o g0)
+            (ensures read_word g_flush (hd_address o) == read_word g0 (hd_address o))
+          = mem_cons_lemma o obj (Seq.tail objs);
+            objects_addresses_gt_start next g0 o;
+            hd_address_spec o;
+            flush_blue_preserves_outside g first_blue run_words fp (hd_address o)
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white_inv2);
+
+        coalesce_aux_chain_dec g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
+      end
+      else admit ()
+    end
   end

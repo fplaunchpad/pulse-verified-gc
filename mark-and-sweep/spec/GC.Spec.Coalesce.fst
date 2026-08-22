@@ -3606,7 +3606,14 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
         in
         FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white_inv2);
 
-        coalesce_aux_chain_dec g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
+        if fp_flush = fp then begin
+          if run_words = 0 then begin
+            assert (g_flush == g);
+            coalesce_aux_chain_dec g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
+          end
+          else admit ()
+        end
+        else admit ()
       end
       else admit ()
     end

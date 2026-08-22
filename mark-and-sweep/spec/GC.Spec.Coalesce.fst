@@ -2153,6 +2153,18 @@ private let flush_blue_snd_cases_local (g: heap) (first_blue: U64.t) (run_words:
            snd (flush_blue g first_blue run_words fp) == first_blue)
   = ()
 
+private let flush_blue_snd_is_fb (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v (hd_address (first_blue <: obj_addr)) + U64.v mword * 2 <= heap_size)
+    (ensures snd (flush_blue g first_blue run_words fp) == first_blue)
+  = ()
+
 /// Helper: when g' == flush result directly (tail empty, rest >= heap_size),
 /// prove field0 validity and higher fields zero for src = first_blue.
 #push-options "--z3rlimit 200 --fuel 1 --ifuel 0"
@@ -3505,11 +3517,17 @@ val coalesce_aux_chain_dec
   (all_objs: seq obj_addr)
   : Lemma
     (requires
-      Coalesce.walk_pre g0 g start objs all_objs first_blue run_words /\
+      walk_pre g0 g start objs all_objs first_blue run_words /\
+      (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g0) ==>
+        U64.v (wosize_of_object y g0) >= 1) /\
+      (run_words > 0 ==> run_words >= 2) /\
       (fp = 0UL \/
        (U64.v fp >= U64.v mword /\
         U64.v fp < heap_size /\
         U64.v fp % U64.v mword == 0 /\
+        U64.v fp < U64.v start /\
+        (run_words > 0 ==> U64.v fp < U64.v first_blue) /\
         Seq.mem (fp <: obj_addr) (objects zero_addr g) /\
         (forall (y: obj_addr).
           Seq.mem y (objects zero_addr g) /\ is_blue y g /\
@@ -3611,7 +3629,13 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
             assert (g_flush == g);
             coalesce_aux_chain_dec g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
           end
-          else admit ()
+          else begin
+            hd_address_spec (first_blue <: obj_addr);
+            run_words_bound first_blue run_words start;
+            flush_blue_snd_is_fb g first_blue run_words fp;
+            assert (fp_flush == first_blue);
+            assert False
+          end
         end
         else admit ()
       end

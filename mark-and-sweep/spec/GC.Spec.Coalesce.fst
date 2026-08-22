@@ -3510,7 +3510,93 @@ private let blue_preserved_by_header (g g': heap) (y: obj_addr)
     is_blue_iff y g';
     color_of_object_spec y g;
     color_of_object_spec y g'
-    
+
+val flush_prefix_from
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (s: hp_addr) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v s % U64.v mword == 0 /\
+      U64.v s <= U64.v first_blue - U64.v mword /\
+      U64.v y + U64.v mword <= U64.v first_blue - U64.v mword /\
+      (forall (t: hp_addr).
+        U64.v t < U64.v first_blue - U64.v mword /\
+        U64.v t % U64.v mword == 0 ==>
+        (let w = getWosize (read_word g t) in
+         U64.v t + (U64.v w + 1) * U64.v mword <= U64.v first_blue - U64.v mword)) /\
+      Seq.mem y (objects s g))
+    (ensures
+      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+    (decreases (U64.v first_blue - U64.v mword - U64.v s))
+
+let rec flush_prefix_from g first_blue run_words fp s y =
+  let g' = fst (flush_blue g first_blue run_words fp) in
+  flush_blue_preserves_length g first_blue run_words fp;
+    if U64.v s = U64.v first_blue - U64.v mword then begin
+    objects_addresses_gt_start s g y;
+    assert (U64.v y > U64.v s);
+    assert False
+  end
+  else begin
+    objects_nonempty_next s g;
+    f_address_spec s;
+    let obj = f_address s in
+    let wz = getWosize (read_word g s) in
+    let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+    flush_blue_preserves_outside g first_blue run_words fp s;
+    assert (read_word g' s == read_word g s);
+    mem_cons_lemma y obj (Seq.tail (objects s g));
+    if y = obj then begin
+      objects_nonempty_next s g';
+      f_address_spec s;
+      mem_cons_lemma obj obj (Seq.tail (objects s g'))
+    end
+      else begin
+      if next_nat >= heap_size then begin
+        objects_tail_empty_when_done s g;
+        assert (Seq.tail (objects s g) == Seq.empty)
+      end
+      else begin
+        let next : hp_addr = U64.uint_to_t next_nat in
+        Seq.lemma_tl obj (objects next g);
+        assert (Seq.tail (objects s g) == objects next g);
+        assert (Seq.mem y (objects next g));
+        flush_prefix_from g first_blue run_words fp next y;
+        Seq.lemma_tl obj (objects next g');
+        objects_nonempty_next s g';
+        mem_cons_lemma y obj (Seq.tail (objects s g'))
+      end
+    end
+  end
+
+val flush_blue_preserves_prefix_membership
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v y + U64.v mword <= U64.v first_blue - U64.v mword /\
+      U64.v zero_addr <= U64.v first_blue - U64.v mword /\
+      (forall (t: hp_addr).
+        U64.v t < U64.v first_blue - U64.v mword /\
+        U64.v t % U64.v mword == 0 ==>
+        (let w = getWosize (read_word g t) in
+         U64.v t + (U64.v w + 1) * U64.v mword <= U64.v first_blue - U64.v mword)) /\
+      Seq.mem y (objects zero_addr g))
+    (ensures
+      Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+
+let flush_blue_preserves_prefix_membership g first_blue run_words fp y =
+  flush_prefix_from g first_blue run_words fp zero_addr y
+
 val coalesce_aux_chain_dec
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3550,7 +3636,7 @@ val coalesce_aux_chain_dec
           (is_pointer_field v /\ U64.v v < U64.v y))))))
     (decreases Seq.length objs)
 
-let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs =
+(*let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs =
   if Seq.length objs = 0 then admit ()
   else begin
     objects_nonempty_next start g0;
@@ -3637,8 +3723,23 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
             assert False
           end
         end
-        else admit ()
+          else begin
+          hd_address_spec (first_blue <: obj_addr);
+          run_words_bound first_blue run_words start;
+          flush_blue_snd_is_fb g first_blue run_words fp;
+          assert (fp_flush == first_blue);
+          flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
+          assert (read_word g_flush (first_blue <: obj_addr) == fp);
+          assert (fp = 0UL \/ U64.v fp < U64.v first_blue);
+          assert (fp = 0UL \/
+            (forall (b: obj_addr).
+              Seq.mem b (objects zero_addr g) /\ is_blue b g /\
+              chain_reachable g (fp <: obj_addr) b ==>
+              U64.v b < U64.v first_blue));
+          admit ()
+        end
       end
       else admit ()
     end
   end
+  *)

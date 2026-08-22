@@ -122,3 +122,41 @@ let walk_step_more (h: heap) (start: hp_addr) (objs: seq obj_addr)
     f_address_spec start;
     let next : hp_addr = U64.uint_to_t (walk_next h start) in
     Seq.lemma_tl (f_address start) (objects next h)
+val chain_reach_frame_shrink (g g': heap)
+  (x: obj_addr{Seq.mem x (objects zero_addr g)})
+  (y: obj_addr{Seq.mem y (objects zero_addr g)})
+  (r: chain_reach g x y)
+  : Lemma
+    (requires
+      (forall (b: obj_addr).
+        Seq.mem b (objects zero_addr g) /\ is_blue b g /\
+        chain_reachable g x b ==>
+        Seq.mem b (objects zero_addr g') /\
+        is_blue b g' /\
+        read_word g' (b <: obj_addr) == read_word g (b <: obj_addr)) /\
+      Seq.mem x (objects zero_addr g') /\
+      Seq.mem y (objects zero_addr g'))
+    (ensures chain_reachable g' x y)
+    (decreases r)
+let rec chain_reach_frame_shrink g g' x y r =
+  match r with
+  | ChainRefl _ ->
+      let r' : chain_reach g' x x = ChainRefl x in
+      FStar.Classical.exists_intro (fun (_: chain_reach g' x y) -> True) r'
+  | ChainStep _ w z prev ->
+      chain_reach_frame_shrink g g' x w prev;
+      assert (is_blue w g);
+      assert (chain_reachable g x w);
+      assert (read_word g' (w <: obj_addr) == read_word g (w <: obj_addr));
+      assert (fl_edge g' w z);
+      let aux (r0: chain_reach g' x w)
+        : Lemma (chain_reachable g' x z)
+        = let r1 : chain_reach g' x z = ChainStep x w z r0 in
+          FStar.Classical.exists_intro (fun (_: chain_reach g' x z) -> True) r1
+      in
+      FStar.Classical.exists_elim
+        (chain_reachable g' x z)
+        #(chain_reach g' x w)
+        #(fun _ -> True)
+        ()
+        (fun r0 -> aux r0)

@@ -3772,13 +3772,32 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
           assert (U64.v fp_flush < U64.v next);
           flush_merged_in_walk g first_blue run_words fp start;
           assert (Seq.mem (fp_flush <: obj_addr) (objects zero_addr g_flush));
-          assert (forall (b: obj_addr).
-            Seq.mem b (objects zero_addr g_flush) /\ is_blue b g_flush /\
-            chain_reachable g_flush (fp_flush <: obj_addr) b ==>
-            U64.v b < U64.v next);
+          let below_aux (b: obj_addr)
+            : Lemma
+              (requires
+                Seq.mem b (objects zero_addr g_flush) /\ is_blue b g_flush /\
+                chain_reachable g_flush (fp_flush <: obj_addr) b)
+              (ensures U64.v b < U64.v next)
+            = if b = (first_blue <: obj_addr) then ()
+              else begin
+                let hc (r0: chain_reach g_flush (first_blue <: obj_addr) b)
+                  : Lemma (U64.v b < U64.v next)
+                  = chain_reach_head_cases g_flush (first_blue <: obj_addr) b r0;
+                    admit ()
+                in
+                FStar.Classical.exists_elim
+                  (U64.v b < U64.v next)
+                  #(chain_reach g_flush (first_blue <: obj_addr) b)
+                  #(fun _ -> True)
+                  ()
+                  (fun r0 -> hc r0)
+              end
+          in
+          FStar.Classical.forall_intro (FStar.Classical.move_requires below_aux);
           admit ()
         end
       end
       else admit ()
     end
   end
+  

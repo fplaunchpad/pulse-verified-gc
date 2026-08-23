@@ -255,3 +255,30 @@ let rec chain_reach_unframe g g' x y r =
         #(fun _ -> True)
         ()
         (fun r0 -> aux r0)
+val chain_members_below_head (g: heap)
+  (x: obj_addr{Seq.mem x (objects zero_addr g)})
+  (y: obj_addr{Seq.mem y (objects zero_addr g)})
+  (r: chain_reach g x y)
+  : Lemma
+    (requires
+      (forall (b: obj_addr).
+        Seq.mem b (objects zero_addr g) /\ is_blue b g /\
+        chain_reachable g x b ==>
+        (let v = read_word g b in
+         v = 0UL \/
+         (is_pointer_field v /\ U64.v v < U64.v b))))
+    (ensures U64.v y <= U64.v x)
+    (decreases r)
+
+let rec chain_members_below_head g x y r =
+  match r with
+  | ChainRefl _ -> ()
+  | ChainStep _ w z prev ->
+      begin
+        chain_members_below_head g x w prev;
+        assert (is_blue w g);
+        assert (chain_reachable g x w);
+        assert (fl_edge g w z);
+        assert (read_word g (w <: obj_addr) == (z <: U64.t));
+        assert (U64.v z < U64.v w)
+      end

@@ -35,9 +35,13 @@ let color = color_sem
 /// Tag Constants
 /// ---------------------------------------------------------------------------
 
-val closure_tag : U64.t
-val infix_tag : U64.t
-val no_scan_tag : U64.t
+/// These are OCaml ABI values (runtime/caml/mlvalues.h), not implementation
+/// choices, so they are transparent here: `U64.v infix_tag` must reduce to 249 for
+/// definitions like GC.Gen.MinorHeap.is_infix_in_minor to stay usable without
+/// threading a reveal lemma through every proof that mentions them.
+let closure_tag : U64.t = 247UL
+let infix_tag : U64.t = 249UL
+let no_scan_tag : U64.t = 251UL
 
 /// Expose tag constant values (needed for Pulse bridge lemmas)
 val no_scan_tag_val : unit -> Lemma (no_scan_tag == U64.uint_to_t 251)

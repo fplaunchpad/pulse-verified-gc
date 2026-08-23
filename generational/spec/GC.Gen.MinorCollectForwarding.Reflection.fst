@@ -211,6 +211,7 @@ let post_edge_from_minor_image_reflects_mem_ce
           CG.classify_minor_field_minor minor major (minor_read_field minor src j);
           assert (CG.classify_minor_field minor major (minor_read_field minor src j) ==
             Some (CG.MinorV dst));
+          MCFNE.minor_field_source_not_no_scan minor major src j (CG.MinorV dst);
           CG.minor_field_edge_intro minor major src j (CG.MinorV dst)
         | CG.MajorV dst ->
           assert (target_img == dst);
@@ -250,6 +251,7 @@ let post_edge_from_minor_image_reflects_mem_ce
           CG.classify_minor_field_minor minor major (minor_read_field minor src j);
           assert (CG.classify_minor_field minor major (minor_read_field minor src j) ==
             Some (CG.MinorV old_val));
+          MCFNE.minor_field_source_not_no_scan minor major src j (CG.MinorV old_val);
           CG.minor_field_edge_intro minor major src j (CG.MinorV old_val);
           CG.combined_reachable_step cg combined_roots (CG.MinorV src) (CG.MinorV old_val);
           minor_objects_body_bound minor old_val;
@@ -275,6 +277,7 @@ let post_edge_from_minor_image_reflects_mem_ce
           CG.classify_minor_field_major minor major (minor_read_field minor src j);
           assert (CG.classify_minor_field minor major (minor_read_field minor src j) ==
             Some (CG.MajorV old_raw));
+          MCFNE.minor_field_source_not_no_scan minor major src j (CG.MajorV old_raw);
           CG.minor_field_edge_intro minor major src j (CG.MajorV old_raw);
           match v with
           | CG.MajorV dst ->
@@ -410,6 +413,7 @@ let post_edge_from_minor_image_reflects_target
         CG.classify_minor_field_minor minor major (minor_read_field minor src j);
         assert (CG.classify_minor_field minor major (minor_read_field minor src j) ==
           Some (CG.MinorV old_val));
+        MCFNE.minor_field_source_not_no_scan minor major src j (CG.MinorV old_val);
         CG.minor_field_edge_intro minor major src j (CG.MinorV old_val);
         CG.combined_reachable_step cg combined_roots (CG.MinorV src) (CG.MinorV old_val);
         assert (normal_vertex_ready minor major fp roots (CG.MinorV old_val));
@@ -426,6 +430,7 @@ let post_edge_from_minor_image_reflects_target
           is_minor_addr_from_bounds old_val;
           assert (is_minor_addr old_val);
           CG.classify_minor_field_minor minor major (minor_read_field minor src j);
+          MCFNE.minor_field_source_not_no_scan minor major src j (CG.MinorV old_val);
           CG.minor_field_edge_intro minor major src j (CG.MinorV old_val);
           CG.combined_reachable_step cg combined_roots (CG.MinorV src) (CG.MinorV old_val);
           minor_objects_body_bound minor old_val;
@@ -451,6 +456,7 @@ let post_edge_from_minor_image_reflects_target
           CG.classify_minor_field_major minor major (minor_read_field minor src j);
           assert (CG.classify_minor_field minor major (minor_read_field minor src j) ==
             Some (CG.MajorV old_raw));
+          MCFNE.minor_field_source_not_no_scan minor major src j (CG.MajorV old_raw);
           CG.minor_field_edge_intro minor major src j (CG.MajorV old_raw);
           CG.combined_reachable_step cg combined_roots (CG.MinorV src) (CG.MajorV old_raw);
           assert (normal_src_reachable minor major fp roots (CG.MajorV old_raw));

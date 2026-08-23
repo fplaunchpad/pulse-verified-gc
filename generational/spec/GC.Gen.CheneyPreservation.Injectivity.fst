@@ -281,7 +281,10 @@ private let rec cheney_scan_preserves_wfh_part4_local
       let wz = minor_wosize minor obj in
       cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
       cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+      let cs' = if minor_is_no_scan minor obj
+                then cs
+                else cheney_forward_fields minor cs obj 0 wz in
       let fuel' : nat = fuel - 1 in
       assert (fuel' < fuel);
       cheney_scan_preserves_wfh_part4_local minor cs' (scan + 1) fuel'
@@ -1058,16 +1061,26 @@ private let rec cheney_scan_preserves_inj_inv
     else begin
       cheney_scan_step minor cs scan fuel;
       let obj = Seq.index cs.cs_queue scan in
-      let wz = minor_wosize minor obj in
-      cheney_forward_fields_preserves_inj_inv minor cs obj 0 wz;
-      cheney_forward_fields_preserves_fwd_classified minor cs obj 0 wz;
-      cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
-      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-      cheney_forward_fields_preserves_cob minor cs obj 0 wz;
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
       let fuel' : nat = fuel - 1 in
       assert (fuel' < fuel);
-      cheney_scan_preserves_inj_inv minor cs' (scan + 1) fuel'
+      // No_scan_tag branch of cheney_scan: state unchanged, so every precondition
+      // of the recursive call is the caller's `requires` verbatim. Written as an
+      // explicit branch rather than a conditional `cs'` binding for the same reason
+      // cheney_scan_preserves_source_inv below is: at --ifuel 0 the solver will not
+      // case-split the `if` to discharge the ten separate preconditions, and one of
+      // them (query 46 of 49) then exhausts rlimit 180.
+      if minor_is_no_scan minor obj then
+        cheney_scan_preserves_inj_inv minor cs (scan + 1) fuel'
+      else begin
+        let wz = minor_wosize minor obj in
+        cheney_forward_fields_preserves_inj_inv minor cs obj 0 wz;
+        cheney_forward_fields_preserves_fwd_classified minor cs obj 0 wz;
+        cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
+        cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+        cheney_forward_fields_preserves_cob minor cs obj 0 wz;
+        let cs' = cheney_forward_fields minor cs obj 0 wz in
+        cheney_scan_preserves_inj_inv minor cs' (scan + 1) fuel'
+      end
     end
   end else
     cheney_scan_base minor cs scan fuel
@@ -1162,17 +1175,26 @@ private let rec cheney_scan_preserves_source_inv
     else begin
       cheney_scan_step minor cs scan fuel;
       let obj = Seq.index cs.cs_queue scan in
-      let wz = minor_wosize minor obj in
-      cheney_forward_fields_preserves_source_inv minor cs obj 0 wz;
-      cheney_forward_fields_preserves_inj_inv minor cs obj 0 wz;
-      cheney_forward_fields_preserves_fwd_classified minor cs obj 0 wz;
-      cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
-      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-      cheney_forward_fields_preserves_cob minor cs obj 0 wz;
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
       let fuel' : nat = fuel - 1 in
       assert (fuel' < fuel);
-      cheney_scan_preserves_source_inv minor cs' (scan + 1) fuel'
+      // No_scan_tag branch of cheney_scan: state unchanged, so every precondition
+      // of the recursive call is the caller's `requires` verbatim. Written as an
+      // explicit branch rather than a conditional `cs'` binding because at
+      // --ifuel 0 the solver will not case-split the `if` to discharge nine
+      // separate preconditions.
+      if minor_is_no_scan minor obj then
+        cheney_scan_preserves_source_inv minor cs (scan + 1) fuel'
+      else begin
+        let wz = minor_wosize minor obj in
+        cheney_forward_fields_preserves_source_inv minor cs obj 0 wz;
+        cheney_forward_fields_preserves_inj_inv minor cs obj 0 wz;
+        cheney_forward_fields_preserves_fwd_classified minor cs obj 0 wz;
+        cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
+        cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+        cheney_forward_fields_preserves_cob minor cs obj 0 wz;
+        let cs' = cheney_forward_fields minor cs obj 0 wz in
+        cheney_scan_preserves_source_inv minor cs' (scan + 1) fuel'
+      end
     end
   end else
     cheney_scan_base minor cs scan fuel
@@ -1274,7 +1296,10 @@ private let rec cheney_scan_preserves_disjoint_inv
       cheney_forward_fields_preserves_wfh_part4_local minor cs obj 0 wz;
       cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
       cheney_forward_fields_preserves_cob minor cs obj 0 wz;
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+      let cs' = if minor_is_no_scan minor obj
+                then cs
+                else cheney_forward_fields minor cs obj 0 wz in
       let fuel' : nat = fuel - 1 in
       assert (fuel' < fuel);
       cheney_scan_preserves_disjoint_inv minor major0 cs' (scan + 1) fuel'

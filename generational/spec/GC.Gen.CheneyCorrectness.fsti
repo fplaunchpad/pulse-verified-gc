@@ -204,7 +204,11 @@ open GC.Gen.Reachability
 ///
 /// minor_reachable(minor, roots) computes the set of minor-heap object
 /// addresses reachable from roots via minor_successors (the pointer fields
-/// of minor-heap objects that point to other minor-heap objects).
+/// of minor-heap objects that point to other minor-heap objects). Objects whose
+/// tag is >= No_scan_tag contribute no successors: their payload is raw bytes, so
+/// a word inside it is not a reference even when it coincides numerically with a
+/// live nursery address. The theorem is therefore about reachability through
+/// scannable fields, which is what OCaml's object model means by reachable.
 ///
 /// The precondition cheney_no_oom says: the final forwarding map produced by
 /// cheney_promote covers all roots and is closed under minor_successors.

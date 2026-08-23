@@ -231,7 +231,10 @@ private let rec scan_qv_aux
     CheneySpec.cheney_scan_step minor cs scan fuel;
     let obj = Seq.index cs.cs_queue scan in
     let wz = minor_wosize minor obj in
-    let cs' = CheneySpec.cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+    let cs' = if minor_is_no_scan minor obj
+              then cs
+              else CheneySpec.cheney_forward_fields minor cs obj 0 wz in
     forward_fields_qv_aux minor cs obj 0 wz;
     scan_qv_aux minor cs' (scan + 1) (fuel - 1)
   end
@@ -607,7 +610,10 @@ private let rec scan_bfs_inv_aux
       CheneySpec.cheney_scan_step minor cs scan fuel;
       let obj = Seq.index cs.cs_queue scan in
       let wz = minor_wosize minor obj in
-      let cs' = CheneySpec.cheney_forward_fields minor cs obj 0 wz in
+      // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+      let cs' = if minor_is_no_scan minor obj
+                then cs
+                else CheneySpec.cheney_forward_fields minor cs obj 0 wz in
       forward_fields_bfs_inv_aux minor cs obj 0 wz;
       scan_bfs_inv_aux minor cs' (scan + 1) (fuel - 1)
     end

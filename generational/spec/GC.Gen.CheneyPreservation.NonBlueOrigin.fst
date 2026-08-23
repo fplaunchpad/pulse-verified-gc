@@ -509,7 +509,10 @@ private let rec cheney_scan_preserves_nonblue_origin_inv
     cheney_forward_fields_preserves_nonblue_origin_inv major0 minor cs obj 0 wz;
     cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     cheney_forward_fields_preserves_cob minor cs obj 0 wz;
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+    let cs' = if minor_is_no_scan minor obj
+              then cs
+              else cheney_forward_fields minor cs obj 0 wz in
     assert (fuel > 0);
     assert (fuel - 1 < fuel);
     cheney_scan_preserves_nonblue_origin_inv major0 minor cs' (scan + 1) (fuel - 1)

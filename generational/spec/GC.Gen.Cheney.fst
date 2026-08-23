@@ -284,8 +284,17 @@ let rec cheney_scan (minor: minor_state) (cs: cheney_state)
   if fuel = 0 || scan >= Seq.length cs.cs_queue then cs
   else
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag guard. A Custom_tag / String_tag / Double_array_tag block's
+    // payload is raw bytes, not values, so its "fields" must not be forwarded.
+    // Scanning them is what let a boxed Int64 payload (8-aligned and inside
+    // [8, minor_heap_size)) be accepted as a nursery address and enqueued as an
+    // object; its "header" then read back as &caml_int64_ops -- tag 224,
+    // wosize 4411 -- over-scanning 35 KB of unrelated nursery. See PATCHES.md
+    // patch 16. Mirrors the is_scannable test update_promoted_objects already
+    // applies on the major side.
+    let cs' =
+      if minor_is_no_scan minor obj then cs
+      else cheney_forward_fields minor cs obj 0 (minor_wosize minor obj) in
     cheney_scan minor cs' (scan + 1) (fuel - 1)
 
 let cheney_scan_base
@@ -299,8 +308,9 @@ let cheney_scan_step
   : Lemma (requires fuel > 0 /\ scan < Seq.length cs.cs_queue)
           (ensures cheney_scan minor cs scan fuel ==
                    (let obj = Seq.index cs.cs_queue scan in
-                    let wz = minor_wosize minor obj in
-                    let cs' = cheney_forward_fields minor cs obj 0 wz in
+                    let cs' =
+                      if minor_is_no_scan minor obj then cs
+                      else cheney_forward_fields minor cs obj 0 (minor_wosize minor obj) in
                     cheney_scan minor cs' (scan + 1) (fuel - 1)))
   = ()
 
@@ -442,11 +452,17 @@ let rec cheney_scan_preserves_wfh_part1
   else begin
     assert (fuel > 0);
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_wfh_part1 minor cs' (scan + 1) fuel'
+    // Mirror the No_scan_tag branch of cheney_scan: on a no-scan object the state
+    // is unchanged, so the invariants carry over with nothing to re-establish.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_wfh_part1 minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_scan_preserves_wfh_part1 minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options
@@ -586,12 +602,17 @@ private let rec cheney_scan_preserves_cob
   else begin
     assert (fuel > 0);
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-    cheney_forward_fields_preserves_cob minor cs obj 0 wz;
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_cob minor cs' (scan + 1) fuel'
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_cob minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_forward_fields_preserves_cob minor cs obj 0 wz;
+      cheney_scan_preserves_cob minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options
@@ -733,13 +754,18 @@ private let rec cheney_scan_preserves_free_list_shape
     else begin
       assert (fuel > 0);
       let obj = Seq.index cs.cs_queue scan in
-      let wz = minor_wosize minor obj in
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
-      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-      cheney_forward_fields_preserves_cob minor cs obj 0 wz;
-      cheney_forward_fields_preserves_free_list_shape minor cs obj 0 wz;
       let fuel' : nat = fuel - 1 in
-      cheney_scan_preserves_free_list_shape minor cs' (scan + 1) fuel'
+      // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+      if minor_is_no_scan minor obj then
+        cheney_scan_preserves_free_list_shape minor cs (scan + 1) fuel'
+      else begin
+        let wz = minor_wosize minor obj in
+        let cs' = cheney_forward_fields minor cs obj 0 wz in
+        cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+        cheney_forward_fields_preserves_cob minor cs obj 0 wz;
+        cheney_forward_fields_preserves_free_list_shape minor cs obj 0 wz;
+        cheney_scan_preserves_free_list_shape minor cs' (scan + 1) fuel'
+      end
     end
 #pop-options
 
@@ -919,12 +945,17 @@ private let rec cheney_scan_preserves_both
   else if scan >= Seq.length cs.cs_queue then ()
   else begin
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-    cheney_forward_fields_preserves_objects minor cs obj 0 wz;
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
     assert (fuel >= 1);
-    cheney_scan_preserves_both minor cs' (scan + 1) (fuel - 1)
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_both minor cs (scan + 1) (fuel - 1)
+    else begin
+      let wz = minor_wosize minor obj in
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_forward_fields_preserves_objects minor cs obj 0 wz;
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_scan_preserves_both minor cs' (scan + 1) (fuel - 1)
+    end
   end
 
 #pop-options
@@ -1230,12 +1261,17 @@ private let rec cheney_scan_preserves_dense
   else begin
     assert (fuel > 0);
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
-    cheney_forward_fields_preserves_dense minor cs obj 0 wz;
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_dense minor cs' (scan + 1) fuel'
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_dense minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_forward_fields_preserves_dense minor cs obj 0 wz;
+      cheney_scan_preserves_dense minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options
@@ -1431,13 +1467,18 @@ private let rec cheney_scan_preserves_fwd_bounded
   else if scan >= Seq.length cs.cs_queue then ()
   else begin
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_fwd_bounded minor cs obj 0 wz;
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     assert (fuel > 0);
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_fwd_bounded minor cs' (scan + 1) fuel'
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_fwd_bounded minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_fwd_bounded minor cs obj 0 wz;
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_scan_preserves_fwd_bounded minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options
@@ -1609,13 +1650,18 @@ private let rec cheney_scan_preserves_fwd_above_zero
   else if scan >= Seq.length cs.cs_queue then ()
   else begin
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_fwd_above_zero minor cs obj 0 wz;
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     assert (fuel > 0);
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_fwd_above_zero minor cs' (scan + 1) fuel'
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_fwd_above_zero minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_fwd_above_zero minor cs obj 0 wz;
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_scan_preserves_fwd_above_zero minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options
@@ -1768,13 +1814,18 @@ private let rec cheney_scan_preserves_wfh_part4
   else if scan >= Seq.length cs.cs_queue then ()
   else begin
     let obj = Seq.index cs.cs_queue scan in
-    let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
-    cheney_forward_fields_preserves_wfh_part4 minor cs obj 0 wz;
-    cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     assert (fuel > 0);
     let fuel' : nat = fuel - 1 in
-    cheney_scan_preserves_wfh_part4 minor cs' (scan + 1) fuel'
+    // No_scan_tag branch of cheney_scan: state unchanged, invariant carries over.
+    if minor_is_no_scan minor obj then
+      cheney_scan_preserves_wfh_part4 minor cs (scan + 1) fuel'
+    else begin
+      let wz = minor_wosize minor obj in
+      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      cheney_forward_fields_preserves_wfh_part4 minor cs obj 0 wz;
+      cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
+      cheney_scan_preserves_wfh_part4 minor cs' (scan + 1) fuel'
+    end
   end
 
 #pop-options

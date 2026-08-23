@@ -38,7 +38,9 @@ let fwd_covers_roots (minor: minor_state) (fwd: forwarding_map) (roots: seq U64.
     fwd r <> 0UL
 
 /// The forwarding map is closed under minor_successors:
-/// if x is forwarded and y is a successor with wosize > 0, then y is forwarded too
+/// if x is forwarded and y is a successor with wosize > 0, then y is forwarded too.
+/// A no-scan x has no successors, so it imposes no obligation here -- which is what
+/// lets the collector skip scanning it.
 let fwd_closed (minor: minor_state) (fwd: forwarding_map) : prop =
   forall (x y: U64.t).
     Seq.mem x (minor_objects minor) /\
@@ -244,6 +246,27 @@ val scanned_prefix_step
         (Seq.index cs.cs_queue scan)
         (minor_wosize minor (Seq.index cs.cs_queue scan)))
     (ensures scanned_prefix_closed minor cs' (scan + 1))
+
+/// Advancing the scan pointer over a no-scan queue entry: the state is unchanged
+/// and the entry has no successors, so the closure extends for free.
+val scanned_prefix_step_no_scan
+  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat)
+  : Lemma
+    (requires
+      scanned_prefix_closed minor cs scan /\
+      scan < Seq.length cs.cs_queue /\
+      minor_is_no_scan minor (Seq.index cs.cs_queue scan))
+    (ensures scanned_prefix_closed minor cs (scan + 1))
+
+/// OOM-guarded form, matching scanned_prefix_step_oom's shape.
+val scanned_prefix_step_no_scan_oom
+  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat) (oom: bool)
+  : Lemma
+    (requires
+      (not oom ==> scanned_prefix_closed minor cs scan) /\
+      scan < Seq.length cs.cs_queue /\
+      minor_is_no_scan minor (Seq.index cs.cs_queue scan))
+    (ensures not oom ==> scanned_prefix_closed minor cs (scan + 1))
 
 val scanned_prefix_step_oom
   (minor: minor_state) (cs cs': CheneySpec.cheney_state) (scan: nat)

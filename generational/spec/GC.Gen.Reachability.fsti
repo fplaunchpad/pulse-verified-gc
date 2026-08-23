@@ -9,6 +9,13 @@
 /// An object is reachable if:
 /// 1. It is a valid minor object AND a root, OR
 /// 2. It is a successor (via intra-minor pointer field) of a reachable object.
+///
+/// No-scan objects (tag >= No_scan_tag: Custom_tag, String_tag, Double_array_tag)
+/// have no successors: their payload is raw bytes, so a word inside it is not a
+/// reference even when it happens to be numerically indistinguishable from the
+/// address of a live nursery object. Reachability therefore does not traverse them,
+/// matching OCaml's own scanning rule and the guard `major_object_edges` has always
+/// applied on the major side.
 
 module GC.Gen.Reachability
 
@@ -27,7 +34,8 @@ open GC.Gen.MinorHeap
 /// Given a minor-heap state and an object address, return the sequence of
 /// intra-minor pointer targets reachable from that object's fields.
 /// A field value is included if its `to_minor_offset` value is a word-aligned
-/// address of an allocated minor object.
+/// address of an allocated minor object. A no-scan object has no successors at all,
+/// regardless of what its payload words look like.
 val minor_successors (ms: minor_state) (obj: U64.t) : GTot (seq U64.t)
 
 /// Every successor is a valid minor object
@@ -62,14 +70,21 @@ val minor_reachable_roots (ms: minor_state) (roots: seq U64.t)
 val minor_successors_length (ms: minor_state) (obj: U64.t)
   : Lemma (ensures Seq.length (minor_successors ms obj) <= minor_wosize ms obj)
 
-/// Characterization: y is a successor of x iff some field of x normalizes to y
-/// and y is a valid allocated minor object.
+/// Characterization: y is a successor of x iff x is not a no-scan block and some
+/// field of x normalizes to y, with y a valid allocated minor object.
 val minor_successors_char (ms: minor_state) (x y: U64.t)
   : Lemma (ensures Seq.mem y (minor_successors ms x) <==>
-                    (exists (i:nat). i < minor_wosize ms x /\
-                                     to_minor_offset (minor_read_field ms x i) == y /\
-                                     is_minor_addr y /\
-                                     Seq.mem y (minor_objects ms)))
+                    (~(minor_is_no_scan ms x) /\
+                     (exists (i:nat). i < minor_wosize ms x /\
+                                      to_minor_offset (minor_read_field ms x i) == y /\
+                                      is_minor_addr y /\
+                                      Seq.mem y (minor_objects ms))))
+
+/// A no-scan block has no successors.  Corollary of the characterization, exposed
+/// separately because that is the form the BFS proofs and the Pulse impl want.
+val minor_successors_no_scan (ms: minor_state) (obj: U64.t) (y: U64.t)
+  : Lemma (requires minor_is_no_scan ms obj)
+          (ensures ~(Seq.mem y (minor_successors ms obj)))
 
 /// The reachable set is closed under minor_successors
 val minor_reachable_closed (ms: minor_state) (roots: seq U64.t) (x y: U64.t)

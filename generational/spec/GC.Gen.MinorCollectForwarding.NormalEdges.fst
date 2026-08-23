@@ -210,26 +210,27 @@ let fwd_disjoint_reachable_major_intro
     Classical.forall_intro_2 (Classical.move_requires_2 aux)
 #pop-options
 
+/// A minor object with a classifiable pointer field is not a no-scan block.
+///
+/// This is the one place the reflection proof needs `minor_no_scan_invariant`. The
+/// combined graph is now guarded on no-scan minor sources
+/// (`CombinedGraph.fst:131`), so `CG.minor_field_edge_intro` will only introduce an
+/// edge out of a scannable `src`; the reflection direction has to supply that. The
+/// argument is the contradiction that `minor_source_edge_not_no_scan` used to make
+/// inline, before the guard let that lemma read the fact straight off
+/// `CG.minor_edge_elim`.
 #push-options "--z3rlimit 40 --fuel 0 --ifuel 1 --split_queries always"
-let minor_source_edge_not_no_scan
-  (minor: minor_state) (major: heap) (fp: U64.t)
-  (src: U64.t) (dst: CG.combined_vertex)
+let minor_field_source_not_no_scan
+  (minor: minor_state) (major: heap)
+  (src: U64.t) (i: nat) (dst: CG.combined_vertex)
   : Lemma
     (requires
-      GenInv.collection_heap_shape minor major fp /\
-      CG.mem_ce (CG.MinorV src, dst) (CG.build_combined_graph minor major))
-    (ensures minor_tag minor src < 251)
+      minor_no_scan_invariant minor /\
+      Seq.mem src (minor_objects minor) /\
+      i < minor_wosize minor src /\
+      CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst)
+    (ensures ~(minor_is_no_scan minor src))
   =
-    GenInv.collection_heap_shape_elim minor major fp;
-    GenInv.minor_heap_shape_elim minor;
-    assert (minor_no_scan_invariant minor);
-    CG.minor_edge_elim minor major src dst;
-    assert (Seq.mem src (minor_objects minor));
-    let i = FStar.IndefiniteDescription.indefinite_description_ghost nat
-      (fun i -> i < minor_wosize minor src /\
-        CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst) in
-    assert (i < minor_wosize minor src);
-    assert (CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst);
     if minor_tag minor src >= 251 then begin
       let field = minor_read_field minor src i in
       match dst with
@@ -253,6 +254,25 @@ let minor_source_edge_not_no_scan
         assert (~(is_pointer_field field));
         assert False
     end
+#pop-options
+
+#push-options "--z3rlimit 40 --fuel 0 --ifuel 1 --split_queries always"
+let minor_source_edge_not_no_scan
+  (minor: minor_state) (major: heap) (fp: U64.t)
+  (src: U64.t) (dst: CG.combined_vertex)
+  : Lemma
+    (requires
+      GenInv.collection_heap_shape minor major fp /\
+      CG.mem_ce (CG.MinorV src, dst) (CG.build_combined_graph minor major))
+    (ensures minor_tag minor src < 251)
+  =
+    // Direct, now that the combined graph is guarded on no-scan minor sources:
+    // minor_edge_elim's `ensures` carries ~(minor_is_no_scan minor src), which is
+    // minor_tag minor src < 251 by definition (no_scan_tag = 251UL). This used to be
+    // a contradiction argument against minor_no_scan_invariant; that argument now
+    // lives in minor_field_source_not_no_scan above, where the reflection proof
+    // genuinely needs it, and this lemma no longer depends on the invariant at all.
+    CG.minor_edge_elim minor major src dst
 #pop-options
 
 #push-options "--z3rlimit 30 --fuel 0 --ifuel 1 --split_queries always"

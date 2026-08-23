@@ -401,7 +401,10 @@ private let rec cheney_scan_preserves_no_black
     cheney_scan_step minor cs scan fuel;
     let obj = Seq.index cs.cs_queue scan in
     let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+    let cs' = if minor_is_no_scan minor obj
+              then cs
+              else cheney_forward_fields minor cs obj 0 wz in
     cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     cheney_forward_fields_preserves_no_black minor cs obj 0 wz;
     cheney_scan_preserves_no_black minor cs' (scan + 1) (fuel - 1)
@@ -837,7 +840,10 @@ private let rec cheney_scan_preserves_gray_black_objects_on_stack
       let fuel' : nat = fuel - 1 in
       let obj = Seq.index cs.cs_queue scan in
       let wz = minor_wosize minor obj in
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+      let cs' = if minor_is_no_scan minor obj
+                then cs
+                else cheney_forward_fields minor cs obj 0 wz in
       cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
       Forwarding.cheney_forward_fields_preserves_cob minor cs obj 0 wz;
       cheney_forward_fields_preserves_gray_black_objects_on_stack minor cs obj 0 wz st;
@@ -1060,7 +1066,10 @@ private let rec cheney_scan_preserves_no_scan_invariant
       let fuel' : nat = fuel - 1 in
       let obj = Seq.index cs.cs_queue scan in
       let wz = minor_wosize minor obj in
-      let cs' = cheney_forward_fields minor cs obj 0 wz in
+      // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+      let cs' = if minor_is_no_scan minor obj
+                then cs
+                else cheney_forward_fields minor cs obj 0 wz in
       cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
       Forwarding.cheney_forward_fields_preserves_cob minor cs obj 0 wz;
       cheney_forward_fields_preserves_no_scan_invariant minor cs obj 0 wz;
@@ -1206,7 +1215,10 @@ private let rec cheney_scan_preserves_blue_fields_closed
     cheney_scan_step minor cs scan fuel;
     let obj = Seq.index cs.cs_queue scan in
     let wz = minor_wosize minor obj in
-    let cs' = cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag branch of cheney_scan: state unchanged on a no-scan object.
+    let cs' = if minor_is_no_scan minor obj
+              then cs
+              else cheney_forward_fields minor cs obj 0 wz in
     cheney_forward_fields_preserves_wfh_part1 minor cs obj 0 wz;
     Forwarding.cheney_forward_fields_preserves_cob minor cs obj 0 wz;
     cheney_forward_fields_preserves_blue_fields_closed minor cs obj 0 wz;

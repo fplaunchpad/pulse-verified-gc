@@ -156,7 +156,10 @@ let rec scan_fwd_monotone
     CheneySpec.cheney_scan_step minor cs scan fuel;
     let obj = Seq.index cs.cs_queue scan in
     let wz = minor_wosize minor obj in
-    let cs' = CheneySpec.cheney_forward_fields minor cs obj 0 wz in
+    // No_scan_tag branch of cheney_scan: on a no-scan object the state is unchanged.
+    let cs' = if minor_is_no_scan minor obj
+              then cs
+              else CheneySpec.cheney_forward_fields minor cs obj 0 wz in
     forward_fields_fwd_monotone minor cs obj 0 wz x;
     scan_fwd_monotone minor cs' (scan + 1) (fuel - 1) x
   end
@@ -494,6 +497,44 @@ let scanned_prefix_step
       end
     in
     FStar.Classical.forall_intro_2 (FStar.Classical.move_requires_2 aux)
+
+/// Advancing the scan pointer over a no-scan queue entry preserves the prefix
+/// closure without changing the state.  The entry contributes no successors
+/// (minor_successors_no_scan), so the k = scan case of the conclusion is vacuous
+/// and the k < scan cases are the hypothesis verbatim.
+let scanned_prefix_step_no_scan
+  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat)
+  : Lemma
+    (requires
+      scanned_prefix_closed minor cs scan /\
+      scan < Seq.length cs.cs_queue /\
+      minor_is_no_scan minor (Seq.index cs.cs_queue scan))
+    (ensures scanned_prefix_closed minor cs (scan + 1))
+  =
+    let parent = Seq.index cs.cs_queue scan in
+    reveal_opaque (`%scanned_prefix_closed) (scanned_prefix_closed minor cs scan);
+    reveal_opaque (`%scanned_prefix_closed) (scanned_prefix_closed minor cs (scan + 1));
+    let aux (k:nat) (y:U64.t) : Lemma
+      (requires k < scan + 1 /\ k < Seq.length cs.cs_queue /\
+                Seq.mem y (minor_successors minor (Seq.index cs.cs_queue k)) /\
+                minor_wosize minor y > 0)
+      (ensures cs.cs_fwd y <> 0UL)
+    =
+      if k = scan then minor_successors_no_scan minor parent y
+      else ()
+    in
+    FStar.Classical.forall_intro_2 (FStar.Classical.move_requires_2 aux)
+
+let scanned_prefix_step_no_scan_oom
+  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat) (oom: bool)
+  : Lemma
+    (requires
+      (not oom ==> scanned_prefix_closed minor cs scan) /\
+      scan < Seq.length cs.cs_queue /\
+      minor_is_no_scan minor (Seq.index cs.cs_queue scan))
+    (ensures not oom ==> scanned_prefix_closed minor cs (scan + 1))
+  =
+    if not oom then scanned_prefix_step_no_scan minor cs scan
 
 let scanned_prefix_step_oom
   (minor: minor_state) (cs cs': CheneySpec.cheney_state) (scan: nat)

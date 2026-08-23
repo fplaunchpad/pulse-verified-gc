@@ -255,8 +255,9 @@ val cheney_scan_step
   : Lemma (requires fuel > 0 /\ scan < Seq.length cs.cs_queue)
           (ensures cheney_scan minor cs scan fuel ==
                    (let obj = Seq.index cs.cs_queue scan in
-                    let wz = minor_wosize minor obj in
-                    let cs' = cheney_forward_fields minor cs obj 0 wz in
+                    let cs' =
+                      if minor_is_no_scan minor obj then cs
+                      else cheney_forward_fields minor cs obj 0 (minor_wosize minor obj) in
                     cheney_scan minor cs' (scan + 1) (fuel - 1)))
 
 /// Fuel bound: sufficient to process all reachable minor objects.

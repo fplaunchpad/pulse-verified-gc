@@ -41,6 +41,7 @@ module CheneySpec = GC.Gen.Cheney
 module CheneyBFS = GC.Gen.CheneyBFS
 module Sim = GC.Gen.Cheney.Sim
 module SimOne = GC.Gen.Cheney.SimOne
+module SpecObj = GC.Spec.Object
 module GR = Pulse.Lib.GhostReference
 module AllocProps = GC.Gen.AllocProps
 
@@ -709,6 +710,30 @@ fn scan_loop
       scan := SZ.add s 1sz
     } else if not (U64.eq (U64.rem obj 8UL) 0UL) {
       // Unreachable: we proved obj % 8 == 0
+      scan := SZ.add s 1sz
+    } else if U64.gte (read_minor_tag minor obj) SpecObj.no_scan_tag {
+      // No_scan_tag guard (PATCHES.md patch 16). A Custom_tag / String_tag /
+      // Double_array_tag block's payload is raw bytes, so it has no children to
+      // forward; cheney_scan leaves the state unchanged on such an object. Unlike
+      // the three arms above this one is genuinely reachable, so it has to unfold
+      // the spec equation rather than be discharged as vacuous.
+      SimOne.cheney_bfs_inv_bound ({data='md; bump='mb} <: minor_state) (reveal cs_cur);
+      CheneySpec.cheney_fuel_eq ({data='md; bump='mb} <: minor_state);
+      // Tie the runtime test to the ghost predicate the spec branches on. Without
+      // this the solver has cheney_scan_step's equation containing
+      // `if minor_is_no_scan minor obj then cs else ...` and, at --ifuel 0, will
+      // not case-split to reduce it to `cs`.
+      assert (pure (minor_is_no_scan ({data='md; bump='mb} <: minor_state) obj));
+      CheneySpec.cheney_scan_step ({data='md; bump='mb} <: minor_state)
+        (reveal cs_cur) (SZ.v s)
+        (CheneySpec.cheney_fuel ({data='md; bump='mb} <: minor_state) - SZ.v s);
+      // Extend the scanned-prefix closure over the skipped entry. The state is
+      // unchanged and a no-scan block has no minor_successors, so the new k = scan
+      // case of scanned_prefix_closed is vacuous. Reading oom_ref only to name the
+      // current flag for the lemma; this arm cannot allocate, so it cannot set it.
+      let oom_now = !oom_ref;
+      CheneyBFS.scanned_prefix_step_no_scan_oom ({data='md; bump='mb} <: minor_state)
+        (reveal cs_cur) (SZ.v s) oom_now;
       scan := SZ.add s 1sz
     } else {
       let wosize = read_minor_wosize minor obj;

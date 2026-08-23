@@ -137,6 +137,20 @@ val fwd_disjoint_reachable_major_intro
       RBridge.roots_valid_nonblue roots major)
     (ensures fwd_disjoint_reachable_major minor major fp roots)
 
+/// A minor object with a classifiable pointer field is not a no-scan block, given
+/// the minor no-scan invariant.  Needed by the reflection proof to introduce a
+/// combined-graph edge out of a minor source, now that the graph is guarded.
+val minor_field_source_not_no_scan
+  (minor: minor_state) (major: heap)
+  (src: U64.t) (i: nat) (dst: CG.combined_vertex)
+  : Lemma
+    (requires
+      minor_no_scan_invariant minor /\
+      Seq.mem src (minor_objects minor) /\
+      i < minor_wosize minor src /\
+      CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst)
+    (ensures ~(minor_is_no_scan minor src))
+
 val minor_source_edge_not_no_scan
   (minor: minor_state) (major: heap) (fp: U64.t)
   (src: U64.t) (dst: CG.combined_vertex)

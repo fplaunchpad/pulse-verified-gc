@@ -38,8 +38,19 @@ let rec collect_minor_successors
 /// minor_successors
 /// ---------------------------------------------------------------------------
 
+/// A no-scan block (tag >= No_scan_tag) holds raw bytes, not values, so it has no
+/// successors -- whatever its payload words happen to look like numerically. This
+/// mirrors the guard the major side has always had on `major_object_edges`
+/// (GC.Gen.CombinedGraph.fst:155); the minor side simply never had it.
 let minor_successors (ms: minor_state) (obj: U64.t) : GTot (seq U64.t) =
-  collect_minor_successors ms obj 0 (minor_wosize ms obj)
+  if minor_is_no_scan ms obj then Seq.empty
+  else collect_minor_successors ms obj 0 (minor_wosize ms obj)
+
+/// Nothing is a member of a length-zero sequence.  Stated via `mem_index` rather
+/// than unfolding `count`, so it holds at any fuel.
+private let mem_of_len_zero (#a: eqtype) (x: a) (s: seq a)
+  : Lemma (requires Seq.length s == 0) (ensures ~(Seq.mem x s))
+  = Classical.move_requires (Seq.mem_index x) s
 
 /// ---------------------------------------------------------------------------
 /// Helper lemma: every element collected is in minor_objects
@@ -81,7 +92,8 @@ let minor_successors_valid (ms: minor_state) (obj: U64.t) (x: U64.t)
   : Lemma (requires Seq.mem x (minor_successors ms obj))
           (ensures Seq.mem x (minor_objects ms))
   =
-  collect_minor_successors_valid ms obj 0 (minor_wosize ms obj) x
+  if minor_is_no_scan ms obj then mem_of_len_zero x (minor_successors ms obj)
+  else collect_minor_successors_valid ms obj 0 (minor_wosize ms obj) x
 
 /// ---------------------------------------------------------------------------
 /// BFS worklist algorithm for reachability
@@ -350,7 +362,8 @@ let rec collect_minor_successors_length
 /// Length of minor_successors bounded by wosize
 let minor_successors_length (ms: minor_state) (obj: U64.t)
   : Lemma (ensures Seq.length (minor_successors ms obj) <= minor_wosize ms obj)
-  = collect_minor_successors_length ms obj 0 (minor_wosize ms obj)
+  = if minor_is_no_scan ms obj then ()
+    else collect_minor_successors_length ms obj 0 (minor_wosize ms obj)
 
 /// Characterization of collect_minor_successors
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
@@ -381,11 +394,18 @@ private let rec collect_minor_successors_char
 
 let minor_successors_char (ms: minor_state) (x y: U64.t)
   : Lemma (ensures Seq.mem y (minor_successors ms x) <==>
-                    (exists (i:nat). i < minor_wosize ms x /\
-                                     to_minor_offset (minor_read_field ms x i) == y /\
-                                     is_minor_addr y /\
-                                     Seq.mem y (minor_objects ms)))
-  = collect_minor_successors_char ms x 0 (minor_wosize ms x) y
+                    (~(minor_is_no_scan ms x) /\
+                     (exists (i:nat). i < minor_wosize ms x /\
+                                      to_minor_offset (minor_read_field ms x i) == y /\
+                                      is_minor_addr y /\
+                                      Seq.mem y (minor_objects ms))))
+  = if minor_is_no_scan ms x then mem_of_len_zero y (minor_successors ms x)
+    else collect_minor_successors_char ms x 0 (minor_wosize ms x) y
+
+let minor_successors_no_scan (ms: minor_state) (obj: U64.t) (y: U64.t)
+  : Lemma (requires minor_is_no_scan ms obj)
+          (ensures ~(Seq.mem y (minor_successors ms obj)))
+  = minor_successors_char ms obj y
 
 /// For objects in minor_objects, successors length < minor_heap_size
 let minor_successors_length_bound (ms: minor_state) (obj: U64.t)

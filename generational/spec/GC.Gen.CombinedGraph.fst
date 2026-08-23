@@ -127,11 +127,15 @@ let rec minor_field_edges (ms: minor_state) (major: heap) (src: U64.t)
       | Some dst -> Seq.cons (MinorV src, dst) rest
       | None -> rest
 
-/// Build edges from a single minor object
+/// Build edges from a single minor object.  A no-scan block (tag >= No_scan_tag)
+/// holds raw bytes, so it contributes no edges -- the mirror of the guard
+/// `major_object_edges` below has always had.
 let minor_object_edges (ms: minor_state) (major: heap) (obj: U64.t)
   : GTot (seq combined_edge)
-  = let wz = minor_wosize ms obj in
-    minor_field_edges ms major obj wz 0
+  = if minor_is_no_scan ms obj then Seq.empty
+    else
+      let wz = minor_wosize ms obj in
+      minor_field_edges ms major obj wz 0
 
 /// Build edges from a single major object's fields
 let rec major_field_edges (ms: minor_state) (major: heap) (src: obj_addr)
@@ -459,7 +463,8 @@ private let rec all_minor_edges_wf (ms: minor_state) (major: heap)
                            (all_minor_edges ms major objs (idx + 1));
       if Seq.mem e (minor_object_edges ms major obj) then begin
         assert (Seq.mem obj objs);
-        minor_field_edges_wf ms major obj (minor_wosize ms obj) 0 e
+        if minor_is_no_scan ms obj then ()
+        else minor_field_edges_wf ms major obj (minor_wosize ms obj) 0 e
       end
       else
         all_minor_edges_wf ms major objs (idx + 1) e
@@ -609,6 +614,7 @@ let minor_field_edge_intro (ms: minor_state) (major: heap)
   (src: U64.t) (i: nat) (dst: combined_vertex)
   : Lemma (requires Seq.mem src (minor_objects ms) /\
                     i < minor_wosize ms src /\
+                    ~(minor_is_no_scan ms src) /\
                     classify_minor_field ms major (minor_read_field ms src i) == Some dst)
           (ensures mem_ce (MinorV src, dst) (build_combined_graph ms major))
   = let minor_objs = minor_objects ms in
@@ -945,7 +951,8 @@ private let rec minor_field_edges_no_major (ms: minor_state) (major: heap)
 private let minor_object_edges_no_major (ms: minor_state) (major: heap)
   (obj: U64.t) (a: U64.t) (dst: combined_vertex)
   : Lemma (ensures ~(Seq.mem (MajorV a, dst) (minor_object_edges ms major obj)))
-  = minor_field_edges_no_major ms major obj (minor_wosize ms obj) 0 a dst
+  = if minor_is_no_scan ms obj then ()
+    else minor_field_edges_no_major ms major obj (minor_wosize ms obj) 0 a dst
 #pop-options
 
 /// Helper: all_minor_edges never has MajorV source
@@ -992,7 +999,9 @@ let edge_source_decomposition (ms: minor_state) (major: heap)
         (fun k -> 0 <= k /\ k < Seq.length minor_objs /\
                   Seq.mem e (minor_object_edges ms major (Seq.index minor_objs k))) in
       let obj = Seq.index minor_objs k in
-      // minor_object_edges obj = minor_field_edges ms major obj wz 0
+      // minor_object_edges obj = minor_field_edges ms major obj wz 0, except when obj
+      // is no-scan, in which case it is Seq.empty and membership is a contradiction
+      assert (~(minor_is_no_scan ms obj));
       let wz = minor_wosize ms obj in
       minor_field_edges_source ms major obj wz 0 e;
       // This gives us fst e == MinorV obj, i.e., src == obj
@@ -1033,6 +1042,7 @@ let minor_edge_elim (ms: minor_state) (major: heap)
   (src: U64.t) (dst: combined_vertex)
   : Lemma (requires mem_ce (MinorV src, dst) (build_combined_graph ms major))
           (ensures Seq.mem src (minor_objects ms) /\
+                   ~(minor_is_no_scan ms src) /\
                    (exists (i: nat). i < minor_wosize ms src /\
                      classify_minor_field ms major (minor_read_field ms src i) == Some dst))
   = let minor_objs = minor_objects ms in
@@ -1048,6 +1058,7 @@ let minor_edge_elim (ms: minor_state) (major: heap)
       (fun k -> 0 <= k /\ k < Seq.length minor_objs /\
                 Seq.mem e (minor_object_edges ms major (Seq.index minor_objs k))) in
     let obj = Seq.index minor_objs k in
+    assert (~(minor_is_no_scan ms obj));
     let wz = minor_wosize ms obj in
     minor_field_edges_source ms major obj wz 0 e;
     assert (src == obj);

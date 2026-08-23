@@ -24,6 +24,13 @@ module U8 = FStar.UInt8
 open GC.Spec.Base
 open GC.Gen.Base
 
+/// For the shared OCaml ABI tag constants (closure_tag / infix_tag / no_scan_tag).
+/// NB: the pre-existing `249` literals below and in the .fst predate this and are
+/// left alone deliberately -- most sit inside refinement types that propagate into
+/// signatures used by ~30 modules, so replacing them is a separate mechanical
+/// change, not part of the no-scan/infix fix.
+module SpecObj = GC.Spec.Object
+
 /// ---------------------------------------------------------------------------
 /// Minor Heap Word Operations (independent of major heap's read_word)
 /// ---------------------------------------------------------------------------
@@ -216,6 +223,17 @@ val minor_tag_bound (ms: minor_state) (obj: U64.t)
 /// header tag is Infix_tag (249). Infix headers reside WITHIN the body of
 /// a parent closure (tag=247) and encode the byte offset back to the parent
 /// in the wosize field.
+/// A minor object whose payload is raw bytes, not values: tag >= No_scan_tag.
+/// The mirror of GC.Spec.Object.is_no_scan, which cannot be reused because it is
+/// typed over the major `heap`; only the constant is shared. The Cheney BFS must
+/// not scan the fields of such an object -- doing so is what let a boxed Int64's
+/// payload be mistaken for a nursery pointer (see PATCHES.md patch 16).
+let minor_is_no_scan (ms: minor_state) (addr: U64.t) : GTot bool =
+  minor_tag ms addr >= U64.v SpecObj.no_scan_tag
+
+let minor_is_no_scan_spec (ms: minor_state) (addr: U64.t)
+  : Lemma (minor_is_no_scan ms addr == (minor_tag ms addr >= 251)) = ()
+
 let is_infix_in_minor (ms: minor_state) (addr: U64.t) : GTot bool =
   U64.v addr >= 8 && U64.v addr < minor_heap_size && U64.v addr % 8 = 0 &&
   minor_tag ms addr = 249

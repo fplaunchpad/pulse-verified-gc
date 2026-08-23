@@ -41,11 +41,23 @@ let darken_if_white_bounded_spec (g: heap_state) (st: Seq.seq obj_addr)
       else (g, st)
     else (g, st)
 
-/// Spec function: what check_and_darken_bounded computes
+/// Spec function: what check_and_darken_bounded computes.
+///
+/// The value `v` is normalised with `resolve_object` before its header address is
+/// taken. This is the specification-level statement of hand patch 14: when `v` is an
+/// infix pointer -- a reference to one of a set of mutually recursive functions,
+/// aimed at a fake `Infix_tag` header planted inside an enclosing closure -- the word
+/// at `v - 8` is that fake header, not the closure's own, so darkening `v - 8` leaves
+/// the closure white and the sweep frees it while live. `resolve_object` maps an infix
+/// address to its parent closure and is the identity elsewhere; it is the same
+/// function `GC.Spec.Mark.push_children` and the tri-colour invariant are already
+/// stated over, so the two specifications now agree without appeal to
+/// `GC.Spec.Mark.pointer_field_resolve_identity`.
 let check_and_darken_bounded_spec (g: heap_state) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
   : GTot (heap_state & Seq.seq obj_addr)
   = if U64.v v >= U64.v zero_addr + U64.v mword && U64.v v < heap_size && U64.v v % U64.v mword = 0 then
-      darken_if_white_bounded_spec g st (U64.sub v mword) cap
+      darken_if_white_bounded_spec g st
+        (SpecHeap.hd_address (SpecObject.resolve_object (v <: obj_addr) g)) cap
     else (g, st)
 
 /// Spec worker for root preparation: darken roots[0..idx) using the same
@@ -121,6 +133,27 @@ val darken_roots_bounded_spec_preserves_wosize
           (fst (darken_roots_bounded_spec g st roots cap)) ==
         SpecObject.wosize_of_object obj g)
 
+/// Darkening never changes any object's tag or wosize, so it never changes any
+/// address's infix resolution. Needed because check_and_darken_bounded_spec now names
+/// `resolve_object v g`: statements about a sequence of darkenings have to transport
+/// that across the intermediate heaps.
+val check_and_darken_bounded_spec_preserves_resolve
+  (g: heap_state) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat) (x: obj_addr)
+  : Lemma
+      (ensures
+        SpecObject.resolve_object x
+          (fst (check_and_darken_bounded_spec g st v cap)) ==
+        SpecObject.resolve_object x g)
+
+val darken_roots_bounded_prefix_preserves_resolve
+  (g: heap_state) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)
+  (idx: nat{idx <= Seq.length roots}) (cap: nat) (x: obj_addr)
+  : Lemma
+      (ensures
+        SpecObject.resolve_object x
+          (fst (darken_roots_bounded_prefix_spec g st roots idx cap)) ==
+        SpecObject.resolve_object x g)
+
 val check_and_darken_bounded_spec_preserves_objects
   (g: heap_state) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
   : Lemma
@@ -155,7 +188,7 @@ val check_and_darken_bounded_spec_preserves_read_word
         (U64.v v >= U64.v zero_addr + U64.v mword /\
          U64.v v < heap_size /\
          U64.v v % U64.v mword == 0 ==>
-         U64.sub v mword <> slot))
+         SpecHeap.hd_address (SpecObject.resolve_object (v <: obj_addr) g) <> slot))
       (ensures
         SpecHeap.read_word
           (fst (check_and_darken_bounded_spec g st v cap)) slot ==
@@ -170,7 +203,8 @@ val darken_roots_bounded_prefix_preserves_read_word
           (U64.v (Seq.index roots i) >= U64.v zero_addr + U64.v mword /\
            U64.v (Seq.index roots i) < heap_size /\
            U64.v (Seq.index roots i) % U64.v mword == 0 ==>
-           U64.sub (Seq.index roots i) mword <> slot))
+           SpecHeap.hd_address
+             (SpecObject.resolve_object (Seq.index roots i <: obj_addr) g) <> slot))
       (ensures
         SpecHeap.read_word
           (fst (darken_roots_bounded_prefix_spec g st roots idx cap)) slot ==
@@ -185,11 +219,33 @@ val darken_roots_bounded_spec_preserves_read_word
           (U64.v (Seq.index roots i) >= U64.v zero_addr + U64.v mword /\
            U64.v (Seq.index roots i) < heap_size /\
            U64.v (Seq.index roots i) % U64.v mword == 0 ==>
-           U64.sub (Seq.index roots i) mword <> slot))
+           SpecHeap.hd_address
+             (SpecObject.resolve_object (Seq.index roots i <: obj_addr) g) <> slot))
       (ensures
         SpecHeap.read_word
           (fst (darken_roots_bounded_spec g st roots cap)) slot ==
         SpecHeap.read_word g slot)
+
+/// A root value that `root_points_to_object` accepts resolves to itself.
+///
+/// Needed throughout now that `check_and_darken_bounded_spec` darkens
+/// `hd_address (resolve_object v g)` (hand patch 14): `root_points_to_object g v`
+/// makes `v` an enumerated object and `well_formed_heap_part4` makes enumerated objects
+/// non-infix, so resolution is the identity on such a `v`. A root that is a genuine
+/// infix pointer is *not* an enumerated object, and for such a root it is correctly its
+/// parent closure -- not the root value -- that gets darkened and pushed. Exported so
+/// GC.Impl.MarkBoundedRootLemmas shares this proof rather than copying it.
+val root_resolves_to_itself (g: heap_state) (v: U64.t)
+  : Lemma
+      (requires
+        SpecFields.well_formed_heap g /\
+        U64.v v >= U64.v zero_addr + U64.v mword /\
+        U64.v v < heap_size /\
+        U64.v v % U64.v mword == 0 /\
+        root_points_to_object g v)
+      (ensures
+        Seq.mem (v <: obj_addr) (SpecFields.objects zero_addr g) /\
+        SpecObject.resolve_object (v <: obj_addr) g == (v <: obj_addr))
 
 val darken_roots_bounded_spec_preserves_bounded_mark_inv
   (g: heap_state) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)

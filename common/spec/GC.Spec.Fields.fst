@@ -696,6 +696,23 @@ let well_formed_heap_part1 (g: heap) : prop =
     (let wz = wosize_of_object h g in
      U64.v (hd_address h) + 8 + (U64.v wz * 8) <= Seq.length g))
 
+/// Every pointer field of an enumerated object targets an enumerated object.
+///
+/// KNOWN OVER-STRONG (hand patch 14). This is *false* for any heap in which a field
+/// holds an infix pointer: `objects` holds only object starts -- by part 4 and,
+/// structurally, because the linear walk steps from each object start by
+/// `(wosize + 1) * 8`, over any embedded infix header -- while an infix pointer
+/// legitimately aims into the middle of a closure. Together with part 4 this is what
+/// makes `wf_resolve_identity` below, and hence
+/// `GC.Spec.Mark.pointer_field_resolve_identity`, provable: it is the formal statement
+/// of patch 14's bug.
+///
+/// Weakening the conclusion to `Seq.mem (resolve_object dst g) (objects zero_addr g)`
+/// was attempted and *reverted*, because it makes `field_write_preserves_wf` below
+/// genuinely false rather than merely hard: writing a non-infix word over a live infix
+/// header changes the resolution of a still-referenced field target. See
+/// generational/INFIX_DARKEN_VERIFICATION_LOG.md section 2 for the counterexample,
+/// the failing VC and the reason no side condition available in the sweeper repairs it.
 let well_formed_heap_part2 (g: heap) : prop =
   (forall (src dst: obj_addr). 
     (Seq.mem src (objects zero_addr g) /\ 
@@ -844,6 +861,23 @@ let wf_field_target_in_objects (g: heap) (src: obj_addr) (dst: obj_addr) : Lemma
   (ensures Seq.mem dst (objects zero_addr g))
   = reveal_opaque (`%well_formed_heap) well_formed_heap
 
+/// The resolved form of the above. Under the present (over-strong) part 2 this is
+/// strictly weaker than `wf_field_target_in_objects`, because part 4 makes the target
+/// non-infix and resolution is therefore the identity on it. It is stated separately
+/// because it is the form the mark implementation actually needs -- see
+/// `GC.Impl.MarkBounded.check_and_darken_bounded_spec`, which darkens
+/// `hd_address (resolve_object v g)` -- and the only form that would survive a
+/// weakening of part 2. Callers that want it should use this name rather than
+/// composing the raw lemma with `wf_resolve_identity` at each site.
+let wf_field_target_resolves_into_objects (g: heap) (src: obj_addr) (dst: obj_addr) : Lemma
+  (requires well_formed_heap g /\ Seq.mem src (objects zero_addr g) /\
+            (let wz = wosize_of_object src g in
+             U64.v wz < pow2 54 /\
+             exists_field_pointing_to_unchecked g src wz dst))
+  (ensures Seq.mem (GC.Spec.Object.resolve_object dst g) (objects zero_addr g))
+  = wf_field_target_in_objects g src dst;
+    wf_resolve_identity g dst
+
 /// Combined: field read + pointer target → target ∈ objects.
 /// Internalizes wf_object_size_bound + field_read_implies_exists_pointing + wf_field_target_in_objects.
 let field_pointer_target_in_objects (g: heap) (h: obj_addr)
@@ -861,6 +895,19 @@ let field_pointer_target_in_objects (g: heap) (h: obj_addr)
     field_read_implies_exists_pointing g h wz k target;
     wf_field_target_in_objects g h target
 
+/// The resolved form of field_pointer_target_in_objects.
+let field_pointer_target_resolves_into_objects (g: heap) (h: obj_addr)
+    (k: U64.t{U64.v k < pow2 61}) (target: obj_addr)
+  : Lemma (requires well_formed_heap g /\ Seq.mem h (objects zero_addr g) /\
+                    U64.v k < U64.v (wosize_of_object h g) /\
+                    (let far = U64.add_mod h (U64.mul_mod k mword) in
+                     U64.v far < heap_size /\ U64.v far % 8 = 0 /\
+                     (let fv = read_word g (far <: hp_addr) in
+                      is_pointer_to fv target)))
+          (ensures Seq.mem (GC.Spec.Object.resolve_object target g) (objects zero_addr g))
+  = field_pointer_target_in_objects g h k target;
+    wf_resolve_identity g target
+
 /// In a well-formed heap, pointer targets of objects are themselves in objects.
 /// Bridges points_to → exists_field_pointing_to_unchecked → wf_field_target_in_objects.
 let points_to_target_in_objects (g: heap) (src dst: obj_addr) : Lemma
@@ -869,6 +916,14 @@ let points_to_target_in_objects (g: heap) (src dst: obj_addr) : Lemma
   (ensures Seq.mem dst (objects zero_addr g))
   = wosize_of_object_bound src g;
     wf_field_target_in_objects g src dst
+
+/// The resolved form of points_to_target_in_objects.
+let points_to_target_resolves_into_objects (g: heap) (src dst: obj_addr) : Lemma
+  (requires well_formed_heap g /\ Seq.mem src (objects zero_addr g) /\
+            points_to g src dst)
+  (ensures Seq.mem (GC.Spec.Object.resolve_object dst g) (objects zero_addr g))
+  = points_to_target_in_objects g src dst;
+    wf_resolve_identity g dst
 
 /// Derive well_formed_heap_part2 from a per-field closure property.
 /// If every pointer-valued field of every object targets another object,

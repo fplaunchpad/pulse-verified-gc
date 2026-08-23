@@ -4,6 +4,7 @@ module U64 = FStar.UInt64
 module Seq = FStar.Seq
 module SpecMark = GC.Spec.Mark
 module SpecObject = GC.Spec.Object
+module SpecFields = GC.Spec.Fields
 module MarkBounded = GC.Impl.MarkBounded
 
 open GC.Spec.Base
@@ -60,6 +61,11 @@ val check_and_darken_bounded_spec_preserves_not_blue
       (ensures
         ~(SpecObject.is_blue x (fst (MarkBounded.check_and_darken_bounded_spec g st v cap))))
 
+/// Patch 14 note: `check_and_darken_bounded_spec` pushes the *resolved* target, so this
+/// conclusion needs resolution to be the identity on `v`. It is:
+/// `root_points_to_object g v` makes `v` an enumerated object and
+/// `well_formed_heap_part4` makes enumerated objects non-infix. Hence the added
+/// `well_formed_heap g` hypothesis. See `root_resolves_to_itself` in the .fst.
 val check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
   : Lemma
@@ -67,6 +73,7 @@ val check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
         U64.v v >= U64.v zero_addr + U64.v mword /\
         U64.v v < heap_size /\
         U64.v v % U64.v mword == 0 /\
+        SpecFields.well_formed_heap g /\
         MarkBounded.root_points_to_object g v /\
         ~(SpecObject.is_black (v <: obj_addr) g) /\
         ~(SpecObject.is_blue (v <: obj_addr) g) /\
@@ -76,11 +83,15 @@ val check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
         Seq.mem (v <: obj_addr)
           (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)))
 
+/// Patch 14 note: as above, the spec pushes the resolved target, so this needs `v` to
+/// resolve to itself; `root_points_to_object` plus `well_formed_heap` supplies it.
 val check_and_darken_bounded_spec_preserves_stack_roots
   (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)
   (v: U64.t) (cap: nat)
   : Lemma
       (requires
+        SpecFields.well_formed_heap g /\
+        MarkBounded.root_points_to_object g v /\
         (forall (x: obj_addr). Seq.mem x st ==> Seq.mem (x <: U64.t) roots) /\
         Seq.mem v roots)
       (ensures

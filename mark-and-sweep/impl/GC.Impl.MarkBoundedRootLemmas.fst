@@ -31,7 +31,11 @@ let check_and_darken_bounded_spec_length_increases_at_most_one
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    // Patch 14: the bounded spec resolves v before taking its header address.
+    let rv = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = SpecHeap.hd_address rv in
+    SpecHeap.hd_address_bounds rv;
+    SpecHeap.f_hd_roundtrip rv;
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then
@@ -90,7 +94,11 @@ let check_and_darken_bounded_spec_preserves_gray_objects_on_stack
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    // Patch 14: the bounded spec resolves v before taking its header address.
+    let rv = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = SpecHeap.hd_address rv in
+    SpecHeap.hd_address_bounds rv;
+    SpecHeap.f_hd_roundtrip rv;
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -176,7 +184,11 @@ let check_and_darken_bounded_spec_preserves_stack_mem
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    // Patch 14: the bounded spec resolves v before taking its header address.
+    let rv = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = SpecHeap.hd_address rv in
+    SpecHeap.hd_address_bounds rv;
+    SpecHeap.f_hd_roundtrip rv;
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then
@@ -204,7 +216,11 @@ let check_and_darken_bounded_spec_preserves_not_black
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    // Patch 14: the bounded spec resolves v before taking its header address.
+    let rv = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = SpecHeap.hd_address rv in
+    SpecHeap.hd_address_bounds rv;
+    SpecHeap.f_hd_roundtrip rv;
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -240,7 +256,11 @@ let check_and_darken_bounded_spec_preserves_not_blue
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    // Patch 14: the bounded spec resolves v before taking its header address.
+    let rv = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = SpecHeap.hd_address rv in
+    SpecHeap.hd_address_bounds rv;
+    SpecHeap.f_hd_roundtrip rv;
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -263,6 +283,7 @@ let check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
         U64.v v >= U64.v zero_addr + U64.v mword /\
         U64.v v < heap_size /\
         U64.v v % U64.v mword == 0 /\
+        SpecFields.well_formed_heap g /\
         MarkBounded.root_points_to_object g v /\
         ~(SpecObject.is_black (v <: obj_addr) g) /\
         ~(SpecObject.is_blue (v <: obj_addr) g) /\
@@ -274,6 +295,7 @@ let check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
   =
   let obj = (v <: obj_addr) in
   let h = U64.sub v mword in
+  MarkBounded.root_resolves_to_itself g v;
   SpecHeap.hd_address_spec obj;
   assert (U64.v h == U64.v (SpecHeap.hd_address obj));
   U64.v_inj h (SpecHeap.hd_address obj);
@@ -299,6 +321,8 @@ let check_and_darken_bounded_spec_preserves_stack_roots
   (v: U64.t) (cap: nat)
   : Lemma
       (requires
+        SpecFields.well_formed_heap g /\
+        MarkBounded.root_points_to_object g v /\
         (forall (x: obj_addr). Seq.mem x st ==> Seq.mem (x <: U64.t) roots) /\
         Seq.mem v roots)
       (ensures
@@ -317,7 +341,12 @@ let check_and_darken_bounded_spec_preserves_stack_roots
        U64.v v < heap_size &&
        U64.v v % U64.v mword = 0
     then
-      let h = U64.sub v mword in
+      // Patch 14: the bounded spec resolves v before taking its header address.
+      let rv = SpecObject.resolve_object (v <: obj_addr) g in
+      let h = SpecHeap.hd_address rv in
+      SpecHeap.hd_address_bounds rv;
+      SpecHeap.f_hd_roundtrip rv;
+      MarkBounded.root_resolves_to_itself g v;
       if U64.v h + U64.v mword < heap_size then
         let target = SpecHeap.f_address h in
         if SpecObject.is_white target g then

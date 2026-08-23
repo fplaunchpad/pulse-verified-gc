@@ -4007,6 +4007,45 @@ let check_and_darken_field_preserves_wf
       wosize_of_object_spec obj (set_object_color target g Header.Gray)
     end
 
+let check_and_darken_resolved_field_preserves_wf
+  (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >= 1}) (wz: U64.t)
+  : Lemma (requires well_formed_heap g /\ Seq.mem obj (objects zero_addr g) /\
+                    U64.v wz <= U64.v (wosize_of_object obj g) /\
+                    U64.v (wosize_of_object obj g) < pow2 54 /\
+                    Seq.length g == heap_size /\
+                    U64.v i <= U64.v wz /\
+                    HeapGraph.is_pointer_field (HeapGraph.get_field g obj i))
+          (ensures (let v = HeapGraph.get_field g obj i in
+                    let raw : obj_addr = v in
+                    let target = resolve_object raw g in
+                    Seq.mem target (objects zero_addr g) /\
+                    (is_white target g ==>
+                      (well_formed_heap (set_object_color target g Header.Gray) /\
+                       Seq.mem obj (objects zero_addr (set_object_color target g Header.Gray)) /\
+                       U64.v wz <= U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) /\
+                       U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) < pow2 54))))
+  = let v = HeapGraph.get_field g obj i in
+    HeapGraph.is_pointer_field_is_obj_addr v;
+    let raw : obj_addr = v in
+    let wz_obj = wosize_of_object obj g in
+    wosize_of_object_bound obj g;
+    hd_address_spec obj;
+    FStar.Math.Lemmas.pow2_lt_compat 61 54;
+    HeapGraph.get_field_addr_eq g obj i;
+    wf_object_size_bound g obj;
+    field_read_implies_exists_pointing g obj wz_obj (U64.sub i 1UL) raw;
+    // The only fact used about the target: after infix normalisation it is an
+    // enumerated object. No appeal to pointer_field_resolve_identity.
+    wf_field_target_resolves_into_objects g obj raw;
+    let target = resolve_object raw g in
+    if is_white target g then begin
+      color_change_preserves_wf g target Header.Gray;
+      color_change_preserves_objects_mem g target Header.Gray obj;
+      set_object_color_preserves_getWosize_at_hd target g Header.Gray;
+      wosize_of_object_spec obj g;
+      wosize_of_object_spec obj (set_object_color target g Header.Gray)
+    end
+
 /// When v = get_field g obj i is a valid pointer field, resolve_object v g == v
 /// (pointer targets in a well-formed heap are in objects and non-infix)
 let pointer_field_resolve_identity

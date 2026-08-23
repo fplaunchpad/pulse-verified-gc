@@ -20,6 +20,8 @@ open GC.Impl.Fields
 module U64 = FStar.UInt64
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
+module SpecHeap = GC.Spec.Heap
+module SpecObject = GC.Spec.Object
 
 /// ---------------------------------------------------------------------------
 /// Closure Info Field
@@ -64,13 +66,18 @@ fn start_env_from_closinfo (closinfo: U64.t)
 /// ---------------------------------------------------------------------------
 
 /// Check if object is an infix object
-fn is_infix_object (heap: heap_t) (h_addr: hp_addr)
+fn is_infix_object (heap: heap_t) (h_addr: hp_addr{U64.v h_addr + U64.v mword < heap_size})
   requires is_heap heap 's
   returns b: bool
-  ensures is_heap heap 's
+  ensures is_heap heap 's **
+          pure (b == SpecObject.is_infix (SpecHeap.f_address h_addr) 's)
 {
   let hdr = read_word heap h_addr;
   let t = getTag hdr;
+  getTag_eq hdr;
+  SpecHeap.hd_f_roundtrip h_addr;
+  SpecObject.tag_of_object_spec (SpecHeap.f_address h_addr) 's;
+  SpecObject.is_infix_spec (SpecHeap.f_address h_addr) 's;
   U64.eq t infix_tag
 }
 
@@ -91,10 +98,12 @@ fn is_closure_object (heap: heap_t) (h_addr: hp_addr)
 /// 
 /// Returns None if the offset is invalid (would underflow or produce invalid address)
 /// This should never happen in a well-formed heap, but we check defensively.
-fn parent_closure_of_infix_opt (heap: heap_t) (infix_addr: hp_addr)
+fn parent_closure_of_infix_opt
+      (heap: heap_t) (infix_addr: hp_addr{U64.v infix_addr + U64.v mword < heap_size})
   requires is_heap heap 's
   returns parent_opt: option hp_addr
-  ensures is_heap heap 's
+  ensures is_heap heap 's **
+          pure (parent_opt == parent_closure_of_infix_spec 's infix_addr)
 {
   // The infix object's "wosize" actually contains the offset (in words)
   // back to the parent closure's first field
@@ -103,6 +112,15 @@ fn parent_closure_of_infix_opt (heap: heap_t) (infix_addr: hp_addr)
   
   // Prove multiplication doesn't overflow
   lemma_field_offset_no_overflow (U64.v offset_words);
+
+  // Bridge the runtime header decode to the ghost wosize of the infix sub-object and
+  // hence to parent_closure_addr_nat. hd_f_roundtrip is what identifies the header
+  // just read with the header of `f_address infix_addr`.
+  getWosize_eq hdr;
+  SpecHeap.f_address_spec infix_addr;
+  SpecHeap.hd_f_roundtrip infix_addr;
+  SpecObject.wosize_of_object_spec (SpecHeap.f_address infix_addr) 's;
+  SpecObject.parent_closure_addr_nat_spec (SpecHeap.f_address infix_addr) 's;
   
   // Compute offset in bytes
   let offset_bytes = U64.mul offset_words mword;
@@ -124,6 +142,10 @@ fn parent_closure_of_infix_opt (heap: heap_t) (infix_addr: hp_addr)
     } else if (U64.rem parent_f_addr mword <> 0UL) {
       None
     } else {
+      // The runtime hd_address is U64.sub _ mword; hd_address_spec is what lets the
+      // abstract SpecHeap.hd_address in the postcondition be identified with it.
+      SpecHeap.hd_address_spec parent_f_addr;
+      U64.v_inj (hd_address parent_f_addr) (SpecHeap.hd_address parent_f_addr);
       Some (hd_address parent_f_addr)
     }
   }
@@ -132,10 +154,14 @@ fn parent_closure_of_infix_opt (heap: heap_t) (infix_addr: hp_addr)
 /// Get parent closure of an infix object (unsafe version)
 /// Precondition: The infix object must be well-formed with valid offset
 /// In a valid GC heap with proper invariants, this is always true for infix objects.
-fn parent_closure_of_infix (heap: heap_t) (infix_addr: hp_addr)
+fn parent_closure_of_infix
+      (heap: heap_t) (infix_addr: hp_addr{U64.v infix_addr + U64.v mword < heap_size})
   requires is_heap heap 's
   returns parent: hp_addr
-  ensures is_heap heap 's
+  ensures is_heap heap 's **
+          pure (parent == (match parent_closure_of_infix_spec 's infix_addr with
+                           | Some p -> p
+                           | None -> infix_addr))
 {
   let parent_opt = parent_closure_of_infix_opt heap infix_addr;
   
@@ -152,21 +178,49 @@ fn parent_closure_of_infix (heap: heap_t) (infix_addr: hp_addr)
 /// Closure-Aware Darkening
 /// ---------------------------------------------------------------------------
 
+/// The infix branch of resolve_object, discharged in both arms of
+/// parent_closure_of_infix_spec: Some via resolve_infix_spec, None via
+/// resolve_infix_invalid (resolve_object is defensive and returns its input when the
+/// recorded offset does not land on a valid object address).
+let resolve_object_infix_agrees
+      (s: heap_state) (obj: hp_addr{U64.v obj + U64.v mword < heap_size})
+  : Lemma (requires SpecObject.is_infix (SpecHeap.f_address obj) s)
+          (ensures SpecHeap.hd_address
+                     (SpecObject.resolve_object (SpecHeap.f_address obj) s)
+                   == (match parent_closure_of_infix_spec s obj with
+                       | Some p -> p
+                       | None -> obj))
+  = let x = SpecHeap.f_address obj in
+    let pn = SpecObject.parent_closure_addr_nat x s in
+    SpecHeap.hd_f_roundtrip obj;
+    if pn >= U64.v mword && pn < heap_size && pn % U64.v mword = 0
+    then SpecObject.resolve_infix_spec x s
+    else SpecObject.resolve_infix_invalid x s
+
 /// Darken with closure/infix handling
 /// If the object is an infix, we need to darken the parent closure instead
-fn resolve_object (heap: heap_t) (obj: hp_addr)
+fn resolve_object (heap: heap_t) (obj: hp_addr{U64.v obj + U64.v mword < heap_size})
   requires is_heap heap 's
   returns resolved: hp_addr
-  ensures is_heap heap 's
+  ensures is_heap heap 's **
+          pure (resolved ==
+                SpecHeap.hd_address (SpecObject.resolve_object (SpecHeap.f_address obj) 's))
 {
   // Check if it's an infix object
   let is_infix = is_infix_object heap obj;
   
   if (is_infix) {
-    // Get parent closure
+    // Both arms of parent_closure_of_infix_spec agree with resolve_object: on Some via
+    // resolve_infix_spec, and on None because resolve_object also falls back to its
+    // input when the computed parent is not a valid object address, together with
+    // hd_address (f_address obj) == obj.
+    SpecHeap.hd_f_roundtrip obj;
+    resolve_object_infix_agrees 's obj;
     parent_closure_of_infix heap obj
   } else {
     // Regular object, return as-is
+    SpecObject.resolve_non_infix (SpecHeap.f_address obj) 's;
+    SpecHeap.hd_f_roundtrip obj;
     obj
   }
 }

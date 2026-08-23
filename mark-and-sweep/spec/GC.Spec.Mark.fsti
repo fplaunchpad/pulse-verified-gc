@@ -632,6 +632,33 @@ val check_and_darken_field_preserves_wf :
                      U64.v wz <= U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) /\
                      U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) < pow2 54))))
 
+/// As check_and_darken_field_preserves_wf, but for the *resolved* target -- the form
+/// the bounded mark implementation needs, since `check_and_darken_bounded_spec` darkens
+/// `hd_address (resolve_object v g)` (hand patch 14) rather than `v - 8`.
+///
+/// The proof does *not* go through `pointer_field_resolve_identity`. It uses
+/// `GC.Spec.Fields.wf_field_target_resolves_into_objects`, i.e. only the fact that the
+/// resolved target is an enumerated object. That is deliberate: it is the one fact
+/// about infix field targets that would survive a weakening of
+/// `well_formed_heap_part2`, whereas the identity lemma would not.
+val check_and_darken_resolved_field_preserves_wf :
+  (g: heap) -> (obj: obj_addr) -> (i: U64.t{U64.v i >= 1}) -> (wz: U64.t) ->
+  Lemma (requires well_formed_heap g /\ Seq.mem obj (objects zero_addr g) /\
+                  U64.v wz <= U64.v (wosize_of_object obj g) /\
+                  U64.v (wosize_of_object obj g) < pow2 54 /\
+                  Seq.length g == heap_size /\
+                  U64.v i <= U64.v wz /\
+                  HeapGraph.is_pointer_field (HeapGraph.get_field g obj i))
+        (ensures (let v = HeapGraph.get_field g obj i in
+                  let raw : obj_addr = v in
+                  let target = resolve_object raw g in
+                  Seq.mem target (objects zero_addr g) /\
+                  (is_white target g ==>
+                    (well_formed_heap (set_object_color target g Header.Gray) /\
+                     Seq.mem obj (objects zero_addr (set_object_color target g Header.Gray)) /\
+                     U64.v wz <= U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) /\
+                     U64.v (wosize_of_object obj (set_object_color target g Header.Gray)) < pow2 54))))
+
 /// pointer field values resolve to themselves in well-formed heaps
 val pointer_field_resolve_identity :
   (g: heap) -> (obj: obj_addr) -> (i: U64.t{U64.v i >= 1}) -> (wz: U64.t) ->

@@ -452,6 +452,17 @@ val resolve_infix_spec : (addr: obj_addr) -> (g: heap) ->
                    p >= 8 /\ p < heap_size /\ p % 8 == 0))
         (ensures resolve_object addr g == U64.uint_to_t (parent_closure_addr_nat addr g))
 
+/// resolve_object for infix objects whose recorded offset does not land on a valid
+/// object address: resolve_object is defensive and returns its input unchanged.
+/// Needed by any executable resolution that has to prove it agrees with this
+/// definition in *every* branch, not only the well-formed one -- see
+/// GC.Impl.Closure.resolve_object.
+val resolve_infix_invalid : (addr: obj_addr) -> (g: heap) ->
+  Lemma (requires is_infix addr g /\
+                  ~(let p = parent_closure_addr_nat addr g in
+                    p >= 8 /\ p < heap_size /\ p % 8 == 0))
+        (ensures resolve_object addr g == addr)
+
 /// Infix well-formedness: every infix object in the heap has a valid parent closure
 val infix_wf (g: heap) (objs: seq obj_addr) : prop
 

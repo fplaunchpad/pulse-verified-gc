@@ -804,6 +804,12 @@ let resolve_infix_spec (addr: obj_addr) (g: heap)
                      p >= 8 /\ p < heap_size /\ p % 8 == 0))
           (ensures resolve_object addr g == U64.uint_to_t (parent_closure_addr_nat addr g)) = ()
 
+let resolve_infix_invalid (addr: obj_addr) (g: heap)
+  : Lemma (requires is_infix addr g /\
+                    ~(let p = parent_closure_addr_nat addr g in
+                      p >= 8 /\ p < heap_size /\ p % 8 == 0))
+          (ensures resolve_object addr g == addr) = ()
+
 /// Infix well-formedness: every infix object has a valid parent closure in the objects list
 let infix_wf (g: heap) (objs: seq obj_addr) : prop =
   forall (h: obj_addr). Seq.mem h objs /\ is_infix h g ==>

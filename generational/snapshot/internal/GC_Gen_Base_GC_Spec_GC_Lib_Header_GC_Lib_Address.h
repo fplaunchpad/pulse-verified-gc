@@ -23,6 +23,8 @@ typedef uint8_t color_sem;
 
 bool uu___is_Black(color_sem projectee);
 
+extern uint64_t no_scan_tag;
+
 uint64_t getWosize(uint64_t header);
 
 extern uint64_t minor_heap_size_u64;

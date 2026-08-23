@@ -74,7 +74,7 @@ static color_sem blue = Blue;
 
 static color_sem black = Black;
 
-static uint64_t no_scan_tag = 251ULL;
+static uint64_t no_scan_tag0 = 251ULL;
 
 static uint64_t getWosize0(uint64_t hdr)
 {
@@ -1121,150 +1121,84 @@ scan_loop(
     {
       uint64_t hdr_addr0 = obj - 8ULL;
       uint64_t hdr = minor_read(minor, hdr_addr0);
-      uint64_t wosize = hdr >> 10U;
-      if (wosize >= minor_heap_size_u64)
-        scan = s + (size_t)1U;
-      else if (obj + wosize * 8ULL > minor_heap_size_u64)
-        scan = s + (size_t)1U;
-      /* HAND PATCH 16 (see ../PATCHES.md) -- UNVERIFIED.
-         No_scan_tag guard. cheney_scan_step scans minor_wosize fields of every
-         queued object regardless of tag, but the payload of a Custom_tag,
-         String_tag or Double_array_tag block is raw data, not values. A boxed
-         Int64 whose payload happened to be 8-aligned and inside
-         [8, minor_heap_size) was accepted as a nursery offset and enqueued as an
-         object; its "header" then read back as &caml_int64_ops (tag 224,
-         wosize 4411), over-scanning 35 KB of unrelated nursery. This mirrors the
-         is_scannable test update_promoted_objects already applies on the major
-         side -- the minor BFS was the only field scan that lacked it. */
-      else if (!((hdr & 0xFFULL) < 251ULL && (hdr & 0xFFULL) != 249ULL))
+      uint64_t __anf0 = hdr & 0xFFULL;
+      if (__anf0 >= no_scan_tag)
         scan = s + (size_t)1U;
       else
       {
-        uint64_t field_idx = 0ULL;
-        uint64_t __anf0 = field_idx;
-        bool cond = __anf0 < wosize;
-        while (cond)
+        uint64_t hdr_addr0 = obj - 8ULL;
+        uint64_t hdr = minor_read(minor, hdr_addr0);
+        uint64_t wosize = hdr >> 10U;
+        if (wosize >= minor_heap_size_u64)
+          scan = s + (size_t)1U;
+        else if (obj + wosize * 8ULL > minor_heap_size_u64)
+          scan = s + (size_t)1U;
+        else
         {
-          uint64_t fi = field_idx;
-          uint64_t field_addr = obj + fi * 8ULL;
-          uint64_t child_raw = minor_read(minor, field_addr);
-          uint64_t off = child_raw - minor_base_addr;
-          uint64_t child = off < minor_heap_size_u64 && child_raw % 8ULL == 0ULL ? off : child_raw;
-          if (!(child < 8ULL))
-            if (!(child >= minor_heap_size_u64))
-              if (!!(child % 8ULL == 0ULL))
-              {
-                size_t idx = (size_t)(child / 8ULL);
-                uint64_t fwd_val = fwd_arr[idx];
-                if (!!(fwd_val == 0ULL))
+          uint64_t field_idx = 0ULL;
+          uint64_t __anf01 = field_idx;
+          bool cond = __anf01 < wosize;
+          while (cond)
+          {
+            uint64_t fi = field_idx;
+            uint64_t field_addr = obj + fi * 8ULL;
+            uint64_t child_raw = minor_read(minor, field_addr);
+            uint64_t off = child_raw - minor_base_addr;
+            uint64_t
+            child = off < minor_heap_size_u64 && child_raw % 8ULL == 0ULL ? off : child_raw;
+            if (!(child < 8ULL))
+              if (!(child >= minor_heap_size_u64))
+                if (!!(child % 8ULL == 0ULL))
                 {
-                  uint64_t hdr_addr0 = child - 8ULL;
-                  uint64_t hdr = minor_read(minor, hdr_addr0);
-                  uint64_t tag = hdr & 0xFFULL;
-                  /* HAND PATCH 15 (see ../PATCHES.md) -- UNVERIFIED.
-                     `tag == 249` alone is unsound here: it is applied to a word that is not
-                     known to be a header, and an OCaml integer can have low byte 0xf9 --
-                     measured: Val_long(1788) == 0xdf9, an Object_tag object id, was taken for
-                     an infix header. Require the implied parent to really be a Closure_tag(247)
-                     block; mlvalues.h: "infix headers can only occur in blocks with tag
-                     Closure_tag". */
-                  if (tag == 249ULL &&
-                      /* HAND PATCH 15b: bound the offset before dereferencing. A word whose
-                         low byte is 0xf9 need not be a header at all, so hdr >> 10 is
-                         unconstrained garbage -- measured 2005312 words (15.3 MiB) against a
-                         2 MiB nursery, which read past the end of the mapping and killed the
-                         process. child >= 8 and child < minor_heap_size_u64 hold above, so this
-                         keeps parent - 8 inside [0, child). */
-                      (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (child - 8ULL) / 8ULL &&
-                      (minor_read(minor, (child - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
+                  size_t idx = (size_t)(child / 8ULL);
+                  uint64_t fwd_val = fwd_arr[idx];
+                  if (!!(fwd_val == 0ULL))
                   {
                     uint64_t hdr_addr0 = child - 8ULL;
                     uint64_t hdr = minor_read(minor, hdr_addr0);
-                    uint64_t wosize1 = hdr >> 10U;
-                    uint64_t parent = child - wosize1 * 8ULL;
-                    size_t parent_idx = (size_t)(parent / 8ULL);
-                    uint64_t parent_fwd_val = fwd_arr[parent_idx];
-                    size_t idx1 = (size_t)(child / 8ULL);
-                    if (!(parent_fwd_val == 0ULL))
+                    uint64_t tag = hdr & 0xFFULL;
+                    /* HAND PATCH 15 (see ../PATCHES.md) -- UNVERIFIED.
+                       `tag == 249` alone is unsound here: it is applied to a word that is not
+                       known to be a header, and an OCaml integer can have low byte 0xf9 --
+                       measured: Val_long(1788) == 0xdf9, an Object_tag object id, was taken for
+                       an infix header. Require the implied parent to really be a Closure_tag(247)
+                       block; mlvalues.h: "infix headers can only occur in blocks with tag
+                       Closure_tag". */
+                    if (tag == 249ULL &&
+                        /* HAND PATCH 15b: bound the offset before dereferencing. A word whose
+                           low byte is 0xf9 need not be a header at all, so hdr >> 10 is
+                           unconstrained garbage -- measured 2005312 words (15.3 MiB) against a
+                           2 MiB nursery, which read past the end of the mapping and killed the
+                           process. child >= 8 and child < minor_heap_size_u64 hold above, so this
+                           keeps parent - 8 inside [0, child). */
+                        (hdr >> 10U) >= 1ULL && (hdr >> 10U) <= (child - 8ULL) / 8ULL &&
+                        (minor_read(minor, (child - (hdr >> 10U) * 8ULL) - 8ULL) & 0xFFULL) == 247ULL)
                     {
-                      uint64_t delta = child - parent;
-                      if (!(parent_fwd_val >= heap_size_u640))
-                      {
-                        uint64_t sum = parent_fwd_val + delta;
-                        if (sum < heap_size_u640)
-                          fwd_arr[idx1] = sum;
-                      }
-                    }
-                    else
-                    {
-                      uint64_t hdr_addr0 = parent - 8ULL;
+                      uint64_t hdr_addr0 = child - 8ULL;
                       uint64_t hdr = minor_read(minor, hdr_addr0);
-                      uint64_t wosize2 = hdr >> 10U;
-                      uint64_t new_parent_addr;
-                      if (wosize2 == 0ULL)
-                        new_parent_addr = 0ULL;
-                      else
+                      uint64_t wosize1 = hdr >> 10U;
+                      uint64_t parent = child - wosize1 * 8ULL;
+                      size_t parent_idx = (size_t)(parent / 8ULL);
+                      uint64_t parent_fwd_val = fwd_arr[parent_idx];
+                      size_t idx1 = (size_t)(child / 8ULL);
+                      if (!(parent_fwd_val == 0ULL))
                       {
-                        uint64_t fp = *fp_ref;
-                        K___uint64_t_uint64_t res = allocate_part1(major, fp, wosize2);
-                        uint64_t new_fp = fst__uint64_t_uint64_t(res);
-                        uint64_t new_obj = snd__uint64_t_uint64_t(res);
-                        *fp_ref = new_fp;
-                        if (new_obj == 0ULL)
-                          new_parent_addr = 0ULL;
-                        else
+                        uint64_t delta = child - parent;
+                        if (!(parent_fwd_val >= heap_size_u640))
                         {
-                          copy_fields_loop(minor, major, parent, new_obj, wosize2);
-                          uint64_t hdr_addr = new_obj - 8ULL;
-                          uint64_t hdr = read_word(major, hdr_addr);
-                          uint64_t actual_wz = getWosize(hdr);
-                          if (actual_wz > wosize2)
-                          {
-                            uint64_t pad_addr = new_obj + wosize2 * 8ULL;
-                            write_word(major, pad_addr, 0ULL);
-                          }
-                          uint64_t minor_hdr = minor_read(minor, parent - 8ULL);
-                          uint64_t tag1 = getTag(minor_hdr);
-                          uint64_t major_hdr_addr = new_obj - 8ULL;
-                          uint64_t major_hdr = read_word(major, major_hdr_addr);
-                          uint64_t wz_read = getWosize(major_hdr);
-                          uint64_t new_hdr = makeHeader(wz_read, White, tag1);
-                          write_word(major, major_hdr_addr, new_hdr);
-                          new_parent_addr = new_obj;
-                        }
-                      }
-                      if (new_parent_addr == 0ULL)
-                        *oom_ref = true;
-                      else
-                      {
-                        fwd_arr[parent_idx] = new_parent_addr;
-                        size_t bk = *back;
-                        if (bk < queue_size_sz)
-                        {
-                          queue[bk] = parent;
-                          *back = bk + (size_t)1U;
-                          uint64_t delta = child - parent;
-                          uint64_t sum = new_parent_addr + delta;
+                          uint64_t sum = parent_fwd_val + delta;
                           if (sum < heap_size_u640)
                             fwd_arr[idx1] = sum;
                         }
                       }
-                    }
-                  }
-                  else
-                  {
-                    uint64_t hdr_addr0 = child - 8ULL;
-                    uint64_t hdr = minor_read(minor, hdr_addr0);
-                    uint64_t wosize1 = hdr >> 10U;
-                    if (!(wosize1 >= minor_heap_size_u64))
-                      if (!(child + wosize1 * 8ULL > minor_heap_size_u64))
+                      else
                       {
-                        uint64_t hdr_addr0 = child - 8ULL;
+                        uint64_t hdr_addr0 = parent - 8ULL;
                         uint64_t hdr = minor_read(minor, hdr_addr0);
                         uint64_t wosize2 = hdr >> 10U;
-                        uint64_t new_addr;
+                        uint64_t new_parent_addr;
                         if (wosize2 == 0ULL)
-                          new_addr = 0ULL;
+                          new_parent_addr = 0ULL;
                         else
                         {
                           uint64_t fp = *fp_ref;
@@ -1273,10 +1207,10 @@ scan_loop(
                           uint64_t new_obj = snd__uint64_t_uint64_t(res);
                           *fp_ref = new_fp;
                           if (new_obj == 0ULL)
-                            new_addr = 0ULL;
+                            new_parent_addr = 0ULL;
                           else
                           {
-                            copy_fields_loop(minor, major, child, new_obj, wosize2);
+                            copy_fields_loop(minor, major, parent, new_obj, wosize2);
                             uint64_t hdr_addr = new_obj - 8ULL;
                             uint64_t hdr = read_word(major, hdr_addr);
                             uint64_t actual_wz = getWosize(hdr);
@@ -1285,40 +1219,103 @@ scan_loop(
                               uint64_t pad_addr = new_obj + wosize2 * 8ULL;
                               write_word(major, pad_addr, 0ULL);
                             }
-                            uint64_t minor_hdr = minor_read(minor, child - 8ULL);
+                            uint64_t minor_hdr = minor_read(minor, parent - 8ULL);
                             uint64_t tag1 = getTag(minor_hdr);
                             uint64_t major_hdr_addr = new_obj - 8ULL;
                             uint64_t major_hdr = read_word(major, major_hdr_addr);
                             uint64_t wz_read = getWosize(major_hdr);
                             uint64_t new_hdr = makeHeader(wz_read, White, tag1);
                             write_word(major, major_hdr_addr, new_hdr);
-                            new_addr = new_obj;
+                            new_parent_addr = new_obj;
                           }
                         }
-                        if (new_addr == 0ULL)
-                        {
-                          if (!(wosize1 == 0ULL))
-                            *oom_ref = true;
-                        }
+                        if (new_parent_addr == 0ULL)
+                          *oom_ref = true;
                         else
                         {
-                          fwd_arr[idx] = new_addr;
+                          fwd_arr[parent_idx] = new_parent_addr;
                           size_t bk = *back;
                           if (bk < queue_size_sz)
                           {
-                            queue[bk] = child;
+                            queue[bk] = parent;
                             *back = bk + (size_t)1U;
+                            uint64_t delta = child - parent;
+                            uint64_t sum = new_parent_addr + delta;
+                            if (sum < heap_size_u640)
+                              fwd_arr[idx1] = sum;
                           }
                         }
                       }
+                    }
+                    else
+                    {
+                      uint64_t hdr_addr0 = child - 8ULL;
+                      uint64_t hdr = minor_read(minor, hdr_addr0);
+                      uint64_t wosize1 = hdr >> 10U;
+                      if (!(wosize1 >= minor_heap_size_u64))
+                        if (!(child + wosize1 * 8ULL > minor_heap_size_u64))
+                        {
+                          uint64_t hdr_addr0 = child - 8ULL;
+                          uint64_t hdr = minor_read(minor, hdr_addr0);
+                          uint64_t wosize2 = hdr >> 10U;
+                          uint64_t new_addr;
+                          if (wosize2 == 0ULL)
+                            new_addr = 0ULL;
+                          else
+                          {
+                            uint64_t fp = *fp_ref;
+                            K___uint64_t_uint64_t res = allocate_part1(major, fp, wosize2);
+                            uint64_t new_fp = fst__uint64_t_uint64_t(res);
+                            uint64_t new_obj = snd__uint64_t_uint64_t(res);
+                            *fp_ref = new_fp;
+                            if (new_obj == 0ULL)
+                              new_addr = 0ULL;
+                            else
+                            {
+                              copy_fields_loop(minor, major, child, new_obj, wosize2);
+                              uint64_t hdr_addr = new_obj - 8ULL;
+                              uint64_t hdr = read_word(major, hdr_addr);
+                              uint64_t actual_wz = getWosize(hdr);
+                              if (actual_wz > wosize2)
+                              {
+                                uint64_t pad_addr = new_obj + wosize2 * 8ULL;
+                                write_word(major, pad_addr, 0ULL);
+                              }
+                              uint64_t minor_hdr = minor_read(minor, child - 8ULL);
+                              uint64_t tag1 = getTag(minor_hdr);
+                              uint64_t major_hdr_addr = new_obj - 8ULL;
+                              uint64_t major_hdr = read_word(major, major_hdr_addr);
+                              uint64_t wz_read = getWosize(major_hdr);
+                              uint64_t new_hdr = makeHeader(wz_read, White, tag1);
+                              write_word(major, major_hdr_addr, new_hdr);
+                              new_addr = new_obj;
+                            }
+                          }
+                          if (new_addr == 0ULL)
+                          {
+                            if (!(wosize1 == 0ULL))
+                              *oom_ref = true;
+                          }
+                          else
+                          {
+                            fwd_arr[idx] = new_addr;
+                            size_t bk = *back;
+                            if (bk < queue_size_sz)
+                            {
+                              queue[bk] = child;
+                              *back = bk + (size_t)1U;
+                            }
+                          }
+                        }
+                    }
                   }
                 }
-              }
-          field_idx = fi + 1ULL;
-          uint64_t __anf0 = field_idx;
-          cond = __anf0 < wosize;
+            field_idx = fi + 1ULL;
+            uint64_t __anf01 = field_idx;
+            cond = __anf01 < wosize;
+          }
+          scan = s + (size_t)1U;
         }
-        scan = s + (size_t)1U;
       }
     }
     size_t s0 = scan;
@@ -1431,7 +1428,7 @@ void update_all_objects(heap_t major, uint64_t *fwd_arr)
     else
     {
       uint64_t tag = getTag(hdr);
-      if (tag >= no_scan_tag)
+      if (tag >= no_scan_tag0)
       {
         uint64_t total_words = wosize + 1ULL;
         uint64_t total_bytes = total_words * 8ULL;
@@ -1987,7 +1984,7 @@ static void mark_step_bounded_impl(heap_t heap, gray_stack_rec st)
   uint64_t wz = fst__uint64_t_uint64_t(r);
   uint64_t tag = snd__uint64_t_uint64_t(r);
   mark_write_black(heap, h_addr);
-  if (!(tag >= no_scan_tag))
+  if (!(tag >= no_scan_tag0))
     push_children_bounded_impl(heap, st, h_addr, wz);
 }
 

@@ -26,6 +26,8 @@ bool uu___is_Black(color_sem projectee)
   }
 }
 
+uint64_t no_scan_tag = 251ULL;
+
 static uint32_t wosize_shift = 10U;
 
 uint64_t getWosize(uint64_t header)

@@ -1168,13 +1168,48 @@ patch 16 applied, the garbage words that reached here should no longer exist.
 
 ---
 
-## Patch 16 — the minor BFS scans no-scan blocks (OPEN)
+## Patch 16 — the minor BFS scans no-scan blocks — ✅ RETIRED
 
-**Status: hand patch in `snapshot/GC_Gen_Impl.c`. Unverified; reverted by
-`make snapshot`.** One site, in `scan_loop`. **This was the root cause of the
-intermittent compiler segfault** that made `make world.opt` fail roughly once
-per 2000 `ocamlopt` invocations, on both flavours and both CI and local
-machines.
+**Status: no longer a hand patch.** The guard is now generated from verified source
+and the hunk has been removed from `patches/snapshot/0001-infix-handling.patch`
+(commit `8fbdbdd`). What follows is kept as the record of the bug, because it is the
+only one of these four whose root cause was a defect in the *specification* rather
+than something the specification could not express.
+
+**This was the root cause of the intermittent compiler segfault** that made
+`make world.opt` fail roughly once per 2000 `ocamlopt` invocations, on both flavours
+and both CI and local machines.
+
+### How it was retired
+
+Guarding `cheney_scan` alone is not provable: the loop's invariant
+`scanned_prefix_closed` is stated over `minor_successors`, which walked every field
+regardless of tag, so a no-scan payload word that numerically named a live object
+counted as a genuine successor and skipping the entry left a *false* obligation. The
+guard therefore had to go into the model of reachability:
+
+| definition | file |
+|---|---|
+| `minor_successors` | `spec/GC.Gen.Reachability.fst` |
+| `minor_object_edges` | `spec/GC.Gen.CombinedGraph.fst` |
+| `cheney_scan` | `spec/GC.Gen.Cheney.fst` |
+
+plus `minor_is_no_scan` (`spec/GC.Gen.MinorHeap.fsti`), a new
+`scanned_prefix_step_no_scan` in `CheneyBFS`, 27 preservation-proof repairs, and one
+arm in the Pulse `scan_loop`. 23 files, +444/−126. The major side has had the
+equivalent guard on `major_object_edges` since that module was written, so each
+minor-side repair had a working template.
+
+### One difference from the hand patch, deliberately accepted
+
+The hand patch skipped a queue entry when `tag >= 251` **or** `tag == 249`. The
+generated guard skips only `tag >= 251`. The infix conjunct is dead code: queue
+entries come from `minor_objects`, and `minor_objects_not_infix` says those never
+carry `Infix_tag`. It was defence-in-depth against fabricated entries — which is
+exactly the class of bug this patch's retirement removes the cause of. Recorded
+rather than silently dropped.
+
+### Detail kept for the record
 
 ### The bug
 

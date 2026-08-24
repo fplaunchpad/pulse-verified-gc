@@ -561,3 +561,141 @@ they are:
 The runtime evidence the plan asks for — `make coldstart` from clean, `make test`,
 `make test-native`, `make world.opt`, then the testsuite against
 `ci/expected-failures.txt` — has not been gathered, since it needs the regenerated C.
+
+---
+
+## Step 8 — the Closure_tag confirmation, and what the spot build turned up
+
+### 8.1 The generated resolution was weaker than the hand patch
+
+Extraction succeeded and `resolve_object` came out clean, but comparing it against the
+hand patch showed a missing check:
+
+| check | hand patch 14 | generated (first cut) |
+|---|---|---|
+| tag at `v-8` is 249 | yes | yes |
+| computed parent in-heap | yes | yes |
+| parent's tag is `Closure_tag`(247) | **yes** | **no** |
+
+The hand patch's own comment called this "the same soundness condition as HAND PATCH
+15": `is_infix` is applied to a word that is *not known to be a header*. A field value
+only has to pass `is_pointer` — alignment plus range, nothing else — to reach
+`check_and_darken_bounded`, and an OCaml integer whose low byte is `0xf9` passes that.
+Without the parent check such a word gets "resolved" by subtracting a garbage offset.
+
+This is not the same as patch 16's dropped `!= 249` conjunct, which really was dead
+code: there, queue entries provably came from `minor_objects`, and
+`minor_objects_not_infix` settles it. Here the only thing standing between a non-pointer
+and an arbitrary heap address is `no_scan_invariant` — the assumption the core dump
+falsifies. So the check is load-bearing in a way patch 16's was not, and shipping
+without it would have made the collector strictly weaker than the patch being retired.
+
+### 8.2 Putting it in verified source
+
+The check cannot be *added to the implementation alone*: `resolve_object`'s
+postcondition ties it to the ghost `GC.Spec.Object.resolve_object`, and the executable
+has only `is_heap` in its precondition — no well-formedness with which to prove the
+check passes. So the ghost definition had to gain the same condition:
+
+```
+let resolve_object (addr: obj_addr) (g: heap) : GTot obj_addr =
+  if is_infix addr g then
+    let p = parent_closure_addr_nat addr g in
+    if p >= 8 && p < heap_size && p % 8 = 0 then
+      (let pa : obj_addr = U64.uint_to_t p in
+       if is_closure pa g then pa else addr)
+    else addr
+  else addr
+```
+
+`resolve_object` is `val`-declared in the `.fsti`, which kept the blast radius small:
+downstream modules see it only through lemmas, so the only statement that had to change
+was `resolve_infix_spec`'s precondition (gaining `is_closure (U64.uint_to_t p) g`), and
+it has exactly one call site — in `GC.Impl.Closure.fst`, the file being edited anyway.
+Three further adjustments inside `GC.Spec.Object`:
+
+- `resolve_infix_not_closure`, new, for the third rejection case (valid parent address,
+  wrong tag → return the input). `resolve_infix_invalid` needed no change: its
+  precondition negates the *old* guard, which still implies the new one.
+- `resolve_object_in_objects` now calls `infix_wf_elim` — `infix_wf` already promised
+  `is_closure` of the parent, so the new condition was already available, just not
+  brought into scope.
+- `color_change_preserves_resolve` needed the two `wosize_*` helpers moved above it and
+  a `color_change_preserves_is_closure` call on the parent. Colours change neither tag
+  nor wosize, so all three guard conditions are stable.
+
+On the executable side, `is_closure_object` was dead code with no postcondition; it now
+mirrors `is_infix_object` exactly, and `parent_closure_of_infix_opt` calls it on the
+computed parent's header. `f_hd_roundtrip` bridges the address it reports on back to
+`parent_f_addr`. `resolve_object_infix_agrees` became a three-way case split.
+
+Full run from the existing caches: **224 modules, 0 failures.**
+
+### 8.3 Runtime: coldstart, and the A/B
+
+- With the generated resolution: `make coldstart` exits 0. Twice.
+- With `resolve_object` neutered in the C to `return obj`: exits 2,
+  `camlinternalFormat.cmo` — **Segmentation fault (core dumped)**. The original failure.
+
+That is the cleanest available evidence that the generated code is what carries patch
+14, rather than something else having changed underneath it.
+
+### 8.4 The patch file
+
+`0001-infix-handling.patch` went 104 → 75 lines: patch 14's hunk is gone, 15/15b were
+re-applied to the new baseline at three sites (`addr`, `r`, `child`), and the round trip
+was checked both ways — `verify-snapshot-patches` reports present, and re-applying from
+the pristine extraction reproduces the patched snapshot byte-for-byte.
+
+### 8.5 Three spot files were broken, and the build could not see it
+
+`make extract` failed with `Module GC.SPOT.Preconditions cannot be found`. The cause was
+not the module — it is right there in `spot/` — but the root `Makefile`'s `INCLUDES`,
+which never had `--include spot`. `spot/%.checked` was therefore unbuildable from the
+root, and `make verify` never asked for it, so the whole SPOT campaign was outside CI.
+It only surfaced now because invalidating `GC.Spec.Object` made every stale cache need
+rebuilding.
+
+With `--include spot` added, three of the 28 files failed — and two of the three failed
+**because of commit `0cc9932`**, this task's own earlier work:
+
+- `ConcreteScenarios.fst` (4 assertions) and `ConcreteFull.fst` (1) — patch 14 added a
+  `well_formed_heap` hypothesis to the root lemmas, and restated
+  `darken_roots_bounded_spec_preserves_read_word`'s frame condition over
+  `hd_address (resolve_object v g)`. The scenarios supplied neither.
+
+  Awkwardly, `GC.Gen.CheneyCorrectness` only preserves `well_formed_heap_part1` across a
+  minor collection, and says so explicitly. But the *full* predicate does follow from
+  the concrete collection heap shape via
+  `CheneyPreservation.cheney_collect_preserves_wfh_from_shape`, which
+  `ConcreteScenarios` was already calling — 130 lines *after* the first site that needed
+  it. Hoisting that call fixed all four. Two lemmas became exports to serve
+  `ConcreteFull`: `spot_post_minor_major_wf` and
+  `spot_post_minor_roots_point_to_objects`, plus
+  `MarkBounded.check_and_darken_bounded_spec_preserves_wf`, which existed in the `.fst`
+  but was not in the interface.
+
+  `ConcreteFull`'s local `no_root_header` had to be restated in the resolved form and
+  reduced back via `root_resolves_to_itself`. Its guard also had to be widened to put
+  the address bounds in scope — the `ensures` states them as hypotheses of an
+  implication, which does not make them available to the proof body.
+
+- `ConcreteMinor.fst:292` was **not** caused by this work: `spot_minor2_field_zero`
+  simply needs more than the default rlimit. It passes at `--z3rlimit 40`, now set as a
+  per-file override.
+
+### 8.6 Build-graph fixes worth keeping
+
+`--include spot` alone was not enough to make `make` build spot: `.depend` is generated
+from `ROOT_MODULES` only, so make had no ordering information and fired the files
+arbitrarily, whereupon F* declines to write a cache whose dependencies have none. Adding
+`$(SPOT_SRC)` to a new `DEP_ROOTS` fixes the ordering.
+
+The same reasoning applies to `GC.Impl.Mark` and `GC.Impl.Sweep`: both are in the
+generational bundle's `ALL_KRML_MODS` yet unreachable from `ROOT_MODULES`, which is why
+`make extract` failed with `Module GC.Impl.Mark.fst was not checked` and needed a manual
+pre-step. They are now `EXTRACT_ONLY_ROOTS` in the dep scan.
+
+`ROOT_MODULES` itself is unchanged, so `make orphans` still measures what is unreachable
+from the real entry points. **Orphans: 33 → 1** (`GC.Spec.SeqMemLemmas.fst`), and the
+verify set went 192 → 224 modules.

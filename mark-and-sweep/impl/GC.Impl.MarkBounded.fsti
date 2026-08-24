@@ -247,6 +247,17 @@ val root_resolves_to_itself (g: heap_state) (v: U64.t)
         Seq.mem (v <: obj_addr) (SpecFields.objects zero_addr g) /\
         SpecObject.resolve_object (v <: obj_addr) g == (v <: obj_addr))
 
+/// Darkening one root preserves well-formedness: the only heap write is a colour
+/// change, and `color_change_preserves_wf` covers that. Exported because the
+/// generational SPOT scenarios chain two root-darkening steps and need the
+/// well-formedness of the intermediate heap to satisfy the `well_formed_heap`
+/// hypothesis that patch 14 added to the root lemmas.
+val check_and_darken_bounded_spec_preserves_wf
+  (g: heap_state) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
+  : Lemma
+      (requires SpecFields.well_formed_heap g /\ root_points_to_object g v)
+      (ensures SpecFields.well_formed_heap (fst (check_and_darken_bounded_spec g st v cap)))
+
 val darken_roots_bounded_spec_preserves_bounded_mark_inv
   (g: heap_state) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)
   (cap: nat)

@@ -33,13 +33,25 @@ module SpecObject = GC.Spec.Object
 /// `(infix_hdr + 8) - offset * 8`. The spec definition agreed only after commit
 /// `02d1743`; before that it subtracted an extra word and this postcondition would
 /// have been unprovable.
+///
+/// None is returned in two situations, and they are different in kind. The offset
+/// failing to land on a valid object address means the heap is corrupt. The parent's
+/// header not being a `Closure_tag` block means, far more likely, that `infix_addr`
+/// was never a header at all: the caller reached here with a word that merely passed
+/// `is_pointer`, and the byte it took for `Infix_tag` was the low byte of an OCaml
+/// integer. Either way the safe answer is to decline to resolve, which leaves the
+/// caller darkening the address it started from -- the pre-patch behaviour, which is
+/// wrong only for genuine infix pointers.
 let parent_closure_of_infix_spec
       (s: heap_state) (infix_addr: hp_addr{U64.v infix_addr + U64.v mword < heap_size})
   : GTot (option hp_addr)
   = let x = SpecHeap.f_address infix_addr in
     let pn = SpecObject.parent_closure_addr_nat x s in
     if pn >= U64.v mword && pn < heap_size && pn % U64.v mword = 0
-    then Some (SpecHeap.hd_address (U64.uint_to_t pn))
+    then (let pa = U64.uint_to_t pn in
+          if SpecObject.is_closure pa s
+          then Some (SpecHeap.hd_address pa)
+          else None)
     else None
 
 /// Read closure info value (field 2 of closure)
@@ -62,11 +74,14 @@ fn is_infix_object (heap: heap_t) (h_addr: hp_addr{U64.v h_addr + U64.v mword < 
   ensures is_heap heap 's **
           pure (b == SpecObject.is_infix (SpecHeap.f_address h_addr) 's)
 
-/// Check if object is a closure
-fn is_closure_object (heap: heap_t) (h_addr: hp_addr)
+/// Check if object is a closure. Same shape as `is_infix_object`: the postcondition
+/// is what lets `parent_closure_of_infix_opt` discharge the `is_closure` arm of
+/// `parent_closure_of_infix_spec`.
+fn is_closure_object (heap: heap_t) (h_addr: hp_addr{U64.v h_addr + U64.v mword < heap_size})
   requires is_heap heap 's
   returns b: bool
-  ensures is_heap heap 's
+  ensures is_heap heap 's **
+          pure (b == SpecObject.is_closure (SpecHeap.f_address h_addr) 's)
 
 /// Get parent closure of infix object (returns None if offset invalid)
 fn parent_closure_of_infix_opt

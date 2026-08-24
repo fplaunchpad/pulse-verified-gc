@@ -23,10 +23,15 @@ OUTPUT_DIR = _output
 
 # --- Include paths (all directories visible to all modules) -----------------
 
+# spot/ is in ALL_SRC and has a `spot/%.checked` rule, so the `generational` and
+# `extract` targets ask for its .checked files -- but without `--include spot` those
+# modules cannot resolve each other and the rule fails with "Module
+# GC.SPOT.Preconditions cannot be found". Only visible when the caches are cold.
 INCLUDES = \
   --include common/spec --include common/lib --include common/impl \
   --include mark-and-sweep/spec --include mark-and-sweep/impl \
-  --include generational/spec --include generational/impl
+  --include generational/spec --include generational/impl \
+  --include spot
 
 # --- F* base flags ----------------------------------------------------------
 
@@ -63,9 +68,23 @@ ALL_SRC    = $(COMMON_SRC) $(MS_SRC) $(GEN_SRC) $(SPOT_SRC)
 
 # --- Auto-generated dependency graph ----------------------------------------
 
+# spot/ is scanned too, even though it is not reachable from ROOT_MODULES: the
+# `generational` and `extract` targets ask for its .checked files, and without the
+# dependency edges make fires them in arbitrary order, whereupon F* declines to write
+# a cache whose dependencies have none. ROOT_MODULES stays as-is so `make orphans`
+# still reports what is unreachable from the real entry points.
+# GC.Impl.Mark and GC.Impl.Sweep are in the generational bundle's ALL_KRML_MODS but
+# are not reachable from ROOT_MODULES, so `make extract` used to fail with
+# "Module GC.Impl.Mark.fst was not checked" whenever their caches went stale.
+EXTRACT_ONLY_ROOTS = \
+  mark-and-sweep/impl/GC.Impl.Mark.fsti  mark-and-sweep/impl/GC.Impl.Mark.fst \
+  mark-and-sweep/impl/GC.Impl.Sweep.fsti mark-and-sweep/impl/GC.Impl.Sweep.fst
+
+DEP_ROOTS = $(ROOT_MODULES) $(SPOT_SRC) $(EXTRACT_ONLY_ROOTS)
+
 .depend: Makefile $(ROOT_MODULES) $(ALL_SRC)
-	@echo "Scanning dependencies from roots: $(ROOT_MODULES)"
-	$(FSTAR) --dep full $(ROOT_MODULES) --output_deps_to $@.raw
+	@echo "Scanning dependencies from roots: $(ROOT_MODULES) + spot/ + extraction-only"
+	$(FSTAR) --dep full $(DEP_ROOTS) --output_deps_to $@.raw
 	@awk -v cwd="$$(pwd)/" ' \
 	  { gsub(cwd, "") } \
 	  /^[^ \t].*:/ { if (n) flush(); \
@@ -180,9 +199,13 @@ generational/impl/GC.Gen.Impl.fst.checked: generational/impl/GC.Gen.Impl.fst
 generational/impl/%.checked: generational/impl/%
 	$(FSTAR) --z3rlimit 160 --split_queries always $<
 
-# spot/ — SPOT verification tests, default flags
+# spot/ — SPOT verification tests. These are concrete-scenario proofs: long chains of
+# lemma applications over one fixed heap layout, with wide case splits. Several need
+# more than the default rlimit (ConcreteMinor fails in spot_minor2_field_zero,
+# ConcreteScenarios in spot_post_minor_c_header_context), so the whole directory gets
+# the same treatment as mark-and-sweep/impl rather than per-file overrides.
 spot/%.checked: spot/%
-	$(FSTAR) $<
+	$(FSTAR) --z3rlimit 60 --split_queries always $<
 
 # --- Extraction (mark-and-sweep) --------------------------------------------
 

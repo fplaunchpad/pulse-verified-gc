@@ -786,11 +786,28 @@ let parent_closure_addr_nat_spec (infix_obj: obj_addr) (g: heap)
   = ()
 
 /// Resolve: if infix with valid parent, return parent; otherwise return self.
+///
+/// Three conditions gate the resolution, and all three are load-bearing for the
+/// executable version that has to agree with this definition without any
+/// well-formedness hypothesis:
+///   1. `is_infix addr g` -- the header word at `addr - 8` decodes to tag 249;
+///   2. the computed parent address is a valid object address;
+///   3. the parent's own header decodes to `Closure_tag`.
+///
+/// Condition 3 is what makes the resolution *safe* rather than merely correct.
+/// `is_infix` is applied to a word that is not known to be a header: a field value
+/// only has to pass `is_pointer` (alignment plus range) to reach here, and an OCaml
+/// integer whose low byte is 0xf9 passes both. Without condition 3, such a word
+/// would be "resolved" by subtracting a garbage offset. Confirming the parent is a
+/// closure rejects that: a genuine infix header always sits inside a `Closure_tag`
+/// block. This is the check hand patch 14 carried and called "the same soundness
+/// condition as HAND PATCH 15".
 let resolve_object (addr: obj_addr) (g: heap) : GTot obj_addr =
   if is_infix addr g then
     let p = parent_closure_addr_nat addr g in
     if p >= 8 && p < heap_size && p % 8 = 0 then
-      U64.uint_to_t p
+      (let pa : obj_addr = U64.uint_to_t p in
+       if is_closure pa g then pa else addr)
     else addr
   else addr
 
@@ -801,8 +818,18 @@ let resolve_non_infix (addr: obj_addr) (g: heap)
 let resolve_infix_spec (addr: obj_addr) (g: heap)
   : Lemma (requires is_infix addr g /\
                     (let p = parent_closure_addr_nat addr g in
-                     p >= 8 /\ p < heap_size /\ p % 8 == 0))
+                     p >= 8 /\ p < heap_size /\ p % 8 == 0 /\
+                     is_closure (U64.uint_to_t p) g))
           (ensures resolve_object addr g == U64.uint_to_t (parent_closure_addr_nat addr g)) = ()
+
+/// The third rejection case: a valid parent address whose header is not a closure.
+/// `resolve_object` returns its input, exactly as the None branch does.
+let resolve_infix_not_closure (addr: obj_addr) (g: heap)
+  : Lemma (requires is_infix addr g /\
+                    (let p = parent_closure_addr_nat addr g in
+                     p >= 8 /\ p < heap_size /\ p % 8 == 0 /\
+                     ~(is_closure (U64.uint_to_t p) g)))
+          (ensures resolve_object addr g == addr) = ()
 
 let resolve_infix_invalid (addr: obj_addr) (g: heap)
   : Lemma (requires is_infix addr g /\
@@ -853,19 +880,6 @@ let color_change_preserves_is_closure (obj: obj_addr) (addr: obj_addr) (g: heap)
       color_change_header_locality obj (hd_address addr) g c
     end
 
-/// Color change preserves resolve_object
-let color_change_preserves_resolve (obj: obj_addr) (addr: obj_addr) (g: heap) (c: color)
-  : Lemma (ensures resolve_object addr (set_object_color obj g c) == resolve_object addr g)
-  = color_change_preserves_is_infix obj addr g c;
-    if is_infix addr g then begin
-      // wosize is preserved: both at same header and at different headers
-      if obj = addr then color_preserves_wosize addr g c
-      else begin
-        hd_address_injective obj addr;
-        color_change_header_locality obj (hd_address addr) g c
-      end
-    end
-
 /// Color change preserves infix_wf
 /// Helper: color change always preserves wosize (works for same or different objects)
 private let wosize_always_preserved (obj h: obj_addr) (g: heap) (c: color)
@@ -885,6 +899,22 @@ private let wosize_preserved_parent_preserved (obj h: obj_addr) (g: heap) (c: co
   : Lemma (requires wosize_of_object h (set_object_color obj g c) == wosize_of_object h g)
           (ensures parent_closure_addr_nat h (set_object_color obj g c) == parent_closure_addr_nat h g)
   = ()
+
+/// Color change preserves resolve_object
+let color_change_preserves_resolve (obj: obj_addr) (addr: obj_addr) (g: heap) (c: color)
+  : Lemma (ensures resolve_object addr (set_object_color obj g c) == resolve_object addr g)
+  = color_change_preserves_is_infix obj addr g c;
+    if is_infix addr g then begin
+      // wosize is preserved: both at same header and at different headers
+      wosize_always_preserved obj addr g c;
+      wosize_preserved_parent_preserved obj addr g c;
+      // and the parent's tag with it, so the Closure_tag arm of the guard agrees too
+      let p_nat = parent_closure_addr_nat addr g in
+      if p_nat >= 8 && p_nat < heap_size && p_nat % 8 = 0 then begin
+        let p : obj_addr = U64.uint_to_t p_nat in
+        color_change_preserves_is_closure obj p g c
+      end
+    end
 
 /// Color change preserves infix_wf
 let color_change_preserves_infix_wf (obj: obj_addr) (g: heap) (c: color) (objs: seq obj_addr)
@@ -920,8 +950,10 @@ let resolve_object_in_objects (addr: obj_addr) (g: heap) (objs: seq obj_addr)
   : Lemma (requires Seq.mem addr objs /\ infix_wf g objs)
           (ensures Seq.mem (resolve_object addr g) objs)
   = if is_infix addr g then begin
+      infix_wf_elim g objs addr;
       let p = parent_closure_addr_nat addr g in
       assert (p >= 8 /\ p < heap_size /\ p % 8 == 0);
+      assert (is_closure (U64.uint_to_t p) g);
       resolve_infix_spec addr g;
       assert (resolve_object addr g == U64.uint_to_t p);
       assert (Seq.mem (U64.uint_to_t p) objs)

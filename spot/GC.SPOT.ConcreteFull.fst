@@ -610,6 +610,13 @@ let prepared_roots_preserve_c_field1
   assert (Seq.mem a_prime prepared_roots);
   assert (Seq.mem a_prime (SpecFields.objects zero_addr prepared_major));
   let slot = ConcreteMajor.spot_c_field1 r in
+  // Patch 14 restated this frame condition over the *resolved* root, since the
+  // bounded spec now darkens `hd_address (resolve_object v g)`. Both roots here are
+  // enumerated objects of `result.mc_major`, so resolution is the identity on them
+  // and the condition reduces to the old `v - 8 <> slot` -- `root_resolves_to_itself`
+  // is what performs that reduction, and it needs the heap to be well-formed.
+  ConcreteScenarios.spot_post_minor_major_wf r;
+  ConcreteScenarios.spot_post_minor_roots_point_to_objects r;
   let no_root_header (i: nat)
     : Lemma
         (ensures
@@ -617,9 +624,17 @@ let prepared_roots_preserve_c_field1
           (U64.v (Seq.index roots_out i) >= U64.v zero_addr + U64.v mword /\
            U64.v (Seq.index roots_out i) < heap_size /\
            U64.v (Seq.index roots_out i) % U64.v mword == 0 ==>
-           U64.sub (Seq.index roots_out i) mword <> slot))
+           SpecHeap.hd_address
+             (SpecObj.resolve_object (Seq.index roots_out i <: obj_addr)
+                                     result.mc_major) <> slot))
     =
-    if i < Seq.length roots_out then begin
+    if i < Seq.length roots_out &&
+       U64.v (Seq.index roots_out i) >= U64.v zero_addr + U64.v mword &&
+       U64.v (Seq.index roots_out i) < heap_size &&
+       U64.v (Seq.index roots_out i) % U64.v mword = 0
+    then begin
+      // the guard is what puts the bounds in scope; root_resolves_to_itself needs
+      // them as preconditions, and the `ensures` only states them as hypotheses
       assert (Seq.length roots_out == 2);
       match i with
       | 0 ->
@@ -629,7 +644,8 @@ let prepared_roots_preserve_c_field1
         assert (U64.v (U64.sub (Seq.index roots_out i) mword) ==
                 U64.v (SpecHeap.hd_address c));
         U64.v_inj (U64.sub (Seq.index roots_out i) mword) (SpecHeap.hd_address c);
-        assert (U64.sub (Seq.index roots_out i) mword == SpecHeap.hd_address c)
+        assert (U64.sub (Seq.index roots_out i) mword == SpecHeap.hd_address c);
+        MarkBoundedImpl.root_resolves_to_itself result.mc_major (Seq.index roots_out i)
       | 1 ->
         assert (Seq.index roots_out i == img);
         object_header_not_c_field1 r prepared_major a_prime;
@@ -639,7 +655,8 @@ let prepared_roots_preserve_c_field1
                 U64.v (SpecHeap.hd_address a_prime));
         U64.v_inj (U64.sub (Seq.index roots_out i) mword) (SpecHeap.hd_address a_prime);
         assert (U64.sub (Seq.index roots_out i) mword ==
-                SpecHeap.hd_address a_prime)
+                SpecHeap.hd_address a_prime);
+        MarkBoundedImpl.root_resolves_to_itself result.mc_major (Seq.index roots_out i)
       | _ ->
         nat_lt_two_cases i;
         assert False

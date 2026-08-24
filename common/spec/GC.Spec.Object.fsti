@@ -437,7 +437,13 @@ val parent_closure_addr_nat_spec : (infix_obj: obj_addr) -> (g: heap) ->
          U64.v infix_obj - (U64.v (wosize_of_object infix_obj g) * 8))
 
 /// Resolve an address: if infix, return parent closure; otherwise return self.
-/// Defensive: if the computed parent address is invalid, returns the input unchanged.
+///
+/// Defensive on two counts: the computed parent address must be a valid object
+/// address, and the parent's own header must decode to `Closure_tag`. Either check
+/// failing means the input is returned unchanged. The second is what makes the
+/// operation safe on a word that is not known to be a header -- an OCaml integer
+/// with low byte 0xf9 satisfies `is_infix` -- and it is the check hand patch 14
+/// carried before this was verified. See the definition in GC.Spec.Object.fst.
 val resolve_object (addr: obj_addr) (g: heap) : GTot obj_addr
 
 /// resolve_object identity for non-infix objects
@@ -445,12 +451,24 @@ val resolve_non_infix : (addr: obj_addr) -> (g: heap) ->
   Lemma (requires ~(is_infix addr g))
         (ensures resolve_object addr g == addr)
 
-/// resolve_object for infix objects with valid parent
+/// resolve_object for infix objects with a valid parent that really is a closure
 val resolve_infix_spec : (addr: obj_addr) -> (g: heap) ->
   Lemma (requires is_infix addr g /\
                   (let p = parent_closure_addr_nat addr g in
-                   p >= 8 /\ p < heap_size /\ p % 8 == 0))
+                   p >= 8 /\ p < heap_size /\ p % 8 == 0 /\
+                   is_closure (U64.uint_to_t p) g))
         (ensures resolve_object addr g == U64.uint_to_t (parent_closure_addr_nat addr g))
+
+/// resolve_object for an infix object whose computed parent address is valid but
+/// whose header is not a closure: the input is returned unchanged. Needed, like
+/// resolve_infix_invalid, by any executable resolution that must agree with this
+/// definition in every branch.
+val resolve_infix_not_closure : (addr: obj_addr) -> (g: heap) ->
+  Lemma (requires is_infix addr g /\
+                  (let p = parent_closure_addr_nat addr g in
+                   p >= 8 /\ p < heap_size /\ p % 8 == 0 /\
+                   ~(is_closure (U64.uint_to_t p) g)))
+        (ensures resolve_object addr g == addr)
 
 /// resolve_object for infix objects whose recorded offset does not land on a valid
 /// object address: resolve_object is defensive and returns its input unchanged.

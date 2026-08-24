@@ -74,6 +74,10 @@ static color_sem blue = Blue;
 
 static color_sem black = Black;
 
+static uint64_t closure_tag = 247ULL;
+
+static uint64_t infix_tag = 249ULL;
+
 static uint64_t no_scan_tag0 = 251ULL;
 
 static uint64_t getWosize0(uint64_t hdr)
@@ -174,6 +178,92 @@ static bool is_pointer(uint64_t v)
     uint64_t rem = v % 8ULL;
     return rem == 0ULL;
   }
+}
+
+static bool is_infix_object(heap_t heap, uint64_t h_addr)
+{
+  uint64_t hdr = read_word(heap, h_addr);
+  uint64_t t = getTag(hdr);
+  return t == infix_tag;
+}
+
+static bool is_closure_object(heap_t heap, uint64_t h_addr)
+{
+  uint64_t hdr = read_word(heap, h_addr);
+  uint64_t t = getTag(hdr);
+  return t == closure_tag;
+}
+
+#define None 0
+#define Some 1
+
+typedef uint8_t option__uint64_t_tags;
+
+typedef struct option__uint64_t_s
+{
+  option__uint64_t_tags tag;
+  uint64_t v;
+}
+option__uint64_t;
+
+static option__uint64_t parent_closure_of_infix_opt(heap_t heap, uint64_t infix_addr)
+{
+  uint64_t hdr = read_word(heap, infix_addr);
+  uint64_t offset_words = getWosize0(hdr);
+  uint64_t offset_bytes = offset_words * 8ULL;
+  uint64_t f_addr = infix_addr + 8ULL;
+  if (f_addr < offset_bytes)
+    return ((option__uint64_t){ .tag = None });
+  else
+  {
+    uint64_t parent_f_addr = f_addr - offset_bytes;
+    if (parent_f_addr < 8ULL)
+      return ((option__uint64_t){ .tag = None });
+    else if (parent_f_addr >= heap_size_u640)
+      return ((option__uint64_t){ .tag = None });
+    else if (parent_f_addr % 8ULL != 0ULL)
+      return ((option__uint64_t){ .tag = None });
+    else
+    {
+      uint64_t parent_hdr_addr = hd_address(parent_f_addr);
+      bool parent_is_closure = is_closure_object(heap, parent_hdr_addr);
+      return
+        parent_is_closure ? ((option__uint64_t){ .tag = Some, .v = parent_hdr_addr })
+                          : ((option__uint64_t){ .tag = None });
+    }
+  }
+}
+
+static bool uu___is_Some__uint64_t(option__uint64_t projectee)
+{
+  return projectee.tag == Some;
+}
+
+static uint64_t parent_closure_of_infix(heap_t heap, uint64_t infix_addr)
+{
+  option__uint64_t parent_opt = parent_closure_of_infix_opt(heap, infix_addr);
+  if (uu___is_Some__uint64_t(parent_opt))
+    if (parent_opt.tag == Some)
+      return parent_opt.v;
+    else
+    {
+      KRML_HOST_EPRINTF("KaRaMeL abort at %s:%d\n%s\n",
+        __FILE__,
+        __LINE__,
+        "unreachable (pattern matches are exhaustive in F*)");
+      KRML_HOST_EXIT(255U);
+    }
+  else
+    return infix_addr;
+}
+
+static uint64_t resolve_object(heap_t heap, uint64_t obj)
+{
+  bool is_infix = is_infix_object(heap, obj);
+  if (is_infix)
+    return parent_closure_of_infix(heap, obj);
+  else
+    return obj;
 }
 
 static void flush_blue_write_header(heap_t heap, uint64_t fb, uint64_t rw)
@@ -1893,29 +1983,8 @@ void check_and_darken_bounded(heap_t heap, gray_stack_rec st, uint64_t v)
   {
     uint64_t target_hdr_raw = v - 8ULL;
     uint64_t target_hdr = target_hdr_raw;
-    /* HAND PATCH 14 (see ../PATCHES.md) -- UNVERIFIED.
-       An infix pointer aims at an Infix_tag(249) header INSIDE a closure, not
-       at the closure's own header. Darkening v-8 recolours that inner header
-       and leaves the enclosing closure white, so a closure reachable only via
-       infix pointers is swept while live. Stock caml_darken does
-       `v -= Infix_offset_val(v)` first; mirror that. The infix header's
-       wosize field holds the offset back to the closure, in words. */
-    {
-      uint64_t ih = read_word(heap, target_hdr_raw);
-      if ((ih & 0xFFULL) == 249ULL) {
-        /* Same soundness condition as HAND PATCH 15: `tag == 249` is applied
-           to a word not known to be a header, and an OCaml integer can have
-           low byte 0xf9. Require the implied parent to be in-heap AND a real
-           Closure_tag(247) block before redirecting -- without the bounds
-           test the computed parent can fall below zero_addr and
-           darken_if_white_bounded would then read/write outside the heap. */
-        uint64_t parent = v - ((ih >> 10U) * 8ULL);
-        if (parent > zero_addr1 + 8ULL && parent < heap_size_u640 &&
-            (read_word(heap, parent - 8ULL) & 0xFFULL) == 247ULL)
-          target_hdr = parent - 8ULL;
-      }
-    }
-    darken_if_white_bounded(heap, st, target_hdr);
+    uint64_t resolved = resolve_object(heap, target_hdr);
+    darken_if_white_bounded(heap, st, resolved);
   }
 }
 

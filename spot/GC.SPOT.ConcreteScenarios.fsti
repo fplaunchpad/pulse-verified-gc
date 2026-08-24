@@ -15,8 +15,11 @@ module ThreeObjects = GC.SPOT.ThreeObjects
 module ConcreteMajor = GC.SPOT.ConcreteMajor
 module ConcreteMinor = GC.SPOT.ConcreteMinor
 module UpdatePtrs = GC.Gen.Impl.UpdatePtrs
+module SpecFields = GC.Spec.Fields
+module MarkBoundedImpl = GC.Impl.MarkBounded
 
 val spot_fwd_array : seq U64.t
+
 
 val spot_fwd_array_zero : unit ->
   Lemma (ensures Preconditions.zero_forwarding_array spot_fwd_array)
@@ -26,6 +29,22 @@ val spot_c_slot_is_field1
     Lemma (ensures
       ThreeObjects.spot_c_to_a_slot (ConcreteMajor.spot_c r) ==
       ConcreteMajor.spot_c_field1 r)
+
+/// The post-minor major heap is fully well-formed.
+///
+/// Needed by patch 14's root lemmas, which darken `hd_address (resolve_object v g)`
+/// and take part 4 of well-formedness to know that resolution is the identity on an
+/// enumerated object. `GC.Gen.CheneyCorrectness` only preserves part 1 of
+/// `well_formed_heap` unconditionally, but the full predicate does follow from the
+/// concrete collection heap shape, which this scenario establishes.
+val spot_post_minor_major_wf (r: unit{ConcreteMajor.spot_major_room})
+  : Lemma
+      (ensures SpecFields.well_formed_heap
+        (Cheney.cheney_collect_spec
+          ConcreteMinor.spot_minor2
+          (ConcreteMajor.spot_major_heap r)
+          (ConcreteMajor.spot_major_fp r)
+          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))).mc_major)
 
 val spot_concrete_minor_collect_full_pre
   : r:unit{ConcreteMajor.spot_major_room} ->
@@ -71,6 +90,22 @@ val spot_concrete_gen_gc_pre_from_stack
           spot_fwd_array
           (ThreeObjects.spot_slots (ConcreteMajor.spot_c r))
           1 st cap)
+
+/// Every post-minor root points at an enumerated object of the post-minor major
+/// heap. With `spot_post_minor_major_wf` this is what makes
+/// `GC.Impl.MarkBounded.root_resolves_to_itself` applicable, and hence what reduces
+/// patch 14's resolved frame conditions back to plain header addresses.
+val spot_post_minor_roots_point_to_objects (r: unit{ConcreteMajor.spot_major_room})
+  : Lemma
+      (ensures (
+        let result = Cheney.cheney_collect_spec
+          ConcreteMinor.spot_minor2
+          (ConcreteMajor.spot_major_heap r)
+          (ConcreteMajor.spot_major_fp r)
+          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
+        forall (i:nat). i < Seq.length result.mc_roots ==>
+          MarkBoundedImpl.root_points_to_object result.mc_major
+            (Seq.index result.mc_roots i)))
 
 val spot_concrete_gen_gc_pre_empty_stack
   : r:unit{ConcreteMajor.spot_major_room} ->

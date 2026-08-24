@@ -367,6 +367,23 @@ let spot_collection_heap_shape (r: unit{ConcreteMajor.spot_major_room})
     (ConcreteMajor.spot_major_heap r)
     (ConcreteMajor.spot_major_fp r)
 
+
+let spot_post_minor_major_wf (r: unit{ConcreteMajor.spot_major_room})
+  : Lemma
+      (ensures SpecFields.well_formed_heap
+        (Cheney.cheney_collect_spec
+          ConcreteMinor.spot_minor2
+          (ConcreteMajor.spot_major_heap r)
+          (ConcreteMajor.spot_major_fp r)
+          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))).mc_major)
+  =
+  let minor = ConcreteMinor.spot_minor2 in
+  let major = ConcreteMajor.spot_major_heap r in
+  let fp = ConcreteMajor.spot_major_fp r in
+  let roots = ThreeObjects.spot_roots (ConcreteMajor.spot_c r) in
+  spot_collection_heap_shape r;
+  CheneyPres.cheney_collect_preserves_wfh_from_shape minor major fp roots
+
 #push-options "--z3rlimit 10 --fuel 0 --ifuel 0"
 let spot_ref_table_sound (r: unit{ConcreteMajor.spot_major_room})
   : Lemma (UpdatePtrs.ref_table_sound
@@ -1088,6 +1105,13 @@ let spot_post_minor_roots_match_prepared_empty_stack
   GenInv.collection_heap_shape_elim minor major fp;
   GenInv.major_heap_shape_elim major fp;
   ConcreteForwarding.spot_concrete_a_forwarding_free_obj r;
+  // Patch 14 added a `well_formed_heap` hypothesis to the root lemmas below: the
+  // bounded spec darkens `hd_address (resolve_object v g)`, and it takes part 4 of
+  // well-formedness to know that resolution is the identity on an enumerated object.
+  // Only part 1 survives a minor collection unconditionally, but the full predicate
+  // does follow from the collection heap shape, which is already in hand here.
+  CheneyPres.cheney_collect_preserves_wfh_from_shape minor major fp roots;
+  assert (SpecFields.well_formed_heap result.mc_major);
   assert (Seq.length roots2 == 2);
   let p0 = MarkBoundedImpl.darken_roots_bounded_prefix_spec
     result.mc_major st0 roots2 0 cap in
@@ -1151,6 +1175,10 @@ let spot_post_minor_roots_match_prepared_empty_stack
     result.mc_major st0 c cap free;
   assert (~(SpecObj.is_black free g1));
   assert (~(SpecObj.is_blue free g1));
+  // and across the first step, for the same reason
+  MarkBoundedImpl.check_and_darken_bounded_spec_preserves_wf
+    result.mc_major st0 c cap;
+  assert (SpecFields.well_formed_heap g1);
   MarkBoundedRootLemmas.check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
     g1 s1 free cap;
   let p2 = MarkBoundedImpl.darken_roots_bounded_prefix_spec

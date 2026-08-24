@@ -28,7 +28,7 @@ F\*/Pulse source so the extraction is usable directly.
 | 2  | Configurable heap_size | ✅ **ELIMINATED** | `heap_size_u64` is now `extern` from `GC.Spec.ZeroAddr.fsti`; defined in `compat.c` |
 | 3,4 | Scan range / HWM | ✅ **ELIMINATED** | Bridge now walks fwd_arr + calls `update_one_object`; `update_all_objects` reverted to clean extraction |
 | 9  | Infix forwarding | ✅ **DONE** | Phased calls + infix fwd fixup in bridge |
-| 14 | Infix-aware `check_and_darken_bounded` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Currently edited directly in `snapshot/GC_Gen_Impl.c`, so **`make snapshot` will silently revert it**. |
+| 14 | Infix-aware `check_and_darken_bounded` | ✅ **DONE** | Generated from verified source. `GC.Impl.MarkBounded.check_and_darken_bounded` calls `GC.Impl.Closure.resolve_object`, whose postcondition ties it to the ghost `GC.Spec.Object.resolve_object` the mark spec was always stated over. Caveat below. |
 | 15 | Guard the infix tag test with `Closure_tag` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Same file, same caveat. Exposed only after 14. |
 
 ### Extern Configuration (GC.Spec.ZeroAddr + GC.Gen.Base)
@@ -499,6 +499,45 @@ what it does, and gives a plan to either verify it or shrink it to a thin,
 obviously-correct shim.
 
 ---
+
+## PATCH 14 — Infix-aware `check_and_darken_bounded` — ✅ RETIRED INTO VERIFIED SOURCE
+
+**Was**: a hand edit in `snapshot/GC_Gen_Impl.c` inside `check_and_darken_bounded`,
+reproducing stock `caml_darken`'s `v -= Infix_offset_val(v)`.
+
+**Why it mattered**: an infix pointer aims at an `Infix_tag`(249) header *inside* a
+closure, not at the closure's own header. Darkening `v - 8` recolours that inner header
+and leaves the enclosing closure white, so a closure reachable only through infix
+pointers is swept while live. Measured, not hypothetical: 219 live infix pointers at the
+failing collection, one full GC freed **53 still-referenced objects**, and the program
+later jumped through a NULL code pointer.
+
+**Now generated from**:
+
+| layer | what changed |
+|---|---|
+| `GC.Impl.MarkBounded.check_and_darken_bounded` (`.fst`/`.fsti`) | calls `Closure.resolve_object` and darkens the result; the bounded *spec* darkens `hd_address (resolve_object v g)` |
+| `GC.Impl.Closure.resolve_object` | gained a functional postcondition tying it to the ghost `GC.Spec.Object.resolve_object` — it previously promised only `is_heap`, which is how its disagreement with the ghost definition went unnoticed |
+| `GC.Impl.Closure.parent_closure_of_infix_opt` | confirms the computed parent's header is `Closure_tag`, matching what the hand patch checked |
+| `GC.Spec.Object.resolve_object` | its guard gained that same `is_closure` condition, plus `resolve_infix_not_closure` for the new rejection case |
+| `GC.Impl.MarkBounded.root_resolves_to_itself` | exported: on an enumerated object resolution is the identity, which is what lets the pre-existing proofs go through unchanged |
+
+Generated C (`snapshot/GC_Gen_Impl.c`, `resolve_object` → `parent_closure_of_infix` →
+`parent_closure_of_infix_opt`) checks everything the hand patch checked — tag 249, no
+underflow, parent `>= 8`, `< heap_size`, parent tag 247 — **plus** 8-byte alignment of
+the computed parent, which the hand patch did not.
+
+**Runtime evidence**: `make coldstart` passes. With `resolve_object` neutered to return
+its input, the same tree fails at `camlinternalFormat.cmo` with a segmentation fault —
+the original failure. So the generated resolution is doing the work.
+
+**Caveat — what the theorem does *not* say.** `well_formed_heap_part4` keeps infix
+blocks out of the `objects` enumeration, so `infix_wf` is vacuous and every proof about
+resolution is discharged on the branch where resolution is the identity. What is
+verified is that the implementation agrees with the ghost `resolve_object` in *every*
+branch, including the infix ones, and that the mark phase darkens what that function
+returns. Extending `well_formed_heap` to heaps that genuinely contain infix pointers is
+separate, larger work — the same work that would let `no_scan_invariant` be deleted.
 
 ## BRIDGE 1 — Heap initialisation (`ensure_heap`, lines 74–169)
 

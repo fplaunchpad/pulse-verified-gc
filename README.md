@@ -39,6 +39,79 @@ make -C generational/ocaml-integration/tests test # run smoke tests
 make -C generational/ocaml-integration/tests benchmark # run benchmarks
 ```
 
+## Compiling and running your own `.ml` file
+
+After `make -C generational/ocaml-integration setup`, both compilers exist in the
+OCaml tree. From the repository root:
+
+```bash
+GC=$PWD/generational/ocaml-integration/ocaml-4.14-verified-gen
+```
+
+**Bytecode**
+
+```bash
+$GC/ocamlc.opt -nostdlib -I $GC/stdlib \
+               -use-runtime $GC/runtime/ocamlrun \
+               -o prog.byte prog.ml
+./prog.byte
+```
+
+**Native**
+
+```bash
+$GC/ocamlopt.opt -nostdlib -I $GC/runtime -I $GC/stdlib \
+                 -o prog.exe prog.ml
+./prog.exe
+```
+
+Two flags carry the whole thing, and both fail *silently* if you drop them.
+
+`-use-runtime` pins the bytecode executable to the verified `ocamlrun`. Without
+it the header names the compiler's configured runtime — `/usr/local/bin/ocamlrun`
+— so on a machine with a stock OCaml installed your test runs on the **stock**
+collector and looks fine.
+
+`-I $GC/runtime` **must precede** `-I $GC/stdlib`. The verified collector is not
+a separate library: it is archived inside `libasmrun.a`. The tree keeps two
+copies of that archive — `runtime/libasmrun.a` is the build output,
+`stdlib/libasmrun.a` is a copy refreshed only by `make runtimeopt` — and `-I`
+directories are searched in the order given. Put `stdlib` first and you link
+whatever was propagated last, which compiles, links, runs, and passes against an
+old collector.
+
+**After changing the GC** — any edit to the F\* source, the snapshot, a hand
+patch, or a `git checkout` (the snapshot is tracked, the build artifacts are
+not, so they survive and go stale):
+
+```bash
+make -C generational/ocaml-integration/verified_gc
+cd generational/ocaml-integration/ocaml-4.14-verified-gen && make runtime runtimeopt
+```
+
+`make runtime runtimeopt` builds the archives *and* propagates them.
+`make -C runtime all allopt` builds without propagating; `make coldstart` builds
+no native archive at all.
+
+**Checking which collector you linked**
+
+```bash
+nm prog.exe | grep -E 'verified_allocate|minor_collect_full'   # native
+head -1 prog.byte                                              # bytecode
+cmp $GC/runtime/libasmrun.a $GC/stdlib/libasmrun.a             # copies in sync?
+```
+
+Finding those symbols proves *a* verified GC is linked, not the current one — a
+stale archive contains them too, which is what `cmp` is for.
+
+**Scope.** This runs your *program* on the verified collector, not the compiler:
+`ocamlc.opt` and `ocamlopt.opt` are prebuilt binaries with their own vintage
+statically linked, unaffected by the rebuild above. To put the current collector
+under the compiler itself, rebuild it — `make coldstart` (bytecode stdlib
+bootstrap) or `make world.opt` (native, ~900 `ocamlopt` invocations). Those are
+also the strongest tests available, since a collector broken enough to matter
+cannot finish a bootstrap.
+
 ## Current status
 
 The active development is organized around dependency-scanned builds. The

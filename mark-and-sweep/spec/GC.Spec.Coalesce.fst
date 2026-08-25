@@ -3607,7 +3607,7 @@ val flush_merged_in_walk
 
 let flush_merged_in_walk g first_blue run_words fp start = admit ()
 
-
+#push-options "--z3rlimit 1200 --fuel 1 --ifuel 1 --split_queries always"
 val coalesce_aux_chain_dec
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3802,26 +3802,34 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
                   = chain_reach_head_cases g_flush (fp_flush <: obj_addr) y r0;
                     assert (fp <> 0UL);
                     assert (chain_reachable g_flush (fp <: obj_addr) y);
-                    let unframe_aux (c: obj_addr)
+                    let pos_frame (d: obj_addr)
                       : Lemma
-                        (requires
-                          Seq.mem c (objects zero_addr g_flush) /\ is_blue c g_flush /\
-                          chain_reachable g_flush (fp <: obj_addr) c)
+                        (requires U64.v d < U64.v (hd_address (first_blue <: obj_addr)))
+                        (ensures read_word g (d <: obj_addr) == read_word g_flush (d <: obj_addr))
+                      = flush_blue_preserves_outside g first_blue run_words fp d
+                    in
+                    FStar.Classical.forall_intro (FStar.Classical.move_requires pos_frame);
+                    assert (chain_reachable g (fp <: obj_addr) (fp <: obj_addr));
+                    assert (U64.v fp < U64.v (hd_address (first_blue <: obj_addr)));
+                    let use_chain (r1: chain_reach g_flush (fp <: obj_addr) y)
+                      : Lemma
                         (ensures
-                          Seq.mem c (objects zero_addr g) /\
-                          is_blue c g /\
-                          read_word g (c <: obj_addr) == read_word g_flush (c <: obj_addr))
-                      =  let pos_frame (d: obj_addr)
-                          : Lemma
-                            (requires U64.v d < U64.v (hd_address (first_blue <: obj_addr)))
-                            (ensures read_word g (d <: obj_addr) == read_word g_flush (d <: obj_addr))
-                          = flush_blue_preserves_outside g first_blue run_words fp d
-                        in
-                        FStar.Classical.forall_intro (FStar.Classical.move_requires pos_frame);
+                          (let v = read_word g_flush y in
+                           v = 0UL \/
+                           (is_pointer_field v /\ U64.v v < U64.v y)))
+                      = chain_below_bound_unframe g g_flush
+                          (hd_address (first_blue <: obj_addr))
+                          (fp <: obj_addr) y r1;
                         admit ()
                     in
-                    FStar.Classical.forall_intro (FStar.Classical.move_requires unframe_aux);
-                    admit ()
+                    FStar.Classical.exists_elim
+                      (let v = read_word g_flush y in
+                       v = 0UL \/
+                       (is_pointer_field v /\ U64.v v < U64.v y))
+                      #(chain_reach g_flush (fp <: obj_addr) y)
+                      #(fun _ -> True)
+                      ()
+                      (fun r1 -> use_chain r1)
                 in
                 FStar.Classical.exists_elim
                   (let v = read_word g_flush y in
@@ -3862,4 +3870,4 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
       else admit ()
     end
   end
-
+ #pop-options 

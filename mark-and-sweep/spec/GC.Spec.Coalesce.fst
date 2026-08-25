@@ -3792,7 +3792,25 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
                   assert (U64.v fp < U64.v first_blue)
                 end
               end
-              else admit ()
+              else begin
+                let hc (r0: chain_reach g_flush (fp_flush <: obj_addr) y)
+                  : Lemma
+                    (ensures
+                      (let v = read_word g_flush y in
+                       v = 0UL \/
+                       (is_pointer_field v /\ U64.v v < U64.v y)))
+                  = chain_reach_head_cases g_flush (fp_flush <: obj_addr) y r0;
+                    admit ()
+                in
+                FStar.Classical.exists_elim
+                  (let v = read_word g_flush y in
+                   v = 0UL \/
+                   (is_pointer_field v /\ U64.v v < U64.v y))
+                  #(chain_reach g_flush (fp_flush <: obj_addr) y)
+                  #(fun _ -> True)
+                  ()
+                  (fun r0 -> hc r0)
+              end
           in
           FStar.Classical.forall_intro (FStar.Classical.move_requires field_aux);
 

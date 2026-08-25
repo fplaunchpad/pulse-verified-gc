@@ -3811,7 +3811,14 @@ let rec coalesce_aux_chain_dec g0 g start objs first_blue run_words fp all_objs 
                           Seq.mem c (objects zero_addr g) /\
                           is_blue c g /\
                           read_word g (c <: obj_addr) == read_word g_flush (c <: obj_addr))
-                      = admit ()
+                      =  let pos_frame (d: obj_addr)
+                          : Lemma
+                            (requires U64.v d < U64.v (hd_address (first_blue <: obj_addr)))
+                            (ensures read_word g (d <: obj_addr) == read_word g_flush (d <: obj_addr))
+                          = flush_blue_preserves_outside g first_blue run_words fp d
+                        in
+                        FStar.Classical.forall_intro (FStar.Classical.move_requires pos_frame);
+                        admit ()
                     in
                     FStar.Classical.forall_intro (FStar.Classical.move_requires unframe_aux);
                     admit ()

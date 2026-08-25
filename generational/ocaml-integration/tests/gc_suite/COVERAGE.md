@@ -11,15 +11,30 @@ baseline but does not exercise the verified collector. Use `run_verified.sh`,
 which points both at the in-tree compilers and pins bytecode executables to
 `runtime/ocamlrun` with `-use-runtime`.
 
-Note that `make coldstart` builds only the **bytecode** runtime flavours.
-Native needs `make -C runtime allopt`, which is what produces `libasmrun.a`
-with `libvergc_gen_native.a` embedded in it. Without that step there is nothing
-to link native tests against.
+Two prerequisites, and the second one cost a full round of wrong results.
 
-Confirmed both paths really use the verified GC before trusting any result:
-the native executables resolve `find_infix_parents`, `minor_collect_full` and
-`verified_allocate`; the bytecode header names the in-tree `ocamlrun`, which
-links the same objects.
+`make coldstart` builds only the **bytecode** runtime flavours. Native needs the
+`allopt` side, which produces `libasmrun.a` with `libvergc_gen_native.a`
+embedded in it.
+
+**But building in `runtime/` is not enough.** `ocamlopt` links
+`stdlib/libasmrun.a`, not `runtime/libasmrun.a` — the tree keeps a second copy,
+placed there by the `runtime`/`runtimeopt` Makefile targets
+(`Makefile:822-829`). Build only in `runtime/` and native tests link whatever
+older collector is sitting in `stdlib/`, silently. The correct incantation is:
+
+```
+make -C ../../verified_gc
+cd ../../ocaml-4.14-verified-gen && make runtime runtimeopt
+```
+
+`run_verified.sh` now `cmp`s the two copies and refuses to run if they differ,
+because this failure is invisible in the output: the tests link, run, and pass.
+
+Checking that *a* verified GC is linked is not sufficient either — `nm` on a
+native executable resolving `find_infix_parents`, `minor_collect_full` and
+`verified_allocate` was true of the stale library too. The identity of the
+library is what has to be checked, not its provenance.
 
 ## Result: 22/22 pass, but t01_infix does not cover infix
 
@@ -43,32 +58,38 @@ defect that broke `make coldstart` — **the suite still passes 20/20.**
 
 `t11_infix_only.ml` fixes both: only the second function escapes, the group
 captures a variable so it must be heap-allocated, and the churn forces a major
-collection. Validated by A/B — with resolution disabled it segfaults
-(exit 139) in bytecode; with resolution enabled it passes.
+collection. Validated by A/B/A on the file itself — with resolution disabled it segfaults in
+both bytecode and native; with resolution enabled, before and after, it passes.
 
-## The native asymmetry is unexplained
+## Both modes reproduce; an earlier claim of a native asymmetry was a build error
 
-With resolution disabled, `t11`'s shape reproduces in **bytecode** but not in
-**native**, even scaled to 5000 live infix-only closures across 10 major
-collections and 691 minor ones. Native produced correct output every time.
+With resolution disabled, `t11_infix_only` segfaults in **both** bytecode and
+native, and the ten supplied tests still pass 20/20 in both:
 
-What has been ruled out:
+| arm | supplied t01-t10 | t11_infix_only |
+|---|---|---|
+| resolution enabled | 20/20 pass | bytecode pass, native pass |
+| `resolve_object` -> `return obj` | 20/20 pass | **bytecode SIGSEGV, native SIGSEGV** |
 
-- Native does create infix pointers here. `Obj.tag` on the second function
-  reports 249 in both modes.
-- The verified major collector is active in native. `do_full_gc` in
-  `alloc_gen.c` is not behind `#ifdef NATIVE_CODE`, and it is what darkens the
-  post-minor roots and runs mark-and-sweep.
+An earlier version of this file reported that native did not reproduce and
+called it unexplained. That was wrong, and the cause was the stale
+`stdlib/libasmrun.a` described above: native was linking a collector built
+before the change, so the disabled arm never reached it. There is no asymmetry
+between the two modes here.
 
-So the reason native tolerates the missing resolution is not yet known, and
-until it is, **a native pass on any infix test should not be read as evidence
-that the infix path works in native.** Bytecode is currently the only mode
-where this class of bug is known to be observable.
-
-## One correction to the suite README
+## One note on the suite README
 
 The README describes t01 as "the known native failure". Per this repository's
 record the infix bug was found in `make coldstart`, which builds the stdlib with
-`boot/ocamlc` under `runtime/ocamlrun` — bytecode. Commit `582358c` states it
-directly: "This is what broke `make coldstart`." The A/B above agrees: the
-failure is observable in bytecode, not native.
+`boot/ocamlc` under `runtime/ocamlrun` — bytecode. Commit `582358c` says so
+directly: "This is what broke `make coldstart`."
+
+That is a statement about where it was *discovered*, not about which modes are
+affected. The A/B above shows both modes are affected equally.
+
+## Also worth fixing in t11
+
+`t11_infix_only` captures `n` so the recursive group must be heap-allocated. A
+group with no free variables can be emitted as a static closure, which never
+involves the collector at all — worth remembering when writing further infix
+tests, since such a test would pass unconditionally and look like coverage.

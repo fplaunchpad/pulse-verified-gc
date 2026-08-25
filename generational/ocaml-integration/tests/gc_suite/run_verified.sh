@@ -3,11 +3,18 @@
 # compilers. run_tests.sh defaults to `ocamlc`/`ocamlopt` from PATH, which is
 # stock OCaml -- useful as a baseline, but it does not test this project.
 #
-# Prerequisite: both runtime flavours must be built. `make coldstart` builds only
-# the bytecode ones, so native needs `allopt` explicitly:
+# Prerequisite: both runtime flavours must be built AND propagated into stdlib/.
+# `make coldstart` builds only the bytecode ones, and building in runtime/ is not
+# enough on its own -- ocamlopt links stdlib/libasmrun.a, not runtime/libasmrun.a,
+# so a fresh runtime/ library with a stale stdlib/ copy silently tests the old
+# collector. The Makefile targets that do both are `runtime` and `runtimeopt`:
 #
 #   make -C ../../verified_gc
-#   make -C ../../ocaml-4.14-verified-gen/runtime all allopt
+#   cd ../../ocaml-4.14-verified-gen && make runtime runtimeopt
+#
+# This script refuses to run if the two copies differ, because that mistake is
+# invisible in the results: native tests link and pass against whatever old GC
+# happens to be sitting in stdlib/.
 #
 # Usage: sh run_verified.sh [both|byte|native]
 set -eu
@@ -18,8 +25,19 @@ WRAP=$(mktemp -d)
 trap 'rm -rf "$WRAP"' EXIT
 
 for f in "$ROOT/ocamlc.opt" "$ROOT/ocamlopt.opt" "$ROOT/runtime/ocamlrun" \
-         "$ROOT/runtime/libasmrun.a"; do
+         "$ROOT/runtime/libasmrun.a" "$ROOT/stdlib/libasmrun.a"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; echo "see the header of this script" >&2; exit 1; }
+done
+
+# The check that matters: ocamlopt links the stdlib/ copy.
+for lib in libasmrun.a libcamlrun.a; do
+  if [ -e "$ROOT/stdlib/$lib" ] && \
+     ! cmp -s "$ROOT/runtime/$lib" "$ROOT/stdlib/$lib"; then
+    echo "stale: $ROOT/stdlib/$lib differs from runtime/$lib" >&2
+    echo "native tests would link the stdlib/ copy -- an older collector." >&2
+    echo "run: (cd $ROOT && make runtime runtimeopt)" >&2
+    exit 1
+  fi
 done
 
 # -use-runtime pins the bytecode executables to the verified ocamlrun rather

@@ -282,3 +282,51 @@ let rec chain_members_below_head g x y r =
         assert (read_word g (w <: obj_addr) == (z <: U64.t));
         assert (U64.v z < U64.v w)
       end
+
+val chain_below_bound_unframe (g g': heap) (bound: U64.t)
+  (x: obj_addr{Seq.mem x (objects zero_addr g')})
+  (y: obj_addr{Seq.mem y (objects zero_addr g')})
+  (r: chain_reach g' x y)
+  : Lemma
+    (requires
+      U64.v x < U64.v bound /\
+      (forall (c: obj_addr).
+        U64.v c < U64.v bound ==>
+        (Seq.mem c (objects zero_addr g') ==> Seq.mem c (objects zero_addr g)) /\
+        (is_blue c g' ==> is_blue c g) /\
+        read_word g (c <: obj_addr) == read_word g' (c <: obj_addr)) /\
+      (forall (c: obj_addr).
+        Seq.mem c (objects zero_addr g') /\ is_blue c g' /\
+        chain_reachable g' x c ==>
+        (let v = read_word g' c in
+         v = 0UL \/
+         (is_pointer_field v /\ U64.v v < U64.v c))) /\
+      Seq.mem y (objects zero_addr g))
+    (ensures chain_reachable g x y /\ U64.v y < U64.v bound)
+    (decreases r)
+
+let rec chain_below_bound_unframe g g' bound x y r = 
+  match r with
+  | ChainRefl _ ->
+      let r' : chain_reach g x x = ChainRefl x in
+      FStar.Classical.exists_intro (fun (_: chain_reach g x y) -> True) r'
+  | ChainStep _ w z prev ->
+      chain_members_below_head g' x w prev;
+      assert (U64.v w <= U64.v x);
+      assert (U64.v w < U64.v bound);
+      chain_below_bound_unframe g g' bound x w prev;
+      assert (is_blue w g);
+      assert (read_word g (w <: obj_addr) == read_word g' (w <: obj_addr));
+      assert (fl_edge g w z);
+      assert (U64.v z < U64.v w);
+      let aux (r0: chain_reach g x w)
+        : Lemma (chain_reachable g x z)
+        = let r1 : chain_reach g x z = ChainStep x w z r0 in
+          FStar.Classical.exists_intro (fun (_: chain_reach g x z) -> True) r1
+      in
+      FStar.Classical.exists_elim
+        (chain_reachable g x z)
+        #(chain_reach g x w)
+        #(fun _ -> True)
+        ()
+        (fun r0 -> aux r0)

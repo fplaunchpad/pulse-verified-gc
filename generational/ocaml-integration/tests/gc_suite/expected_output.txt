@@ -1,0 +1,32 @@
+=== t01_infix
+even 10 = true, odd 10 = false
+t01 ok
+=== t02_noscan
+strs=19090 bytes=11941 floats=600.0
+t02 ok
+=== t03_large
+t03 ok
+=== t04_promotion
+kept sum = 124975000
+t04 ok
+=== t05_writebarrier
+s1=7998000 s2=7998000 s3=14890 s4=7994001
+t05 ok
+=== t06_stale_ref
+sum=179943000
+t06 ok
+=== t07_fragmentation
+s1=600000 s2=190
+t07 ok
+=== t08_deep
+tree=34359607296 chain=400000
+t08 ok
+=== t09_small_sizes
+s=6667
+t09 ok
+=== t10_mixed
+even 100 = true s1=2220000 s2=1225
+t10 ok
+=== t11_infix_only
+reachable-only-via-infix = 2000
+t11 ok

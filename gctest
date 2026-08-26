@@ -63,16 +63,34 @@ rebuild() {
 }
 
 report_check() {
-  echo "snapshot   $(md5sum "$SNAP" | cut -c1-12)  $SNAP"
-  echo "libcamlrun $(md5sum "$GC/runtime/libcamlrun.a" | cut -c1-12)  (bytecode)"
-  echo "libasmrun  $(md5sum "$GC/runtime/libasmrun.a"  | cut -c1-12)  (native)"
-  if cmp -s "$GC/runtime/libasmrun.a" "$GC/stdlib/libasmrun.a"; then
-    echo "stdlib copy in sync"
+  # Only the snapshot is meaningfully hashable. Archives and object files are
+  # NOT reproducible -- ar stamps a per-member mtime/uid/gid, and the compiler
+  # embeds build metadata -- so their checksums change on every rebuild with no
+  # source change. Reporting them would look like identity and mean "when did
+  # you last build". Derivation is checked by timestamp instead.
+  echo "snapshot   md5 $(md5sum "$SNAP" | cut -c1-12)"
+  if ( cd "$ROOT" && git diff --quiet -- "$SNAP" 2>/dev/null ); then
+    echo "           matches git HEAD"
   else
-    echo "stdlib copy STALE -- native would link the wrong collector"
+    echo "           MODIFIED vs git HEAD"
   fi
+  echo "           $(grep -c 'HAND PATCH' "$SNAP") hand-patch marker(s)"
+
+  for pair in "libcamlrun.a bytecode" "libasmrun.a native"; do
+    lib=${pair% *}; kind=${pair#* }
+    if [ ! -f "$GC/runtime/$lib" ]; then
+      printf '%-10s %-9s MISSING\n' "$kind" "$lib"; continue
+    fi
+    if [ "$GC/runtime/$lib" -nt "$SNAP" ]; then d="built after the snapshot"
+    else                                        d="OLDER than the snapshot"; fi
+    if cmp -s "$GC/runtime/$lib" "$GC/stdlib/$lib" 2>/dev/null; then c="stdlib copy in sync"
+    else                                                            c="stdlib copy STALE"; fi
+    printf '%-10s %s, %s\n' "$kind" "$d" "$c"
+  done
+
   n=$(ar t "$GC/runtime/libasmrun.a" 2>/dev/null | grep -c 'GC_Gen_Impl\|alloc_gen')
-  echo "verified objects inside libasmrun.a: $n (expect 2+)"
+  echo "embedded   $n verified GC object(s) inside libasmrun.a (expect 2+)"
+  echo "compilers  ocamlc.opt $(date -r "$GC/ocamlc.opt" +%Y-%m-%d 2>/dev/null), ocamlopt.opt $(date -r "$GC/ocamlopt.opt" +%Y-%m-%d 2>/dev/null) -- frozen, not rebuilt by gctest"
 }
 
 [ "$ACTION" = rebuild ] && { rebuild; report_check; exit 0; }

@@ -39,129 +39,52 @@ make -C generational/ocaml-integration/tests test # run smoke tests
 make -C generational/ocaml-integration/tests benchmark # run benchmarks
 ```
 
-## Running code against the verified GC
+## Testing against the verified GC
+
+Three scripts. They run the same steps as
+[`.github/workflows/testsuite.yml`](.github/workflows/testsuite.yml), so a local
+result and a CI result mean the same thing.
 
 ```bash
-./gctest prog.ml            # compile and run, bytecode and native
-./gctest --byte prog.ml     # one mode only
-./gctest --native prog.ml
-./gctest path/to/tests/     # every t*.ml there; diffs against
-                            # expected_output.txt if the directory has one
-./gctest --check            # is the build derived from the current snapshot?
-./gctest --rebuild          # rebuild the GC and both runtimes
+# 1. Build a full OCaml toolchain that runs on the verified GC.
+#    Clones and patches the trees if needed, then `make world.opt`.
+#    15-40 min the first time, incremental afterwards.
+sh ci/build-verified-toolchain.sh
+
+# 2. Compile and run your own code, bytecode and native.
+sh ci/run-verified.sh prog.ml
+sh ci/run-verified.sh --byte prog.ml
+sh ci/run-verified.sh --native prog.ml
+sh ci/run-verified.sh some/dir            # every t*.ml; diffs against
+                                          # expected_output.txt if present
+
+# 3. Run OCaml's own testsuite -- 231 directories, ~3100 test instances,
+#    each in both a bytecode and a native variant.
+sh ci/run-testsuite.sh
+sh ci/run-testsuite.sh tests/lib-hashtbl  # one directory
 ```
 
-That is the whole interface. `gctest` rebuilds automatically when the snapshot
-or the bridge is newer than the built archives, so neither of the two silent
-ways to test the wrong collector — a stale `stdlib/` copy of `libasmrun.a`, or a
-runtime predating your edit — can happen. `--check` reports without repairing,
-since repairing first would hide what you asked about.
+Step 1 is the one that matters, and it is why this is reproducible.
+`make world.opt` rebuilds the *entire toolchain* — `ocamlc`, `ocamlopt`, the
+stdlib, both runtimes — on the verified collector. Afterwards the tree is a
+self-consistent OCaml installation and testing is just "use these compilers".
+It is also the strongest test in the repository on its own: a collector broken
+enough to matter cannot finish a bootstrap. The infix bug was found exactly this
+way, by `make coldstart` dying on `camlinternalFormat.ml`.
 
-A failing run prints the signal (`FAIL (exit 139, signal 11)`) and exits
-nonzero. Sources are copied to a temporary directory before compiling, so no
-`.cmi`/`.cmo`/`.o` files are left next to yours.
+Rerun step 1 after any change to the F\* source, the snapshot, or a hand patch.
 
-`--check` deliberately does **not** try to identify the linked collector by
-checksum, because that is not possible here: `ar` stamps a per-member
-mtime/uid/gid into each archive and the compiler embeds build metadata under
-`-flto`, so two rebuilds of identical sources produce different digests. Only
-the snapshot — a plain text file — is meaningfully hashable. Derivation is
-therefore reported by timestamp ("built after the snapshot"), and the useful
-identity question is answered by the snapshot's own md5 plus whether it matches
-git HEAD:
+### What the testsuite result means
 
-```
-snapshot   md5 0758fb1e5950
-           matches git HEAD
-           9 hand-patch marker(s)
-bytecode   built after the snapshot, stdlib copy in sync
-native     built after the snapshot, stdlib copy in sync
-embedded   2 verified GC object(s) inside libasmrun.a (expect 2+)
-compilers  ocamlc.opt 2026-08-18, ocamlopt.opt 2026-08-18 -- frozen, not rebuilt by gctest
-```
+The gate is **no new failures**, not zero failures. The verified GC does not
+implement statmemprof, weak references or ephemerons, so those tests fail by
+design; [`ci/expected-failures.txt`](ci/expected-failures.txt) is the baseline
+and `ci/run-testsuite.sh` diffs against it, exactly as CI does. It writes
+`testsuite-report.html` and exits nonzero only on a regression.
 
-That last line matters: `gctest` puts the current collector under your
-*program*, never under the compiler. The compilers are prebuilt binaries with a
-collector of their own vintage statically linked. Rebuilding them with the
-current one is what `make coldstart` (bytecode) and `make world.opt` (native) do,
-and those are the strongest tests available — a collector broken enough to matter
-cannot finish a bootstrap.
-
-The rest of this section is what `gctest` does under the hood, for when you need
-to drive the compilers yourself.
-
-## Driving the compilers by hand
-
-After `make -C generational/ocaml-integration setup`, both compilers exist in the
-OCaml tree. From the repository root:
-
-```bash
-GC=$PWD/generational/ocaml-integration/ocaml-4.14-verified-gen
-```
-
-**Bytecode**
-
-```bash
-$GC/ocamlc.opt -nostdlib -I $GC/stdlib \
-               -use-runtime $GC/runtime/ocamlrun \
-               -o prog.byte prog.ml
-./prog.byte
-```
-
-**Native**
-
-```bash
-$GC/ocamlopt.opt -nostdlib -I $GC/runtime -I $GC/stdlib \
-                 -o prog.exe prog.ml
-./prog.exe
-```
-
-Two flags carry the whole thing, and both fail *silently* if you drop them.
-
-`-use-runtime` pins the bytecode executable to the verified `ocamlrun`. Without
-it the header names the compiler's configured runtime — `/usr/local/bin/ocamlrun`
-— so on a machine with a stock OCaml installed your test runs on the **stock**
-collector and looks fine.
-
-`-I $GC/runtime` **must precede** `-I $GC/stdlib`. The verified collector is not
-a separate library: it is archived inside `libasmrun.a`. The tree keeps two
-copies of that archive — `runtime/libasmrun.a` is the build output,
-`stdlib/libasmrun.a` is a copy refreshed only by `make runtimeopt` — and `-I`
-directories are searched in the order given. Put `stdlib` first and you link
-whatever was propagated last, which compiles, links, runs, and passes against an
-old collector.
-
-**After changing the GC** — any edit to the F\* source, the snapshot, a hand
-patch, or a `git checkout` (the snapshot is tracked, the build artifacts are
-not, so they survive and go stale):
-
-```bash
-make -C generational/ocaml-integration/verified_gc
-cd generational/ocaml-integration/ocaml-4.14-verified-gen && make runtime runtimeopt
-```
-
-`make runtime runtimeopt` builds the archives *and* propagates them.
-`make -C runtime all allopt` builds without propagating; `make coldstart` builds
-no native archive at all.
-
-**Checking which collector you linked**
-
-```bash
-nm prog.exe | grep -E 'verified_allocate|minor_collect_full'   # native
-head -1 prog.byte                                              # bytecode
-cmp $GC/runtime/libasmrun.a $GC/stdlib/libasmrun.a             # copies in sync?
-```
-
-Finding those symbols proves *a* verified GC is linked, not the current one — a
-stale archive contains them too, which is what `cmp` is for.
-
-**Scope.** This runs your *program* on the verified collector, not the compiler:
-`ocamlc.opt` and `ocamlopt.opt` are prebuilt binaries with their own vintage
-statically linked, unaffected by the rebuild above. To put the current collector
-under the compiler itself, rebuild it — `make coldstart` (bytecode stdlib
-bootstrap) or `make world.opt` (native, ~900 `ocamlopt` invocations). Those are
-also the strongest tests available, since a collector broken enough to matter
-cannot finish a bootstrap.
+Single-directory runs skip the baseline comparison and print a raw tally — the
+baseline covers the whole suite, so comparing one directory against it would
+report every unrelated failure as "now passing".
 
 ## Current status
 

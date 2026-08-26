@@ -1,69 +1,88 @@
 #!/bin/sh
-# Build a complete OCaml 4.14 toolchain running on the verified GC.
+# Build what you need to test against the verified GC.
 #
-# This is the local equivalent of the "Build the compiler on the verified GC"
-# step in .github/workflows/testsuite.yml, and it is what makes everything
-# afterwards reproducible: once `make world.opt` has run, the tree's own
-# ocamlc/ocamlopt are themselves built and running on the verified collector, so
-# testing anything is just "use these compilers". No wrapper scripts, no flag
-# ordering to get right, no second copy of a runtime archive to go stale.
+#   sh ci/build-verified-toolchain.sh            runtimes only  (minutes)
+#   sh ci/build-verified-toolchain.sh --full     + world.opt     (15-40 min)
 #
-#   sh ci/build-verified-toolchain.sh            # build it
-#   sh ci/build-verified-toolchain.sh --clean    # from scratch (slow)
+# The default is enough for ci/run-verified.sh, because that swaps the *runtime*
+# and compiles with the stock compiler:
+#   - bytecode carries no collector; the collector is whichever ocamlrun runs it
+#   - native links the collector out of the verified GC's libasmrun.a via -I
 #
-# Roughly 15-40 minutes the first time. Afterwards it is incremental.
+# --full additionally runs `make world.opt` + `make ocamltest`, which rebuilds
+# the whole toolchain ON the verified collector. That is required only by
+# ci/run-testsuite.sh, which exercises the compiler itself. It is also the
+# strongest single check in the repository: a collector broken enough to matter
+# cannot finish a bootstrap -- the infix bug surfaced exactly that way, with
+# `make coldstart` dying on camlinternalFormat.ml.
+#
+# Rerun after any change to the F* source, the snapshot, or a hand patch.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TREE=$ROOT/generational/ocaml-integration/ocaml-4.14-verified-gen
+INT=$ROOT/generational/ocaml-integration
+TREE=$INT/ocaml-4.14-verified-gen
 LOG=$ROOT/build-verified-toolchain.log
 
-[ "${1:-}" = "--clean" ] && CLEAN=yes || CLEAN=no
+FULL=no
+[ "${1:-}" = "--full" ] && FULL=yes
+[ "${1:-}" = "--help" ] && { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0; }
 
 say() { printf '\n=== %s\n' "$1"; }
 
-say "1/5  the snapshot must still carry its hand patches"
-# make snapshot overwrites the extracted C with a plain cp, so a regeneration
-# can silently drop them. Same guard CI runs first, and for the same reason.
+say "the snapshot must still carry its hand patches"
+# `make snapshot` overwrites the extracted C with a plain cp, so a regeneration
+# can silently drop them. Same guard CI runs first, for the same reason.
 make -C "$ROOT/generational" verify-snapshot-patches
 
-say "2/5  OCaml trees present?"
-if [ ! -d "$TREE" ]; then
-  echo "cloning and patching (stock + verified) ..."
-  make -C "$ROOT/generational/ocaml-integration" setup
+say "OCaml trees (stock, installed + verified, patched)"
+if [ ! -x "$INT/ocaml-4.14-unchanged/_install/bin/ocamlc" ] || [ ! -d "$TREE" ]; then
+  make -C "$INT" setup
 else
-  echo "$TREE already exists"
+  echo "already present"
 fi
 
-say "3/5  the verified GC itself"
-make -C "$ROOT/generational/ocaml-integration/verified_gc"
+say "the verified GC"
+make -C "$INT/verified_gc"
 
-say "4/5  world.opt -- the whole toolchain, on the verified GC"
+say "the verified runtimes (bytecode ocamlrun + native libasmrun.a)"
+make -C "$TREE/runtime" ocamlrun libasmrun.a
+
+if [ "$FULL" = no ]; then
+  cat <<EOF
+
+Ready. Run your own code:
+
+  sh ci/run-verified.sh prog.ml
+  sh ci/run-verified.sh some/dir
+
+For OCaml's own testsuite you also need the compiler rebuilt on the verified
+collector -- rerun with --full, then use ci/run-testsuite.sh.
+EOF
+  exit 0
+fi
+
+say "world.opt -- the whole toolchain, on the verified GC"
 echo "logging to $LOG"
 cd "$TREE"
-[ "$CLEAN" = yes ] && make clean >/dev/null 2>&1 || true
 set -o pipefail 2>/dev/null || true
 if ! make world.opt 2>&1 | tee "$LOG"; then
   echo
-  echo "world.opt FAILED. This is the interesting failure mode: a collector"
-  echo "broken enough to matter cannot finish a bootstrap. What was being"
-  echo "compiled, and what the runtime said:"
+  echo "world.opt FAILED -- which is itself the interesting result. What was"
+  echo "being compiled, and what the runtime said:"
   echo
   grep -nE 'Segmentation|Fatal error|Aborted|out of memory|internal error' "$LOG" | tail -20 || true
   grep -E 'ocamlc|ocamlopt|ocamlrun' "$LOG" | tail -5 || true
   exit 1
 fi
 
-say "5/5  ocamltest (needed by the testsuite)"
+say "ocamltest"
 make ocamltest 2>&1 | tee -a "$LOG" >/dev/null
 
 cat <<EOF
 
-Done. The toolchain in
-  $TREE
-is built on the verified GC. Use it directly:
+Ready, including the testsuite:
 
-  sh ci/run-verified.sh prog.ml        compile and run, bytecode and native
-  sh ci/run-testsuite.sh               OCaml's own testsuite, both variants
-
+  sh ci/run-verified.sh prog.ml
+  sh ci/run-testsuite.sh
 EOF

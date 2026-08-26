@@ -41,60 +41,59 @@ make -C generational/ocaml-integration/tests benchmark # run benchmarks
 
 ## Testing against the verified GC
 
-Three scripts. They run the same steps as
-[`.github/workflows/testsuite.yml`](.github/workflows/testsuite.yml), so a local
-result and a CI result mean the same thing.
-
 ```bash
-# 1. Build a full OCaml toolchain that runs on the verified GC.
-#    Clones and patches the trees if needed, then `make world.opt`.
-#    15-40 min the first time, incremental afterwards.
-sh ci/build-verified-toolchain.sh
+# Once: clone and build both OCaml trees (stock, installed + verified, patched).
+# This already produces everything needed to run your own code: the verified
+# runtime/ocamlrun and runtime/libasmrun.a.
+make -C generational/ocaml-integration setup
 
-# 2. Compile and run your own code, bytecode and native.
+# Run your own code, bytecode and native.
 sh ci/run-verified.sh prog.ml
 sh ci/run-verified.sh --byte prog.ml
-sh ci/run-verified.sh --native prog.ml
 sh ci/run-verified.sh --stock prog.ml     # stock OCaml, for comparison
 sh ci/run-verified.sh some/dir            # every t*.ml; diffs against
                                           # expected_output.txt if present
 
-# 3. Run OCaml's own testsuite -- 231 directories, ~3100 test instances,
-#    each in both a bytecode and a native variant.
+# After changing the F* source, the snapshot, or a hand patch: rebuild the GC
+# and the runtimes. `setup` will not do this -- it skips a tree that exists.
+sh ci/build-verified-toolchain.sh
+
+# OCaml's own testsuite -- 231 directories, ~3100 test instances, each in a
+# bytecode and a native variant. Needs the compiler itself rebuilt on the
+# verified collector, which is what --full adds (15-40 min).
+sh ci/build-verified-toolchain.sh --full
 sh ci/run-testsuite.sh
 sh ci/run-testsuite.sh tests/lib-hashtbl  # one directory
 ```
 
+These are the same steps as
+[`.github/workflows/testsuite.yml`](.github/workflows/testsuite.yml), so a local
+result and a CI result mean the same thing.
+
 ### How the collector gets swapped in
 
-Simpler than it looks, and worth knowing so the results are interpretable.
+Simpler than it looks, and worth knowing so results are interpretable.
 
 **Bytecode**: a `.byte` file is portable and contains no collector — the
-collector is whichever `ocamlrun` you invoke. So step 2 compiles with the
-**stock** compiler and runs with the verified runtime. The very same `.byte`
-runs on either, which is why `--stock` costs nothing and gives a free
-side-by-side.
+collector is whichever `ocamlrun` you invoke. So compile with the **stock**
+compiler and run with the verified runtime. The very same `.byte` runs on
+either, which is why `--stock` costs nothing and gives a free side-by-side.
 
 **Native**: the collector is archived *inside* `libasmrun.a`, so stock
 `ocamlopt` is pointed at the verified GC's copy with
-`-I .../ocaml-4.14-verified-gen/runtime`. No compiler rebuild needed. (Check it
-worked: `nm prog.exe | grep verified_allocate` — 3 symbols with the `-I`, none
-without.)
+`-I .../ocaml-4.14-verified-gen/runtime`. No compiler rebuild needed. Check it
+worked with `nm prog.exe | grep verified_allocate` — 3 symbols with the `-I`,
+none without.
 
-This is the same mechanism the benchmarks in
-`generational/ocaml-integration/tests` already use.
+Same mechanism the benchmarks in `generational/ocaml-integration/tests` use.
 
-**So step 1's `world.opt` is only required for the testsuite** (step 3), which
-runs the compiler itself. For step 2 you need `setup` plus a current runtime,
-which step 1 also produces. Rerun it after any change to the F\* source, the
-snapshot, or a hand patch.
+`world.opt` is therefore needed only for the testsuite, which runs the compiler
+itself. It is also the strongest single check here: it rebuilds the whole
+toolchain *on* the verified collector, and one broken enough to matter cannot
+finish a bootstrap. The infix bug surfaced exactly that way, with
+`make coldstart` dying on `camlinternalFormat.ml`.
 
-That said, `world.opt` is the strongest single test in the repository: it
-rebuilds the whole toolchain *on* the verified collector, and one broken enough
-to matter cannot finish a bootstrap. The infix bug surfaced exactly that way,
-with `make coldstart` dying on `camlinternalFormat.ml`.
-
-### What the testsuite result means
+### What a testsuite result means
 
 The gate is **no new failures**, not zero failures. The verified GC does not
 implement statmemprof, weak references or ephemerons, so those tests fail by

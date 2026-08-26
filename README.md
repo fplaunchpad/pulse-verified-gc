@@ -39,7 +39,31 @@ make -C generational/ocaml-integration/tests test # run smoke tests
 make -C generational/ocaml-integration/tests benchmark # run benchmarks
 ```
 
-## Compiling and running your own `.ml` file
+## Running code against the verified GC
+
+```bash
+./gctest prog.ml            # compile and run, bytecode and native
+./gctest --byte prog.ml     # one mode only
+./gctest --native prog.ml
+./gctest path/to/tests/     # every t*.ml there; diffs against
+                            # expected_output.txt if the directory has one
+./gctest --check            # which collector is linked, and is it current?
+./gctest --rebuild          # rebuild the GC and both runtimes
+```
+
+That is the whole interface. `gctest` rebuilds automatically when the snapshot
+or the bridge is newer than the built archives, so neither of the two silent
+ways to test the wrong collector — a stale `stdlib/` copy of `libasmrun.a`, or a
+runtime predating your edit — can happen. `--check` reports without repairing.
+
+A failing run prints the signal (`FAIL (exit 139, signal 11)`) and exits
+nonzero. Sources are copied to a temporary directory before compiling, so no
+`.cmi`/`.cmo`/`.o` files are left next to yours.
+
+The rest of this section is what `gctest` does under the hood, for when you need
+to drive the compilers yourself.
+
+## Driving the compilers by hand
 
 After `make -C generational/ocaml-integration setup`, both compilers exist in the
 OCaml tree. From the repository root:

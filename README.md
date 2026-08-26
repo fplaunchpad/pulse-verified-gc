@@ -47,18 +47,45 @@ make -C generational/ocaml-integration/tests benchmark # run benchmarks
 ./gctest --native prog.ml
 ./gctest path/to/tests/     # every t*.ml there; diffs against
                             # expected_output.txt if the directory has one
-./gctest --check            # which collector is linked, and is it current?
+./gctest --check            # is the build derived from the current snapshot?
 ./gctest --rebuild          # rebuild the GC and both runtimes
 ```
 
 That is the whole interface. `gctest` rebuilds automatically when the snapshot
 or the bridge is newer than the built archives, so neither of the two silent
 ways to test the wrong collector — a stale `stdlib/` copy of `libasmrun.a`, or a
-runtime predating your edit — can happen. `--check` reports without repairing.
+runtime predating your edit — can happen. `--check` reports without repairing,
+since repairing first would hide what you asked about.
 
 A failing run prints the signal (`FAIL (exit 139, signal 11)`) and exits
 nonzero. Sources are copied to a temporary directory before compiling, so no
 `.cmi`/`.cmo`/`.o` files are left next to yours.
+
+`--check` deliberately does **not** try to identify the linked collector by
+checksum, because that is not possible here: `ar` stamps a per-member
+mtime/uid/gid into each archive and the compiler embeds build metadata under
+`-flto`, so two rebuilds of identical sources produce different digests. Only
+the snapshot — a plain text file — is meaningfully hashable. Derivation is
+therefore reported by timestamp ("built after the snapshot"), and the useful
+identity question is answered by the snapshot's own md5 plus whether it matches
+git HEAD:
+
+```
+snapshot   md5 0758fb1e5950
+           matches git HEAD
+           9 hand-patch marker(s)
+bytecode   built after the snapshot, stdlib copy in sync
+native     built after the snapshot, stdlib copy in sync
+embedded   2 verified GC object(s) inside libasmrun.a (expect 2+)
+compilers  ocamlc.opt 2026-08-18, ocamlopt.opt 2026-08-18 -- frozen, not rebuilt by gctest
+```
+
+That last line matters: `gctest` puts the current collector under your
+*program*, never under the compiler. The compilers are prebuilt binaries with a
+collector of their own vintage statically linked. Rebuilding them with the
+current one is what `make coldstart` (bytecode) and `make world.opt` (native) do,
+and those are the strongest tests available — a collector broken enough to matter
+cannot finish a bootstrap.
 
 The rest of this section is what `gctest` does under the hood, for when you need
 to drive the compilers yourself.

@@ -10,11 +10,17 @@
 #   - native links the collector out of the verified GC's libasmrun.a via -I
 #
 # --full additionally runs `make world.opt` + `make ocamltest`, which rebuilds
-# the whole toolchain ON the verified collector. That is required only by
-# ci/run-testsuite.sh, which exercises the compiler itself. It is also the
-# strongest single check in the repository: a collector broken enough to matter
-# cannot finish a bootstrap -- the infix bug surfaced exactly that way, with
-# `make coldstart` dying on camlinternalFormat.ml.
+# the whole toolchain ON the verified collector. ci/run-testsuite.sh needs the
+# compilers to EXIST, so this is a one-off; a later GC change needs only the
+# default path, because ocamltest runs every bytecode test with
+# `-use-runtime <tree>/runtime/ocamlrun` and so picks up the new runtime by
+# itself (ocamltest/ocaml_files.ml:36, ocaml_flags.ml:49).
+#
+# The reason to rerun --full anyway is that the bootstrap is the broadest stress
+# test available: a collector broken enough to matter cannot finish one. The
+# infix bug surfaced exactly that way, with `make coldstart` dying on
+# camlinternalFormat.ml. It also puts the compiler processes themselves back on
+# the current collector -- ocamlc.opt/ocamlopt.opt link it statically.
 #
 # Rerun after any change to the F* source, the snapshot, or a hand patch.
 set -eu
@@ -56,8 +62,9 @@ Ready. Run your own code:
   sh ci/run-verified.sh prog.ml
   sh ci/run-verified.sh some/dir
 
-For OCaml's own testsuite you also need the compiler rebuilt on the verified
-collector -- rerun with --full, then use ci/run-testsuite.sh.
+For OCaml's own testsuite the tree's compilers have to exist -- if you have not
+run --full before, do that once, then use ci/run-testsuite.sh. After a GC change
+this fast path is enough; --full is worth rerunning as a stress test in itself.
 EOF
   exit 0
 fi

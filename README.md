@@ -59,8 +59,9 @@ sh ci/run-verified.sh some/dir            # every t*.ml; diffs against
 sh ci/build-verified-toolchain.sh
 
 # OCaml's own testsuite -- 231 directories, ~3100 test instances, each in a
-# bytecode and a native variant. Needs the compiler itself rebuilt on the
-# verified collector, which is what --full adds (15-40 min).
+# bytecode and a native variant. Needs the tree's compilers to EXIST, which
+# --full builds (15-40 min); after that a GC change needs only the rebuild
+# above, not another --full. See below.
 sh ci/build-verified-toolchain.sh --full
 sh ci/run-testsuite.sh
 sh ci/run-testsuite.sh tests/lib-hashtbl  # one directory
@@ -87,11 +88,27 @@ none without.
 
 Same mechanism the benchmarks in `generational/ocaml-integration/tests` use.
 
-`world.opt` is therefore needed only for the testsuite, which runs the compiler
-itself. It is also the strongest single check here: it rebuilds the whole
-toolchain *on* the verified collector, and one broken enough to matter cannot
-finish a bootstrap. The infix bug surfaced exactly that way, with
-`make coldstart` dying on `camlinternalFormat.ml`.
+### What `world.opt` is really for
+
+Not a prerequisite so much as a test in its own right.
+
+The testsuite needs the tree's compilers to **exist**, but not to be rebuilt
+after a GC change. `ocamltest` resolves the runtime as
+`<tree>/runtime/ocamlrun` (`ocamltest/ocaml_files.ml:36`) and passes
+`-use-runtime` for it (`ocaml_flags.ml:49`), so every bytecode test runs on the
+tree's *current* runtime whatever compiled it. Verified here: with compilers
+from 11:29 and a runtime rebuilt at 11:42, `tests/lib-hashtbl` runs 6/6.
+
+What a rebuild does change is the collector inside the *compiler processes* —
+`ocamlc.opt`/`ocamlopt.opt` are native binaries with the runtime statically
+linked, so a stale pair keeps running on an older collector while still
+compiling correctly.
+
+The real argument for `--full` is that the bootstrap is itself the broadest
+stress test available: it rebuilds the whole toolchain *on* the verified
+collector, and one broken enough to matter cannot finish. The infix bug surfaced
+exactly that way, with `make coldstart` dying on `camlinternalFormat.ml` — not
+from reading the specification.
 
 ### What a testsuite result means
 

@@ -55,6 +55,7 @@ sh ci/build-verified-toolchain.sh
 sh ci/run-verified.sh prog.ml
 sh ci/run-verified.sh --byte prog.ml
 sh ci/run-verified.sh --native prog.ml
+sh ci/run-verified.sh --stock prog.ml     # stock OCaml, for comparison
 sh ci/run-verified.sh some/dir            # every t*.ml; diffs against
                                           # expected_output.txt if present
 
@@ -64,15 +65,34 @@ sh ci/run-testsuite.sh
 sh ci/run-testsuite.sh tests/lib-hashtbl  # one directory
 ```
 
-Step 1 is the one that matters, and it is why this is reproducible.
-`make world.opt` rebuilds the *entire toolchain* — `ocamlc`, `ocamlopt`, the
-stdlib, both runtimes — on the verified collector. Afterwards the tree is a
-self-consistent OCaml installation and testing is just "use these compilers".
-It is also the strongest test in the repository on its own: a collector broken
-enough to matter cannot finish a bootstrap. The infix bug was found exactly this
-way, by `make coldstart` dying on `camlinternalFormat.ml`.
+### How the collector gets swapped in
 
-Rerun step 1 after any change to the F\* source, the snapshot, or a hand patch.
+Simpler than it looks, and worth knowing so the results are interpretable.
+
+**Bytecode**: a `.byte` file is portable and contains no collector — the
+collector is whichever `ocamlrun` you invoke. So step 2 compiles with the
+**stock** compiler and runs with the verified runtime. The very same `.byte`
+runs on either, which is why `--stock` costs nothing and gives a free
+side-by-side.
+
+**Native**: the collector is archived *inside* `libasmrun.a`, so stock
+`ocamlopt` is pointed at the verified GC's copy with
+`-I .../ocaml-4.14-verified-gen/runtime`. No compiler rebuild needed. (Check it
+worked: `nm prog.exe | grep verified_allocate` — 3 symbols with the `-I`, none
+without.)
+
+This is the same mechanism the benchmarks in
+`generational/ocaml-integration/tests` already use.
+
+**So step 1's `world.opt` is only required for the testsuite** (step 3), which
+runs the compiler itself. For step 2 you need `setup` plus a current runtime,
+which step 1 also produces. Rerun it after any change to the F\* source, the
+snapshot, or a hand patch.
+
+That said, `world.opt` is the strongest single test in the repository: it
+rebuilds the whole toolchain *on* the verified collector, and one broken enough
+to matter cannot finish a bootstrap. The infix bug surfaced exactly that way,
+with `make coldstart` dying on `camlinternalFormat.ml`.
 
 ### What the testsuite result means
 

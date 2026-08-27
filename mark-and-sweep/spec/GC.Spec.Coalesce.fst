@@ -3248,7 +3248,6 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
             assert (reachable_on_fl g fp y);
             assert (Seq.mem (y <: obj_addr) (objects zero_addr g));
             assert (is_blue (y <: obj_addr) g);
-            assert (is_blue (y <: obj_addr) g);
             hd_address_spec (y <: obj_addr);
             flush_blue_preserves_outside g first_blue run_words fp (hd_address (y <: obj_addr));
             is_blue_iff (y <: obj_addr) g;
@@ -3260,6 +3259,11 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
             assert (Seq.mem (y <: obj_addr) (objects zero_addr g'))
           end
         end;
+        introduce forall (y: obj_addr).
+          (Seq.mem y (objects zero_addr g') /\ is_blue y g') ==>
+          reachable_on_fl g' (first_blue <: obj_addr) y
+        with introduce _ ==> _
+        with admit ();
         admit ()
       end
     end

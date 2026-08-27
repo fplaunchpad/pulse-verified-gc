@@ -3098,6 +3098,36 @@ let coalesce_blue_fields_non_infix g =
   blue_fields_non_infix_from_raw g' raw
 #pop-options
 
+private let flush_blue_snd_is_fb (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v (hd_address (first_blue <: obj_addr)) + U64.v mword * 2 <= heap_size)
+    (ensures snd (flush_blue g first_blue run_words fp) == first_blue)
+  = ()
+
+private let flush_merged_in_walk
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (start: hp_addr)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == U64.v start /\
+      U64.v start <= heap_size /\
+      U64.v start % U64.v mword == 0)
+    (ensures
+      Seq.mem (first_blue <: obj_addr)
+        (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+  = admit ()
+
 val coalesce_aux_fl_exact
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3110,6 +3140,11 @@ val coalesce_aux_fl_exact
                    then hd_address (first_blue <: obj_addr)
                    else start in
        fl_sound g fp /\
+       (run_words > 0 ==> Seq.mem (first_blue <: obj_addr) (objects zero_addr g)) /\
+       (run_words > 0 ==> run_words >= 2) /\
+       (Seq.length objs = 0 ==>
+        (forall (y: obj_addr).
+          Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start)) /\
        (forall (y: obj_addr).
          Seq.mem y (objects zero_addr g) /\ is_blue y g /\
          U64.v y < U64.v bound ==>
@@ -3118,7 +3153,53 @@ val coalesce_aux_fl_exact
               fl_exact g' fp'))
     (decreases Seq.length objs)
 
-let coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs = admit ()
+let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
+  if Seq.length objs = 0 then begin
+      if run_words = 0 then begin
+      assert (fst (coalesce_aux g0 g objs first_blue run_words fp) == g);
+      assert (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start)
+     end
+     else begin
+      hd_address_spec (first_blue <: obj_addr);
+      run_words_bound first_blue run_words start;
+      flush_blue_preserves_length g first_blue run_words fp;
+      if run_words = 1 then begin
+        assert False
+      end
+      else begin
+        flush_blue_snd_is_fb g first_blue run_words fp;
+        flush_blue_field1_spec g (first_blue <: obj_addr) run_words fp;
+        let g' = fst (flush_blue g first_blue run_words fp) in
+        assert (fl_next g' (first_blue <: obj_addr) == fp);
+        flush_blue_header_spec g (first_blue <: obj_addr) run_words fp;
+        let wz : wosize = U64.uint_to_t (run_words - 1) in
+        merged_block_is_blue g' (first_blue <: obj_addr) wz;
+        assert (is_blue (first_blue <: obj_addr) g');
+        linkable_is_fl_node g (first_blue <: obj_addr);
+        introduce forall (y: U64.t). reachable_on_fl g' (first_blue <: obj_addr) y ==>
+          (fl_node y /\
+           (U64.v y >= U64.v mword /\ U64.v y < heap_size /\ U64.v y % U64.v mword == 0) /\
+           Seq.mem (y <: obj_addr) (objects zero_addr g') /\
+           is_blue (y <: obj_addr) g')
+        with introduce _ ==> _
+        with begin
+          reachable_is_node g' (first_blue <: obj_addr) y;
+          if y = (first_blue <: obj_addr) then begin
+            flush_merged_in_walk g first_blue run_words fp start;
+            assert (Seq.mem (first_blue <: obj_addr) (objects zero_addr g'))
+          end
+          else admit ()
+        end;
+        admit ()
+      end
+    end
+  end
+  else begin
+    let obj = Seq.head objs in
+    if is_blue obj g0 then admit ()
+    else admit ()
+  end
 
 
 val coalesce_establishes_fl_exact (g: heap) (fp: U64.t)

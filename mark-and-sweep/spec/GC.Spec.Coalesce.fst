@@ -3177,6 +3177,20 @@ private let flush_preserves_prefix_membership
       Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
   = admit ()
 
+private let flush_objects_reflect
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))) /\
+      y <> (first_blue <: obj_addr))
+    (ensures Seq.mem y (objects zero_addr g))
+  = admit ()
+  
 val coalesce_aux_fl_exact
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3263,7 +3277,14 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
           (Seq.mem y (objects zero_addr g') /\ is_blue y g') ==>
           reachable_on_fl g' (first_blue <: obj_addr) y
         with introduce _ ==> _
-        with admit ();
+        with begin
+          if y = (first_blue <: obj_addr) then
+            reachable_head g' (first_blue <: obj_addr)
+          else begin
+            assert (Seq.mem y (objects zero_addr g));
+            admit ()
+          end
+        end;
         admit ()
       end
     end

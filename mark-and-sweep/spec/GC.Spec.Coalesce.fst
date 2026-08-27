@@ -3144,7 +3144,39 @@ private let rec flush_preserves_chain
       on_fl (fst (flush_blue g first_blue run_words fp)) cur obj n == on_fl g cur obj n)
     (decreases n)
   = admit ()
-  
+
+private let flush_preserves_reachable
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (cur: U64.t) (obj: U64.t)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      (forall (x: U64.t) (n: nat). on_fl g cur x n ==>
+        U64.v x + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))))
+    (ensures
+      reachable_on_fl (fst (flush_blue g first_blue run_words fp)) cur obj <==>
+      reachable_on_fl g cur obj)
+  = admit ()
+
+private let flush_preserves_prefix_membership
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v y + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      Seq.mem y (objects zero_addr g))
+    (ensures
+      Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+  = admit ()
+
 val coalesce_aux_fl_exact
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3159,6 +3191,9 @@ val coalesce_aux_fl_exact
        fl_sound g fp /\
        (run_words > 0 ==> Seq.mem (first_blue <: obj_addr) (objects zero_addr g)) /\
        (run_words > 0 ==> run_words >= 2) /\
+       (run_words > 0 ==>
+        (forall (x: U64.t) (n: nat). on_fl g fp x n ==>
+          U64.v x + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)))) /\
        (Seq.length objs = 0 ==>
         (forall (y: obj_addr).
           Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start)) /\
@@ -3209,7 +3244,20 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
           else begin
             reachable_uncons g' (first_blue <: obj_addr) y;
             assert (reachable_on_fl g' fp y);
-            admit ()
+            flush_preserves_reachable g first_blue run_words fp fp y;
+            assert (reachable_on_fl g fp y);
+            assert (Seq.mem (y <: obj_addr) (objects zero_addr g));
+            assert (is_blue (y <: obj_addr) g);
+            assert (is_blue (y <: obj_addr) g);
+            hd_address_spec (y <: obj_addr);
+            flush_blue_preserves_outside g first_blue run_words fp (hd_address (y <: obj_addr));
+            is_blue_iff (y <: obj_addr) g;
+            is_blue_iff (y <: obj_addr) g';
+            color_of_object_spec (y <: obj_addr) g;
+            color_of_object_spec (y <: obj_addr) g';
+            assert (is_blue (y <: obj_addr) g');
+            flush_preserves_prefix_membership g first_blue run_words fp (y <: obj_addr);
+            assert (Seq.mem (y <: obj_addr) (objects zero_addr g'))
           end
         end;
         admit ()

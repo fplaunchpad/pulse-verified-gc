@@ -3128,6 +3128,23 @@ private let flush_merged_in_walk
         (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
   = admit ()
 
+private let rec flush_preserves_chain
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (cur: U64.t) (obj: U64.t) (n: nat)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      (forall (x: U64.t). on_fl g cur x n ==>
+        U64.v x + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))))
+    (ensures
+      on_fl (fst (flush_blue g first_blue run_words fp)) cur obj n == on_fl g cur obj n)
+    (decreases n)
+  = admit ()
+  
 val coalesce_aux_fl_exact
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3189,7 +3206,11 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
             flush_merged_in_walk g first_blue run_words fp start;
             assert (Seq.mem (first_blue <: obj_addr) (objects zero_addr g'))
           end
-          else admit ()
+          else begin
+            reachable_uncons g' (first_blue <: obj_addr) y;
+            assert (reachable_on_fl g' fp y);
+            admit ()
+          end
         end;
         admit ()
       end

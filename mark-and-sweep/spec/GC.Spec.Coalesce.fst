@@ -3098,8 +3098,39 @@ let coalesce_blue_fields_non_infix g =
   blue_fields_non_infix_from_raw g' raw
 #pop-options
 
+val coalesce_aux_fl_exact
+  (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
+  (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (all_objs: seq obj_addr)
+  : Lemma
+    (requires
+      walk_pre g0 g start objs all_objs first_blue run_words /\
+      linkable_heap g /\
+      (let bound = if run_words > 0
+                   then hd_address (first_blue <: obj_addr)
+                   else start in
+       fl_sound g fp /\
+       (forall (y: obj_addr).
+         Seq.mem y (objects zero_addr g) /\ is_blue y g /\
+         U64.v y < U64.v bound ==>
+         reachable_on_fl g fp y)))
+    (ensures (let (g', fp') = coalesce_aux g0 g objs first_blue run_words fp in
+              fl_exact g' fp'))
+    (decreases Seq.length objs)
+
+let coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs = admit ()
+
+
 val coalesce_establishes_fl_exact (g: heap) (fp: U64.t)
   : Lemma (requires post_sweep_strong g /\ linkable_heap g /\ fl_exact g fp)
           (ensures (let (g', fp') = coalesce g in fl_exact g' fp'))
 
-let coalesce_establishes_fl_exact g fp = admit ()
+let coalesce_establishes_fl_exact g fp =
+  let aux (y: obj_addr)
+    : Lemma (requires Seq.mem y (objects zero_addr g))
+            (ensures ~(U64.v y < U64.v zero_addr))
+    = objects_addresses_gt_start zero_addr g y
+  in
+  FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
+  coalesce_aux_fl_exact g g zero_addr (objects zero_addr g) 0UL 0 0UL
+    (objects zero_addr g)

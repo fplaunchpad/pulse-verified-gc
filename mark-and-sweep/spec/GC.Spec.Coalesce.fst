@@ -30,6 +30,7 @@ open GC.Spec.Heap
 open GC.Spec.Object
 open GC.Spec.Fields
 open GC.Lib.Header
+open GC.Spec.FreeList
 module HeapGraph = GC.Spec.HeapGraph
 module Alloc = GC.Spec.Allocator
 
@@ -3096,3 +3097,9 @@ let coalesce_blue_fields_non_infix g =
   in
   blue_fields_non_infix_from_raw g' raw
 #pop-options
+
+val coalesce_establishes_fl_exact (g: heap) (fp: U64.t)
+  : Lemma (requires post_sweep_strong g /\ linkable_heap g /\ fl_exact g fp)
+          (ensures (let (g', fp') = coalesce g in fl_exact g' fp'))
+
+let coalesce_establishes_fl_exact g fp = admit ()

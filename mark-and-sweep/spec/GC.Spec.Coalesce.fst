@@ -3188,9 +3188,11 @@ private let flush_objects_reflect
       U64.v first_blue % U64.v mword == 0 /\
       Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))) /\
       y <> (first_blue <: obj_addr))
-    (ensures Seq.mem y (objects zero_addr g))
+    (ensures Seq.mem y (objects zero_addr g) /\
+             (U64.v y + U64.v (wosize_of_object y g) * U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) \/
+              U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword))
   = admit ()
-  
+
 val coalesce_aux_fl_exact
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3281,8 +3283,30 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
           if y = (first_blue <: obj_addr) then
             reachable_head g' (first_blue <: obj_addr)
           else begin
+            assert (g' == fst (flush_blue g first_blue run_words fp));
+            flush_objects_reflect g first_blue run_words fp y;
             assert (Seq.mem y (objects zero_addr g));
-            admit ()
+            hd_address_spec y;
+            assert (U64.v (hd_address y) + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) \/
+                    U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword);
+            flush_blue_preserves_outside g first_blue run_words fp (hd_address y);
+            is_blue_iff y g;
+            is_blue_iff y g';
+            color_of_object_spec y g;
+            color_of_object_spec y g';
+            assert (is_blue y g);
+            if U64.v (hd_address y) + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))
+            then begin
+              assert (U64.v y < U64.v (hd_address (first_blue <: obj_addr)));
+              assert (reachable_on_fl g fp y);
+              flush_preserves_reachable g first_blue run_words fp fp y;
+              assert (reachable_on_fl g' fp y);
+              assert (fl_next g' (first_blue <: obj_addr) == fp);
+              assert (reachable_on_fl g' (fl_next g' (first_blue <: obj_addr)) y);
+              reachable_cons g' (first_blue <: obj_addr) y
+            end
+            else 
+              assert False
           end
         end;
         admit ()

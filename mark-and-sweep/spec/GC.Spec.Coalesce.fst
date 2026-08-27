@@ -3223,12 +3223,12 @@ val coalesce_aux_fl_exact
 
 let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
   if Seq.length objs = 0 then begin
-      if run_words = 0 then begin
+    if run_words = 0 then begin
       assert (fst (coalesce_aux g0 g objs first_blue run_words fp) == g);
       assert (forall (y: obj_addr).
         Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start)
-     end
-     else begin
+    end
+    else begin
       hd_address_spec (first_blue <: obj_addr);
       run_words_bound first_blue run_words start;
       flush_blue_preserves_length g first_blue run_words fp;
@@ -3245,6 +3245,7 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
         merged_block_is_blue g' (first_blue <: obj_addr) wz;
         assert (is_blue (first_blue <: obj_addr) g');
         linkable_is_fl_node g (first_blue <: obj_addr);
+
         introduce forall (y: U64.t). reachable_on_fl g' (first_blue <: obj_addr) y ==>
           (fl_node y /\
            (U64.v y >= U64.v mword /\ U64.v y < heap_size /\ U64.v y % U64.v mword == 0) /\
@@ -3275,6 +3276,7 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
             assert (Seq.mem (y <: obj_addr) (objects zero_addr g'))
           end
         end;
+
         introduce forall (y: obj_addr).
           (Seq.mem y (objects zero_addr g') /\ is_blue y g') ==>
           reachable_on_fl g' (first_blue <: obj_addr) y
@@ -3287,15 +3289,13 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
             flush_objects_reflect g first_blue run_words fp y;
             assert (Seq.mem y (objects zero_addr g));
             hd_address_spec y;
-            assert (U64.v (hd_address y) + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) \/
-                    U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword);
             flush_blue_preserves_outside g first_blue run_words fp (hd_address y);
             is_blue_iff y g;
             is_blue_iff y g';
             color_of_object_spec y g;
             color_of_object_spec y g';
             assert (is_blue y g);
-            if U64.v (hd_address y) + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))
+            if U64.v y + U64.v (wosize_of_object y g) * U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))
             then begin
               assert (U64.v y < U64.v (hd_address (first_blue <: obj_addr)));
               assert (reachable_on_fl g fp y);
@@ -3305,11 +3305,9 @@ let rec coalesce_aux_fl_exact g0 g start objs first_blue run_words fp all_objs =
               assert (reachable_on_fl g' (fl_next g' (first_blue <: obj_addr)) y);
               reachable_cons g' (first_blue <: obj_addr) y
             end
-            else 
-              assert False
+            else assert False
           end
-        end;
-        admit ()
+        end
       end
     end
   end

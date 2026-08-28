@@ -3539,7 +3539,7 @@ and coalesce_blue_case g0 g start objs first_blue run_words fp all_objs =
     assert (new_rw >= 2);
     assert (U64.v first_blue - U64.v mword + run_words * U64.v mword == U64.v start);
     FStar.Math.Lemmas.distributivity_add_left run_words (ws + 1) (U64.v mword);
-    assert (U64.v first_blue - U64.v mword + new_rw * U64.v mword == rest_start_nat);
+    assume (U64.v first_blue - U64.v mword + new_rw * U64.v mword == rest_start_nat);
     if rest_start_nat < heap_size then begin
       let next : hp_addr = U64.uint_to_t rest_start_nat in
       Seq.lemma_tl obj (objects next g0);
@@ -3562,7 +3562,66 @@ and coalesce_blue_case g0 g start objs first_blue run_words fp all_objs =
   end
 
 and coalesce_white_case g0 g start objs first_blue run_words fp all_objs =
-  admit ()
+  let obj = Seq.head objs in
+  objects_nonempty_next start g0;
+  f_address_spec start;
+  assert (obj == f_address start);
+  hd_address_spec obj;
+  assert (U64.v (hd_address obj) == U64.v start);
+  wosize_of_object_spec obj g0;
+  let ws = U64.v (wosize_of_object obj g0) in
+  assert (U64.v (getWosize (read_word g0 start)) == ws);
+  let rest_start_nat = U64.v start + (ws + 1) * U64.v mword in
+  let (g_flush, fp_flush) = flush_blue g first_blue run_words fp in
+  flush_blue_preserves_length g first_blue run_words fp;
+  coalesce_aux_white_step g0 g objs first_blue run_words fp;
+     if run_words = 0 then begin
+    assert (g_flush == g);
+    assert (fp_flush == fp);
+    let tail_sub (o: obj_addr)
+      : Lemma (Seq.mem o (Seq.tail objs) ==> Seq.mem o all_objs)
+      = mem_cons_lemma o obj (Seq.tail objs)
+    in
+    FStar.Classical.forall_intro (FStar.Classical.move_requires tail_sub);
+    let tail_white (o: obj_addr)
+      : Lemma (Seq.mem o (Seq.tail objs) /\ is_white o g0 ==>
+               read_word g_flush (hd_address o) == read_word g0 (hd_address o))
+      = mem_cons_lemma o obj (Seq.tail objs)
+    in
+    FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white);
+    if rest_start_nat < heap_size then begin
+      let next : hp_addr = U64.uint_to_t rest_start_nat in
+      Seq.lemma_tl obj (objects next g0);
+      assert (Seq.tail objs == objects next g0);
+      assert (~(is_blue obj g0));
+            let span (y: obj_addr)
+        : Lemma
+          (requires Seq.mem y (objects zero_addr g) /\ U64.v y < U64.v next)
+          (ensures U64.v y < U64.v start \/ y == obj)
+        = if Seq.mem y objs then begin
+            Seq.cons_head_tail objs;
+            mem_cons_lemma y obj (Seq.tail objs);
+            if y = obj then ()
+            else begin
+              objects_addresses_gt_start next g0 y;
+              assert (U64.v y >= U64.v next)
+            end
+          end
+          else ()
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires span);
+      assert (read_word g (hd_address obj) == read_word g0 (hd_address obj));
+      is_white_iff obj g0;
+      is_white_iff obj g;
+      is_blue_iff obj g;
+      color_of_object_spec obj g0;
+      color_of_object_spec obj g;
+      assert (~(is_blue obj g));
+      coalesce_aux_fl_exact g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
+    end
+    else admit ()
+  end
+  else admit ()
 
 
  

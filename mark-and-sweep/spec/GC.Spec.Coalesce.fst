@@ -3193,6 +3193,22 @@ private let flush_objects_reflect
               U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword))
   = admit ()
 
+private let flush_objects_above
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr) (run_end: nat)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == run_end /\
+      Seq.mem y (objects zero_addr g) /\
+      U64.v (hd_address y) >= run_end)
+    (ensures
+      Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+  = admit()
+
 private let flush_step_fl_exact
   (g: heap) (run_end: nat) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   : Lemma
@@ -3214,12 +3230,15 @@ private let flush_step_fl_exact
       (forall (y: obj_addr).
         Seq.mem y (objects zero_addr g) /\ is_blue y g /\
         U64.v y < U64.v (hd_address (first_blue <: obj_addr)) ==>
-        reachable_on_fl g fp y) /\
-      (forall (y: obj_addr).
-        Seq.mem y (objects zero_addr g) /\ is_blue y g ==>
-        U64.v y < run_end))
+        reachable_on_fl g fp y))
     (ensures (let (g', fp') = flush_blue g first_blue run_words fp in
-              fl_exact g' fp'))
+              fl_sound g' fp' /\
+              (forall (y: obj_addr).
+                Seq.mem y (objects zero_addr g') /\ is_blue y g' /\
+                U64.v y < run_end ==>
+                reachable_on_fl g' fp' y) /\
+              (forall (x: U64.t) (n: nat). on_fl g' fp' x n ==>
+                U64.v x + U64.v mword <= run_end)))
   = hd_address_spec (first_blue <: obj_addr);
     flush_blue_preserves_length g first_blue run_words fp;
     flush_blue_snd_is_fb g first_blue run_words fp;
@@ -3264,7 +3283,7 @@ private let flush_step_fl_exact
     end;
 
     introduce forall (y: obj_addr).
-      (Seq.mem y (objects zero_addr g') /\ is_blue y g') ==>
+      (Seq.mem y (objects zero_addr g') /\ is_blue y g' /\ U64.v y < run_end) ==>
       reachable_on_fl g' (first_blue <: obj_addr) y
     with introduce _ ==> _
     with begin
@@ -3291,9 +3310,10 @@ private let flush_step_fl_exact
           assert (reachable_on_fl g' (fl_next g' (first_blue <: obj_addr)) y);
           reachable_cons g' (first_blue <: obj_addr) y
         end
-        else assert False
+      else assert False
       end
-    end
+    end;
+    admit ()
 
 let coalesce_aux_empty (g0 g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   : Lemma (coalesce_aux g0 g Seq.empty first_blue run_words fp ==
@@ -3314,6 +3334,19 @@ let coalesce_aux_blue_step
 
 private let pow2_57_div_8 () : Lemma (pow2 57 / 8 == pow2 54)
   = assert_norm (pow2 57 / 8 == pow2 54)
+
+private let flush_preserves_linkable
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      linkable_heap g)
+    (ensures linkable_heap (fst (flush_blue g first_blue run_words fp)))
+  = admit ()
 
 private let coalesce_empty_case
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
@@ -3346,19 +3379,32 @@ private let coalesce_empty_case
         reachable_on_fl g fp y))
     (ensures (let (g', fp') = coalesce_aux g0 g objs first_blue run_words fp in
               fl_exact g' fp'))
-  = if run_words = 0 then begin
-      assert (fst (coalesce_aux g0 g objs first_blue run_words fp) == g);
-      assert (forall (y: obj_addr).
-        Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start)
-    end
+  = Seq.lemma_eq_elim objs Seq.empty;
+    coalesce_aux_empty g0 g first_blue run_words fp;
+    assert (forall (y: obj_addr).
+      Seq.mem y (objects zero_addr g) ==> U64.v y < U64.v start);
+    if run_words = 0 then
+      assert (flush_blue g first_blue run_words fp == (g, fp))
     else begin
-      Seq.lemma_eq_elim objs Seq.empty;
-      coalesce_aux_empty g0 g first_blue run_words fp;
       hd_address_spec (first_blue <: obj_addr);
       run_words_bound first_blue run_words start;
       flush_blue_preserves_length g first_blue run_words fp;
       if run_words = 1 then assert False
-      else flush_step_fl_exact g (U64.v start) first_blue run_words fp
+      else begin
+        flush_step_fl_exact g (U64.v start) first_blue run_words fp;
+        let g' = fst (flush_blue g first_blue run_words fp) in
+        introduce forall (y: obj_addr).
+          (Seq.mem y (objects zero_addr g') /\ is_blue y g') ==>
+          reachable_on_fl g' (snd (flush_blue g first_blue run_words fp)) y
+        with introduce _ ==> _
+        with begin
+          if y = (first_blue <: obj_addr) then ()
+          else begin
+            flush_objects_reflect g first_blue run_words fp y;
+            hd_address_spec y
+          end
+        end
+      end
     end
 
 val coalesce_blue_case
@@ -3539,7 +3585,8 @@ and coalesce_blue_case g0 g start objs first_blue run_words fp all_objs =
     assert (new_rw >= 2);
     assert (U64.v first_blue - U64.v mword + run_words * U64.v mword == U64.v start);
     FStar.Math.Lemmas.distributivity_add_left run_words (ws + 1) (U64.v mword);
-    assume (U64.v first_blue - U64.v mword + new_rw * U64.v mword == rest_start_nat);
+    assert (new_rw * U64.v mword == run_words * U64.v mword + (ws + 1) * U64.v mword);
+    assert (U64.v first_blue - U64.v mword + new_rw * U64.v mword == rest_start_nat);
     if rest_start_nat < heap_size then begin
       let next : hp_addr = U64.uint_to_t rest_start_nat in
       Seq.lemma_tl obj (objects next g0);
@@ -3575,55 +3622,139 @@ and coalesce_white_case g0 g start objs first_blue run_words fp all_objs =
   let (g_flush, fp_flush) = flush_blue g first_blue run_words fp in
   flush_blue_preserves_length g first_blue run_words fp;
   coalesce_aux_white_step g0 g objs first_blue run_words fp;
-     if run_words = 0 then begin
+
+  let tail_sub (o: obj_addr)
+    : Lemma (Seq.mem o (Seq.tail objs) ==> Seq.mem o all_objs)
+    = mem_cons_lemma o obj (Seq.tail objs)
+  in
+  FStar.Classical.forall_intro (FStar.Classical.move_requires tail_sub);
+
+  if run_words = 0 then begin
     assert (g_flush == g);
     assert (fp_flush == fp);
-    let tail_sub (o: obj_addr)
-      : Lemma (Seq.mem o (Seq.tail objs) ==> Seq.mem o all_objs)
-      = mem_cons_lemma o obj (Seq.tail objs)
-    in
-    FStar.Classical.forall_intro (FStar.Classical.move_requires tail_sub);
+    assert (read_word g (hd_address obj) == read_word g0 (hd_address obj));
+    is_white_iff obj g0;
+    is_blue_iff obj g;
+    color_of_object_spec obj g0;
+    color_of_object_spec obj g;
+    assert (~(is_blue obj g));
+
     let tail_white (o: obj_addr)
       : Lemma (Seq.mem o (Seq.tail objs) /\ is_white o g0 ==>
                read_word g_flush (hd_address o) == read_word g0 (hd_address o))
       = mem_cons_lemma o obj (Seq.tail objs)
     in
     FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white);
+
     if rest_start_nat < heap_size then begin
       let next : hp_addr = U64.uint_to_t rest_start_nat in
       Seq.lemma_tl obj (objects next g0);
       assert (Seq.tail objs == objects next g0);
-      assert (~(is_blue obj g0));
-            let span (y: obj_addr)
+      let span (y: obj_addr)
         : Lemma
-          (requires Seq.mem y (objects zero_addr g) /\ U64.v y < U64.v next)
+          (requires Seq.mem y (objects zero_addr g_flush) /\ U64.v y < U64.v next)
           (ensures U64.v y < U64.v start \/ y == obj)
-        = if Seq.mem y objs then begin
+        = if y = obj then ()
+          else if Seq.mem y objs then begin
             Seq.cons_head_tail objs;
             mem_cons_lemma y obj (Seq.tail objs);
-            if y = obj then ()
-            else begin
-              objects_addresses_gt_start next g0 y;
-              assert (U64.v y >= U64.v next)
-            end
+            objects_addresses_gt_start next g0 y
           end
           else ()
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires span);
-      assert (read_word g (hd_address obj) == read_word g0 (hd_address obj));
-      is_white_iff obj g0;
-      is_white_iff obj g;
-      is_blue_iff obj g;
-      color_of_object_spec obj g0;
-      color_of_object_spec obj g;
-      assert (~(is_blue obj g));
       coalesce_aux_fl_exact g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
     end
-    else admit ()
+    else begin
+      objects_tail_empty_when_done start g0;
+      Seq.lemma_eq_elim (Seq.tail objs) Seq.empty;
+      coalesce_aux_empty g0 g_flush 0UL 0 fp_flush;
+      assert (fst (flush_blue g_flush 0UL 0 fp_flush) == g_flush);
+      assert (snd (flush_blue g_flush 0UL 0 fp_flush) == fp_flush);
+      assert (forall (y: obj_addr).
+        Seq.mem y (objects zero_addr g) /\ is_blue y g ==> U64.v y < U64.v start)
+    end
   end
-  else admit ()
+  else begin
+    hd_address_spec (first_blue <: obj_addr);
+    run_words_bound first_blue run_words start;
+    if run_words = 1 then assert False
+    else begin
+      flush_step_fl_exact g (U64.v start) first_blue run_words fp;
+      assert (fl_sound g_flush fp_flush);
+      hd_address_spec obj;
+      flush_blue_preserves_outside g first_blue run_words fp (hd_address obj);
+      assert (read_word g_flush (hd_address obj) == read_word g0 (hd_address obj));
+      is_white_iff obj g0;
+      is_blue_iff obj g_flush;
+      color_of_object_spec obj g0;
+      color_of_object_spec obj g_flush;
+      assert (~(is_blue obj g_flush));
+      assert (U64.v first_blue < U64.v start);
 
+      if rest_start_nat < heap_size then begin
+        let next : hp_addr = U64.uint_to_t rest_start_nat in
+        Seq.lemma_tl obj (objects next g0);
+        assert (Seq.tail objs == objects next g0);
 
+        let tail_white (o: obj_addr)
+          : Lemma
+            (requires Seq.mem o (Seq.tail objs) /\ is_white o g0)
+            (ensures read_word g_flush (hd_address o) == read_word g0 (hd_address o))
+          = mem_cons_lemma o obj (Seq.tail objs);
+            objects_addresses_gt_start next g0 o;
+            hd_address_spec o;
+            flush_blue_preserves_outside g first_blue run_words fp (hd_address o)
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white);
+
+        let span (y: obj_addr)
+          : Lemma
+            (requires Seq.mem y (objects zero_addr g_flush) /\ U64.v y < U64.v next)
+            (ensures U64.v y < U64.v start \/ y == obj)
+          = if y = obj then ()
+            else if y = (first_blue <: obj_addr) then ()
+            else begin
+              flush_objects_reflect g first_blue run_words fp y;
+              if Seq.mem y objs then begin
+                Seq.cons_head_tail objs;
+                mem_cons_lemma y obj (Seq.tail objs);
+                objects_addresses_gt_start next g0 y
+              end
+            end
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires span);
+        let above (y: obj_addr)
+          : Lemma
+            (requires Seq.mem y (objects zero_addr g0) /\ U64.v y >= U64.v next)
+            (ensures Seq.mem y (objects zero_addr g_flush))
+          = hd_address_spec y;
+            flush_objects_above g first_blue run_words fp y (U64.v start)
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires above);
+        flush_preserves_linkable g first_blue run_words fp;
+        coalesce_aux_fl_exact g0 g_flush next (Seq.tail objs) 0UL 0 fp_flush all_objs
+      end
+      else begin
+        objects_tail_empty_when_done start g0;
+        Seq.lemma_eq_elim (Seq.tail objs) Seq.empty;
+        coalesce_aux_empty g0 g_flush 0UL 0 fp_flush;
+        assert (fst (flush_blue g_flush 0UL 0 fp_flush) == g_flush);
+        assert (snd (flush_blue g_flush 0UL 0 fp_flush) == fp_flush);
+        let span2 (y: obj_addr)
+          : Lemma
+            (requires Seq.mem y (objects zero_addr g_flush) /\ is_blue y g_flush)
+            (ensures reachable_on_fl g_flush fp_flush y)
+          = if y = (first_blue <: obj_addr) then ()
+            else begin
+              flush_objects_reflect g first_blue run_words fp y;
+              hd_address_spec y
+            end
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires span2)
+      end
+    end
+  end
  
 #pop-options
 

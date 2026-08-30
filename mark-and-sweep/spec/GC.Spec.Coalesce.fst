@@ -3707,23 +3707,37 @@ and coalesce_white_case g0 g start objs first_blue run_words fp all_objs =
             flush_blue_preserves_outside g first_blue run_words fp (hd_address o)
         in
         FStar.Classical.forall_intro (FStar.Classical.move_requires tail_white);
-
+        assert (U64.v obj == U64.v start + U64.v mword);
+        assert (U64.v start < U64.v next);
         let span (y: obj_addr)
           : Lemma
-            (requires Seq.mem y (objects zero_addr g_flush) /\ U64.v y < U64.v next)
-            (ensures U64.v y < U64.v start \/ y == obj)
+            (requires Seq.mem y (objects zero_addr g_flush) /\
+                      ~(Seq.mem y (Seq.tail objs)))
+            (ensures U64.v y < U64.v next /\
+                     (U64.v y < U64.v start \/ y == obj))
           = if y = obj then ()
             else if y = (first_blue <: obj_addr) then ()
             else begin
               flush_objects_reflect g first_blue run_words fp y;
               if Seq.mem y objs then begin
                 Seq.cons_head_tail objs;
-                mem_cons_lemma y obj (Seq.tail objs);
-                objects_addresses_gt_start next g0 y
+                mem_cons_lemma y obj (Seq.tail objs)
               end
             end
         in
         FStar.Classical.forall_intro (FStar.Classical.move_requires span);
+        let comp (y: obj_addr)
+          : Lemma
+            (requires Seq.mem y (objects zero_addr g_flush) /\ is_blue y g_flush /\
+                      U64.v y < U64.v next)
+            (ensures reachable_on_fl g_flush fp_flush y)
+          = if Seq.mem y (Seq.tail objs) then
+              objects_addresses_gt_start next g0 y
+            else span y
+        in
+        FStar.Classical.forall_intro (FStar.Classical.move_requires comp);
+        assert (U64.v obj == U64.v start + U64.v mword);
+        assert (U64.v start < U64.v next);
         let above (y: obj_addr)
           : Lemma
             (requires Seq.mem y (objects zero_addr g0) /\ U64.v y >= U64.v next)
@@ -3745,10 +3759,14 @@ and coalesce_white_case g0 g start objs first_blue run_words fp all_objs =
           : Lemma
             (requires Seq.mem y (objects zero_addr g_flush) /\ is_blue y g_flush)
             (ensures reachable_on_fl g_flush fp_flush y)
-          = if y = (first_blue <: obj_addr) then ()
+          = if y = obj then ()
+            else if y = (first_blue <: obj_addr) then ()
             else begin
               flush_objects_reflect g first_blue run_words fp y;
-              hd_address_spec y
+              if Seq.mem y objs then begin
+                Seq.cons_head_tail objs;
+                mem_cons_lemma y obj (Seq.tail objs)
+              end
             end
         in
         FStar.Classical.forall_intro (FStar.Classical.move_requires span2)

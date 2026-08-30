@@ -3302,7 +3302,7 @@ private let rec flush_above_from
     (decreases (Seq.length (objects s g)))
   = admit ()
 
-(*private let flush_objects_above
+private let flush_objects_above
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr) (run_end: nat)
   : Lemma
     (requires
@@ -3422,9 +3422,20 @@ private let flush_step_fl_exact
       else assert False
       end
     end;
-    admit ()
+    introduce forall (x: U64.t) (n: nat). on_fl g' (first_blue <: obj_addr) x n ==>
+      U64.v x + U64.v mword <= run_end
+    with introduce _ ==> _
+    with begin
+      on_fl_is_node g' (first_blue <: obj_addr) x n;
+      if x = (first_blue <: obj_addr) then ()
+      else begin
+        on_fl_uncons g' (first_blue <: obj_addr) x n;
+        assert (on_fl g' fp x (n - 1));
+        flush_preserves_chain g first_blue run_words fp fp x (n - 1)
+      end
+    end
 
-let coalesce_aux_empty (g0 g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+(*let coalesce_aux_empty (g0 g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   : Lemma (coalesce_aux g0 g Seq.empty first_blue run_words fp ==
            flush_blue g first_blue run_words fp)
   = ()

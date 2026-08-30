@@ -3110,6 +3110,51 @@ private let flush_blue_snd_is_fb (g: heap) (first_blue: U64.t) (run_words: nat) 
     (ensures snd (flush_blue g first_blue run_words fp) == first_blue)
   = ()
 
+private let rec flush_walk_reaches
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (s: hp_addr) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v s % U64.v mword == 0 /\
+      (forall (t: hp_addr).
+        U64.v t < U64.v (hd_address (first_blue <: obj_addr)) /\
+        U64.v t % U64.v mword == 0 ==>
+        U64.v t + (U64.v (getWosize (read_word g t)) + 1) * U64.v mword
+          <= U64.v (hd_address (first_blue <: obj_addr))) /\
+      U64.v s <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      Seq.mem y (objects (hd_address (first_blue <: obj_addr))
+                   (fst (flush_blue g first_blue run_words fp))))
+    (ensures
+      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+    (decreases (U64.v first_blue - U64.v s))
+  = let g' = fst (flush_blue g first_blue run_words fp) in
+    flush_blue_preserves_length g first_blue run_words fp;
+    hd_address_spec (first_blue <: obj_addr);
+    if U64.v s = U64.v (hd_address (first_blue <: obj_addr)) then ()
+    else begin
+      objects_nonempty_next s g;
+      f_address_spec s;
+      let obj = f_address s in
+      let wz = getWosize (read_word g s) in
+      let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+      flush_blue_preserves_outside g first_blue run_words fp s;
+      assert (read_word g' s == read_word g s);
+      objects_nonempty_next s g';
+      if next_nat >= heap_size then
+        objects_tail_empty_when_done s g
+      else begin
+        let next : hp_addr = U64.uint_to_t next_nat in
+        flush_walk_reaches g first_blue run_words fp next y;
+        Seq.lemma_tl obj (objects next g');
+        mem_cons_lemma y obj (Seq.tail (objects s g'))
+      end
+    end
+
 private let flush_merged_in_walk
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (run_end: nat)
   : Lemma

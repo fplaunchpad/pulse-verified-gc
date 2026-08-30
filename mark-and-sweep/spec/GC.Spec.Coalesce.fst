@@ -3143,7 +3143,22 @@ private let rec flush_preserves_chain
     (ensures
       on_fl (fst (flush_blue g first_blue run_words fp)) cur obj n == on_fl g cur obj n)
     (decreases n)
-  = admit ()
+  = if n = 0 then ()
+    else if not (fl_node cur) then ()
+    else if cur = obj then ()
+    else begin
+      let g' = fst (flush_blue g first_blue run_words fp) in
+      hd_address_spec (first_blue <: obj_addr);
+      assert (on_fl g cur cur n);
+      assert (U64.v cur + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)));
+      flush_blue_preserves_outside g first_blue run_words fp (cur <: hp_addr);
+      assert (fl_next g' cur == fl_next g cur);
+      introduce forall (x: U64.t). on_fl g (fl_next g cur) x (n - 1) ==>
+        U64.v x + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))
+      with introduce _ ==> _
+      with on_fl_cons g cur x (n - 1);
+      flush_preserves_chain g first_blue run_words fp (fl_next g cur) obj (n - 1)
+    end
 
 private let flush_preserves_reachable
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
@@ -3160,7 +3175,77 @@ private let flush_preserves_reachable
     (ensures
       reachable_on_fl (fst (flush_blue g first_blue run_words fp)) cur obj <==>
       reachable_on_fl g cur obj)
-  = admit ()
+    = introduce reachable_on_fl g cur obj ==>
+              reachable_on_fl (fst (flush_blue g first_blue run_words fp)) cur obj
+    with begin
+      eliminate exists (n: nat). on_fl g cur obj n
+      with begin
+        flush_preserves_chain g first_blue run_words fp cur obj n;
+        assert (on_fl (fst (flush_blue g first_blue run_words fp)) cur obj n)
+      end
+    end;
+    introduce reachable_on_fl (fst (flush_blue g first_blue run_words fp)) cur obj ==>
+              reachable_on_fl g cur obj
+    with begin
+      eliminate exists (n: nat).
+        on_fl (fst (flush_blue g first_blue run_words fp)) cur obj n
+      with begin
+        flush_preserves_chain g first_blue run_words fp cur obj n;
+        assert (on_fl g cur obj n)
+      end
+    end
+
+private let rec flush_prefix_from
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (s: hp_addr) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words > 0 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v s % U64.v mword == 0 /\
+      U64.v s <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      U64.v y + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      Seq.mem y (objects s g))
+    (ensures
+      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+    (decreases (Seq.length (objects s g)))
+  = let g' = fst (flush_blue g first_blue run_words fp) in
+    flush_blue_preserves_length g first_blue run_words fp;
+    hd_address_spec (first_blue <: obj_addr);
+    if U64.v s = U64.v (hd_address (first_blue <: obj_addr)) then begin
+      objects_addresses_gt_start s g y;
+      assert False
+    end
+    else begin
+      objects_nonempty_next s g;
+      f_address_spec s;
+      let obj = f_address s in
+      let wz = getWosize (read_word g s) in
+      let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+      flush_blue_preserves_outside g first_blue run_words fp s;
+      assert (read_word g' s == read_word g s);
+      Seq.cons_head_tail (objects s g);
+      mem_cons_lemma y obj (Seq.tail (objects s g));
+      objects_nonempty_next s g';
+      if y = obj then
+        mem_cons_lemma obj obj (Seq.tail (objects s g'))
+      else begin
+        if next_nat >= heap_size then
+          objects_tail_empty_when_done s g
+        else begin
+          let next : hp_addr = U64.uint_to_t next_nat in
+          Seq.lemma_tl obj (objects next g);
+          assert (Seq.mem y (objects next g));
+          objects_addresses_gt_start next g y;
+          flush_prefix_from g first_blue run_words fp next y;
+          Seq.lemma_tl obj (objects next g');
+          mem_cons_lemma y obj (Seq.tail (objects s g'))
+        end
+      end
+    end
 
 private let flush_preserves_prefix_membership
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
@@ -3175,7 +3260,8 @@ private let flush_preserves_prefix_membership
       Seq.mem y (objects zero_addr g))
     (ensures
       Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
-  = admit ()
+  = objects_addresses_gt_start zero_addr g y;
+    flush_prefix_from g first_blue run_words fp zero_addr y
 
 private let flush_objects_reflect
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
@@ -3193,7 +3279,30 @@ private let flush_objects_reflect
               U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword))
   = admit ()
 
-private let flush_objects_above
+private let rec flush_above_from
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (s: hp_addr) (y: obj_addr) (run_end: nat)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == run_end /\
+      run_end <= heap_size /\
+      run_end % U64.v mword == 0 /\
+      U64.v s % U64.v mword == 0 /\
+      U64.v s <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      U64.v (hd_address y) >= run_end /\
+      Seq.mem y (objects s g))
+    (ensures
+      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+    (decreases (Seq.length (objects s g)))
+  = admit ()
+
+(*private let flush_objects_above
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr) (run_end: nat)
   : Lemma
     (requires
@@ -3789,3 +3898,4 @@ let coalesce_establishes_fl_exact g fp =
   FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
   coalesce_aux_fl_exact g g zero_addr (objects zero_addr g) 0UL 0 0UL
     (objects zero_addr g)
+*)

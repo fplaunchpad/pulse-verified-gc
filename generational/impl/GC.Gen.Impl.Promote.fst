@@ -60,6 +60,32 @@ fn read_minor_tag (minor: minor_heap_t) (obj: U64.t)
   U64.logand hdr 0xFFUL
 }
 
+/// Read the number of fields the collector may scan in a minor object.
+///
+/// An object whose tag is at least `no_scan_tag` (251) holds raw bytes rather
+/// than fields, so its contents must never be interpreted as pointers; for
+/// scanning purposes it has no fields at all.  This is the runtime counterpart
+/// of `GC.Gen.MinorHeap.minor_scan_wosize`, and mirrors the two guards the
+/// major heap already carries (`update_all_objects`, `mark_and_push`).
+///
+/// Note this is *not* the size used to promote the object: promotion copies the
+/// whole body verbatim, no-scan or not, and so keeps using `read_minor_wosize`.
+inline_for_extraction
+fn read_minor_scan_wosize (minor: minor_heap_t) (obj: U64.t)
+  requires is_minor minor 'md 'mb **
+           pure (U64.v obj >= 8 /\ U64.v obj < minor_heap_size /\ U64.v obj % 8 == 0)
+  returns wosize: U64.t
+  ensures is_minor minor 'md 'mb **
+          pure (U64.v wosize == minor_scan_wosize {data='md; bump='mb} obj)
+{
+  let tag = read_minor_tag minor obj;
+  if (U64.gte tag 251UL) {
+    0UL
+  } else {
+    read_minor_wosize minor obj
+  }
+}
+
 /// Copy wosize fields from minor[src_obj + 0..] to major[dst_obj + 0..]
 /// Copies fields at indices 0..(wosize-1), matching spec copy_fields.
 ///
@@ -88,7 +114,7 @@ let field_in_bounds (limit obj_addr wosize jv: nat)
   FStar.Math.Lemmas.modulo_addition_lemma obj_addr 8 jv
 
 inline_for_extraction
-#push-options "--z3rlimit 80 --fuel 1 --ifuel 0"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 0"
 fn copy_fields_loop (minor: minor_heap_t) (major: heap_t)
                     (src_obj: U64.t) (dst_obj: U64.t)
                     (wosize: U64.t)
@@ -122,6 +148,7 @@ fn copy_fields_loop (minor: minor_heap_t) (major: heap_t)
             // equals full copy_fields from initial state
             WBL.copy_fields {data='md; bump='mb} ms_i src_obj dst_obj (U64.v iv) (U64.v wosize) ==
             WBL.copy_fields {data='md; bump='mb} 'ms src_obj dst_obj 0 (U64.v wosize))
+    decreases (Prims.op_Subtraction (U64.v wosize) (U64.v !i))
   {
     let iv = !i;
     assert (pure (U64.v iv < U64.v wosize));
@@ -154,7 +181,7 @@ fn copy_fields_loop (minor: minor_heap_t) (major: heap_t)
 
 /// Zero the padding field if the allocator gave extra space (leftover=1 case).
 /// After this, the ghost state matches zero_promote_padding.
-#push-options "--z3rlimit 100 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
 inline_for_extraction
 fn zero_padding_step (major: heap_t) (dst_obj: U64.t) (wosize: U64.t)
   requires is_heap major 'ms **
@@ -195,7 +222,7 @@ fn zero_padding_step (major: heap_t) (dst_obj: U64.t) (wosize: U64.t)
 /// during a promotion loop, pointer closure (part2) is temporarily violated
 /// (minor pointers are written into the major heap body). The allocator only
 /// needs part1 + fl_valid + fl_chain_terminates to function correctly.
-#push-options "--z3rlimit 100 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
 inline_for_extraction
 fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
                (obj: U64.t)
@@ -208,8 +235,8 @@ fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
                  U64.v obj + minor_wosize {data='md; bump='mb} obj * 8 <= minor_heap_size /\
                  // Major heap structural well-formedness (weaker than full wfh)
                  SF.well_formed_heap_part1 'ms /\
-                 AllocLemmas.fl_valid 'ms 'fp (heap_size / U64.v mword) /\
-                 AllocLemmas.fl_chain_terminates 'ms 'fp (heap_size / U64.v mword))
+                 AllocLemmas.fl_valid 'ms 'fp heap_words /\
+                 AllocLemmas.fl_chain_terminates 'ms 'fp heap_words)
   returns new_addr: U64.t
   ensures exists* md2 mb2 ms2 fp2.
     is_minor minor md2 mb2 **
@@ -219,8 +246,8 @@ fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
           let wz = minor_wosize minor_st obj in
           md2 == 'md /\ mb2 == 'mb /\
           SF.well_formed_heap_part1 ms2 /\
-          AllocLemmas.fl_valid ms2 fp2 (heap_size / U64.v mword) /\
-          AllocLemmas.fl_chain_terminates ms2 fp2 (heap_size / U64.v mword) /\
+          AllocLemmas.fl_valid ms2 fp2 heap_words /\
+          AllocLemmas.fl_chain_terminates ms2 fp2 heap_words /\
           (wz > 0 ==>
             (let spec_res = PromoteSpec.promote_object minor_st 'ms obj 'fp wz in
              ms2 == spec_res.major_out /\

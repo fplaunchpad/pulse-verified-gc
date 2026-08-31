@@ -107,6 +107,10 @@ let alloc_from_block (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64
         let rem_obj_nat = rem_hd_nat + 8 in
         // rem_hd_nat < heap_size <= pow2 57, so rem_obj_nat < pow2 64
         FStar.Math.Lemmas.pow2_lt_compat 64 57;
+        assert (rem_hd_nat < heap_size);
+        assert (heap_size < pow2 57);
+        assert_norm (pow2 57 + 8 < pow2 64);
+        assert (rem_obj_nat < pow2 64);
         if rem_obj_nat >= heap_size || rem_obj_nat >= pow2 64 ||
            rem_obj_nat % 8 <> 0 then
           (g2, U64.uint_to_t rem_obj_nat)
@@ -180,7 +184,7 @@ let rec alloc_search (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
 ///   - obj_out: allocated object address (0UL = OOM)
 let alloc_spec (g: heap) (fp: U64.t) (requested_wz: nat) : GTot alloc_result =
   let wz = if requested_wz = 0 then 1 else requested_wz in
-  alloc_search g fp 0UL fp wz (heap_size / U64.v mword)
+  alloc_search g fp 0UL fp wz heap_words
 
 /// ---------------------------------------------------------------------------
 /// Heap Initialization
@@ -189,7 +193,7 @@ let alloc_spec (g: heap) (fp: U64.t) (requested_wz: nat) : GTot alloc_result =
 /// Initialize a zero heap as one big free block.
 /// Returns (initialized heap, free pointer).
 let init_heap_spec (g: heap) : GTot (heap & U64.t) =
-  let total_words = heap_size / U64.v mword in
+  let total_words = heap_words in
   if total_words < 2 then (g, 0UL)
   else
     let wz = total_words - 1 in
@@ -280,7 +284,7 @@ val spec_next_fp_eq (g: heap) (obj: obj_addr)
 /// alloc_from_block unfolding lemmas (for Pulse proof)
 /// ---------------------------------------------------------------------------
 
-#push-options "--z3rlimit 100"
+#push-options "--z3rlimit 25"
 
 /// Exact fit: leftover < 2
 val alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
@@ -376,19 +380,6 @@ let alloc_split_normal_result (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) 
 /// Result heap shorthand
 let alloc_split_normal_heap (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) : GTot heap =
   fst (alloc_split_normal_result g obj wz next)
-
-/// The result heap has the same length as the input heap
-val alloc_split_normal_length (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  : Lemma (requires alloc_split_normal_pre g obj wz)
-          (ensures Seq.length (alloc_split_normal_heap g obj wz next) == Seq.length g)
-
-/// Reading the alloc header: header at hd_address obj == make_header wz white 0
-val alloc_split_normal_read_hd (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  : Lemma (requires alloc_split_normal_pre g obj wz)
-          (ensures (let g' = alloc_split_normal_heap g obj wz next in
-                    let hd = hd_address obj in
-                    read_word g' hd == make_header (U64.uint_to_t wz) white_bits 0UL))
-
 /// Reading the remainder header: header at rem_hd == make_header rem_wz blue 0
 val alloc_split_normal_read_rem_hd (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires alloc_split_normal_pre g obj wz)
@@ -427,29 +418,3 @@ val alloc_split_normal_read_other (g: heap) (obj: obj_addr) (wz: nat) (next: U64
 /// ---------------------------------------------------------------------------
 /// Read-level bridge lemmas for alloc_from_block (exact case)
 /// ---------------------------------------------------------------------------
-
-let alloc_exact_pre (g: heap) (obj: obj_addr) (wz: nat) =
-  let hdr = read_word g (hd_address obj) in
-  let bwz = U64.v (getWosize hdr) in
-  bwz >= wz /\ bwz - wz < 2
-
-let alloc_exact_heap (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) : GTot heap =
-  fst (alloc_from_block g obj wz next)
-
-val alloc_exact_read_hd (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  : Lemma (requires alloc_exact_pre g obj wz)
-          (ensures (let g' = alloc_exact_heap g obj wz next in
-                    let hd = hd_address obj in
-                    let bwz = U64.v (getWosize (read_word g hd)) in
-                    read_word g' hd == make_header (U64.uint_to_t bwz) white_bits 0UL))
-
-val alloc_exact_read_other (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) (addr: hp_addr)
-  : Lemma (requires alloc_exact_pre g obj wz /\
-                    (let hd = hd_address obj in
-                     U64.v addr + 8 <= U64.v hd \/ U64.v addr >= U64.v hd + 8))
-          (ensures (let g' = alloc_exact_heap g obj wz next in
-                    read_word g' addr == read_word g addr))
-
-val alloc_exact_length (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  : Lemma (requires alloc_exact_pre g obj wz)
-          (ensures Seq.length (alloc_exact_heap g obj wz next) == Seq.length g)

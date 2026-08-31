@@ -43,6 +43,17 @@ fn read_minor_tag (minor: minor_heap_t) (obj: U64.t)
   ensures is_minor minor 'md 'mb **
           pure (U64.v tag == minor_tag {data='md; bump='mb} obj)
 
+/// Read the number of fields the collector may scan in a minor object: 0 for a
+/// no-scan object (tag >= 251), whose body is raw data, and the full wosize
+/// otherwise.  See `GC.Gen.MinorHeap.minor_scan_wosize`.
+inline_for_extraction
+fn read_minor_scan_wosize (minor: minor_heap_t) (obj: U64.t)
+  requires is_minor minor 'md 'mb **
+           pure (U64.v obj >= 8 /\ U64.v obj < minor_heap_size /\ U64.v obj % 8 == 0)
+  returns wosize: U64.t
+  ensures is_minor minor 'md 'mb **
+          pure (U64.v wosize == minor_scan_wosize {data='md; bump='mb} obj)
+
 /// ---------------------------------------------------------------------------
 /// Promote a single object from minor heap to major heap.
 ///
@@ -63,8 +74,8 @@ fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
                  U64.v obj % 8 == 0 /\
                  U64.v obj + minor_wosize {data='md; bump='mb} obj * 8 <= minor_heap_size /\
                  GC.Spec.Fields.well_formed_heap_part1 'ms /\
-                 GC.Spec.Allocator.Lemmas.fl_valid 'ms 'fp (heap_size / U64.v mword) /\
-                 GC.Spec.Allocator.Lemmas.fl_chain_terminates 'ms 'fp (heap_size / U64.v mword))
+                 GC.Spec.Allocator.Lemmas.fl_valid 'ms 'fp heap_words /\
+                 GC.Spec.Allocator.Lemmas.fl_chain_terminates 'ms 'fp heap_words)
   returns new_addr: U64.t
   ensures exists* md2 mb2 ms2 fp2.
     is_minor minor md2 mb2 **
@@ -74,8 +85,8 @@ fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
           let wz = minor_wosize minor_st obj in
           md2 == 'md /\ mb2 == 'mb /\
           GC.Spec.Fields.well_formed_heap_part1 ms2 /\
-          GC.Spec.Allocator.Lemmas.fl_valid ms2 fp2 (heap_size / U64.v mword) /\
-          GC.Spec.Allocator.Lemmas.fl_chain_terminates ms2 fp2 (heap_size / U64.v mword) /\
+          GC.Spec.Allocator.Lemmas.fl_valid ms2 fp2 heap_words /\
+          GC.Spec.Allocator.Lemmas.fl_chain_terminates ms2 fp2 heap_words /\
           (wz > 0 ==>
             (let spec_res = PromoteSpec.promote_object minor_st 'ms obj 'fp wz in
              ms2 == spec_res.major_out /\

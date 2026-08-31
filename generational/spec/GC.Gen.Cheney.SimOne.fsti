@@ -8,11 +8,13 @@ open FStar.Seq
 module U64 = FStar.UInt64
 
 open GC.Spec.Base
+open GC.Spec.Fields
 open GC.Gen.Base
 open GC.Gen.MinorHeap
 open GC.Gen.Promote
 
 module CheneySpec = GC.Gen.Cheney
+module AllocLemmas = GC.Spec.Allocator.Lemmas
 
 /// Abstract predicate: all queue entries are minor objects.
 /// Abstract (val, not let) to prevent quantifier nesting in WP encodings.
@@ -26,37 +28,6 @@ val queue_valid_intro (minor: minor_state) (q: seq U64.t)
 val queue_valid_elim (minor: minor_state) (q: seq U64.t)
   : Lemma (requires queue_valid minor q)
           (ensures (forall (j:nat). j < Seq.length q ==> Seq.mem (Seq.index q j) (minor_objects minor)))
-
-/// Forward_one preserves queue entry validity (opaque predicate version)
-val fwd_one_preserves_queue_valid
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (addr: U64.t)
-  : Lemma (requires queue_valid minor cs.cs_queue)
-          (ensures queue_valid minor (CheneySpec.cheney_forward_one minor cs addr).cs_queue)
-
-/// Forward_one adds at most 1 to the queue
-val cheney_forward_one_queue_bound
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (addr: U64.t)
-  : Lemma (ensures (let cs' = CheneySpec.cheney_forward_one minor cs addr in
-                    Seq.length cs'.cs_queue <= Seq.length cs.cs_queue + 1))
-
-/// Forward_fields preserves queue validity (inductive over field index)
-val forward_fields_preserves_queue_valid
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (parent: U64.t) (idx: nat) (wosize: nat)
-  : Lemma (requires queue_valid minor cs.cs_queue)
-          (ensures queue_valid minor (CheneySpec.cheney_forward_fields minor cs parent idx wosize).cs_queue)
-
-/// Forward_roots preserves queue validity (inductive over root index)
-val forward_roots_preserves_queue_valid
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (roots: seq U64.t) (idx: nat)
-  : Lemma (requires queue_valid minor cs.cs_queue)
-          (ensures queue_valid minor (CheneySpec.cheney_forward_roots minor cs roots idx).cs_queue)
-
-/// Cheney_scan preserves queue validity (inductive on fuel)
-val scan_preserves_queue_valid
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat) (fuel: nat)
-  : Lemma (requires queue_valid minor cs.cs_queue)
-          (ensures queue_valid minor (CheneySpec.cheney_scan minor cs scan fuel).cs_queue)
-
 /// ---------------------------------------------------------------------------
 /// BFS invariant: compound predicate for queue length bound
 ///
@@ -92,30 +63,45 @@ val cheney_bfs_inv_valid (minor: minor_state) (cs: CheneySpec.cheney_state)
   : Lemma (requires cheney_bfs_inv minor cs)
           (ensures queue_valid minor cs.CheneySpec.cs_queue)
 
+/// Extract infix closure from the invariant: once an interior nursery pointer
+/// has been forwarded, the closure that contains it has been forwarded too.
+///
+/// `cheney_forward_one` establishes this because its infix branch forwards the
+/// parent first and only then records the interior entry; the point of stating
+/// it as an invariant is the *already forwarded* branch, which returns the
+/// state untouched and therefore has to inherit the parent's entry from
+/// earlier in the traversal.
+val cheney_bfs_inv_infix_closed (minor: minor_state) (cs: CheneySpec.cheney_state)
+  : Lemma (requires cheney_bfs_inv minor cs)
+          (ensures forall (x: U64.t).
+            is_infix_in_minor minor x /\ cs.CheneySpec.cs_fwd x <> 0UL ==>
+            cs.CheneySpec.cs_fwd (infix_parent minor x) <> 0UL)
+
+/// Extract the room bound from the invariant: a forwarded nursery object's
+/// copy in the major heap has room for the object's whole body.
+///
+/// This is what makes the bounded guard in `cheney_forward_one`'s interior
+/// branch unreachable.  Interior forwarding lands at `fwd parent + delta`, and
+/// `minor_infix_wf` bounds `delta` by `minor_wosize minor parent * 8`, so the
+/// target stays below `heap_size`.  Stating it as an invariant rather than
+/// re-deriving it is forced by the *already forwarded* branch, where the entry
+/// comes from an earlier traversal step rather than a fresh allocation.
+val cheney_bfs_inv_has_room (minor: minor_state) (cs: CheneySpec.cheney_state)
+                            (x: U64.t)
+  : Lemma (requires cheney_bfs_inv minor cs /\
+                    Seq.mem x (minor_objects minor) /\
+                    cs.CheneySpec.cs_fwd x <> 0UL)
+          (ensures U64.v (cs.CheneySpec.cs_fwd x) + minor_wosize minor x * 8 <= heap_size)
+
 /// Forward_one preserves the BFS invariant
 val fwd_one_preserves_bfs_inv
   (minor: minor_state) (cs: CheneySpec.cheney_state) (addr: U64.t)
-  : Lemma (requires cheney_bfs_inv minor cs /\ minor_infix_wf minor /\ minor_wf minor)
+  : Lemma (requires cheney_bfs_inv minor cs /\ minor_infix_wf minor /\ minor_wf minor /\
+                    well_formed_heap_part1 cs.CheneySpec.cs_major /\
+                    AllocLemmas.fl_valid cs.CheneySpec.cs_major cs.CheneySpec.cs_fp heap_words /\
+                    AllocLemmas.fl_chain_terminates cs.CheneySpec.cs_major
+                      cs.CheneySpec.cs_fp heap_words)
           (ensures cheney_bfs_inv minor (CheneySpec.cheney_forward_one minor cs addr))
-
-/// Forward_fields preserves the BFS invariant (inductive)
-val forward_fields_preserves_bfs_inv
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (parent: U64.t) (idx: nat) (wosize: nat)
-  : Lemma (requires cheney_bfs_inv minor cs /\ minor_infix_wf minor /\ minor_wf minor)
-          (ensures cheney_bfs_inv minor (CheneySpec.cheney_forward_fields minor cs parent idx wosize))
-
-/// Forward_roots preserves the BFS invariant (inductive)
-val forward_roots_preserves_bfs_inv
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (roots: seq U64.t) (idx: nat)
-  : Lemma (requires cheney_bfs_inv minor cs /\ minor_infix_wf minor /\ minor_wf minor)
-          (ensures cheney_bfs_inv minor (CheneySpec.cheney_forward_roots minor cs roots idx))
-
-/// Cheney_scan preserves the BFS invariant (inductive on fuel)
-val scan_preserves_bfs_inv
-  (minor: minor_state) (cs: CheneySpec.cheney_state) (scan: nat) (fuel: nat)
-  : Lemma (requires cheney_bfs_inv minor cs /\ minor_infix_wf minor /\ minor_wf minor)
-          (ensures cheney_bfs_inv minor (CheneySpec.cheney_scan minor cs scan fuel))
-
 /// When the BFS invariant holds and addr is an unforwarded minor object,
 /// there is strict room in the queue: |queue| < |minor_objects|.
 /// This is because count_unforwarded >= 1 (addr contributes), so

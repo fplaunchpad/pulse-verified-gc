@@ -11,27 +11,21 @@ module MarkBounded = GC.Impl.MarkBounded
 
 open GC.Spec.Base
 
-#push-options "--z3rlimit 10 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 10 --fuel 0 --ifuel 0"
 let darken_roots_bounded_prefix_base
   (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t) (cap: nat)
-  : Lemma
-      (ensures
-        MarkBounded.darken_roots_bounded_prefix_spec g st roots 0 cap == (g, st))
   =
   assert_norm (MarkBounded.darken_roots_bounded_prefix_spec g st roots 0 cap == (g, st))
 
 let check_and_darken_bounded_spec_length_increases_at_most_one
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
-  : Lemma
-      (ensures
-        Seq.length (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)) <=
-        Seq.length st + 1)
   =
   if U64.v v >= U64.v zero_addr + U64.v mword &&
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = U64.sub tgt mword in
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then
@@ -74,14 +68,6 @@ let rec darken_roots_bounded_prefix_length_increases_at_most
 
 let check_and_darken_bounded_spec_preserves_gray_objects_on_stack
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
-  : Lemma
-      (requires
-        SpecMark.gray_objects_on_stack g st /\
-        Seq.length st < cap)
-      (ensures
-        SpecMark.gray_objects_on_stack
-          (fst (MarkBounded.check_and_darken_bounded_spec g st v cap))
-          (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)))
   =
   let res = MarkBounded.check_and_darken_bounded_spec g st v cap in
   let g' = fst res in
@@ -90,7 +76,8 @@ let check_and_darken_bounded_spec_preserves_gray_objects_on_stack
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = U64.sub tgt mword in
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -167,16 +154,13 @@ let check_and_darken_bounded_spec_preserves_gray_objects_on_stack
 
 let check_and_darken_bounded_spec_preserves_stack_mem
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat) (x: obj_addr)
-  : Lemma
-      (requires Seq.mem x st)
-      (ensures
-        Seq.mem x (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)))
   =
   if U64.v v >= U64.v zero_addr + U64.v mword &&
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = U64.sub tgt mword in
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then
@@ -195,16 +179,13 @@ let check_and_darken_bounded_spec_preserves_stack_mem
 
 let check_and_darken_bounded_spec_preserves_not_black
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat) (x: obj_addr)
-  : Lemma
-      (requires ~(SpecObject.is_black x g))
-      (ensures
-        ~(SpecObject.is_black x (fst (MarkBounded.check_and_darken_bounded_spec g st v cap))))
   =
   if U64.v v >= U64.v zero_addr + U64.v mword &&
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = U64.sub tgt mword in
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -231,16 +212,13 @@ let check_and_darken_bounded_spec_preserves_not_black
 
 let check_and_darken_bounded_spec_preserves_not_blue
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat) (x: obj_addr)
-  : Lemma
-      (requires ~(SpecObject.is_blue x g))
-      (ensures
-        ~(SpecObject.is_blue x (fst (MarkBounded.check_and_darken_bounded_spec g st v cap))))
   =
   if U64.v v >= U64.v zero_addr + U64.v mword &&
      U64.v v < heap_size &&
      U64.v v % U64.v mword = 0
   then
-    let h = U64.sub v mword in
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h = U64.sub tgt mword in
     if U64.v h + U64.v mword < heap_size then
       let target = SpecHeap.f_address h in
       if SpecObject.is_white target g then begin
@@ -258,22 +236,9 @@ let check_and_darken_bounded_spec_preserves_not_blue
 
 let check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
   (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
-  : Lemma
-      (requires
-        U64.v v >= U64.v zero_addr + U64.v mword /\
-        U64.v v < heap_size /\
-        U64.v v % U64.v mword == 0 /\
-        MarkBounded.root_points_to_object g v /\
-        ~(SpecObject.is_black (v <: obj_addr) g) /\
-        ~(SpecObject.is_blue (v <: obj_addr) g) /\
-        SpecMark.gray_objects_on_stack g st /\
-        Seq.length st < cap)
-      (ensures
-        Seq.mem (v <: obj_addr)
-          (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)))
   =
-  let obj = (v <: obj_addr) in
-  let h = U64.sub v mword in
+  let obj : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+  let h = U64.sub obj mword in
   SpecHeap.hd_address_spec obj;
   assert (U64.v h == U64.v (SpecHeap.hd_address obj));
   U64.v_inj h (SpecHeap.hd_address obj);
@@ -295,64 +260,34 @@ let check_and_darken_bounded_spec_pushes_valid_nonblack_nonblue_root
   end
 
 let check_and_darken_bounded_spec_preserves_stack_roots
-  (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)
-  (v: U64.t) (cap: nat)
-  : Lemma
-      (requires
-        (forall (x: obj_addr). Seq.mem x st ==> Seq.mem (x <: U64.t) roots) /\
-        Seq.mem v roots)
-      (ensures
-        (forall (x: obj_addr).
-          Seq.mem x (snd (MarkBounded.check_and_darken_bounded_spec g st v cap)) ==>
-          Seq.mem (x <: U64.t) roots))
+  (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
   =
   let res = MarkBounded.check_and_darken_bounded_spec g st v cap in
   let st' = snd res in
+  let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
   let aux (x: obj_addr)
     : Lemma
         (requires Seq.mem x st')
-        (ensures Seq.mem (x <: U64.t) roots)
+        (ensures Seq.mem x st \/ x == tgt)
     =
     if U64.v v >= U64.v zero_addr + U64.v mword &&
        U64.v v < heap_size &&
        U64.v v % U64.v mword = 0
     then
-      let h = U64.sub v mword in
+      let h = U64.sub tgt mword in
       if U64.v h + U64.v mword < heap_size then
         let target = SpecHeap.f_address h in
+        let _ = SpecHeap.f_address_spec h in
+        let _ = SpecHeap.hd_f_roundtrip h in
         if SpecObject.is_white target g then
           if Seq.length st < cap then begin
             assert (st' == Seq.cons target st);
-            SpecFields.mem_cons_lemma x target st;
-            if x = target then begin
-              let obj = (v <: obj_addr) in
-              SpecHeap.hd_address_spec obj;
-              assert (U64.v h == U64.v (SpecHeap.hd_address obj));
-              U64.v_inj h (SpecHeap.hd_address obj);
-              assert (h == SpecHeap.hd_address obj);
-              SpecHeap.f_hd_roundtrip obj;
-              assert (target == obj);
-              assert ((x <: U64.t) == v)
-            end
-            else
-              assert (Seq.mem (x <: U64.t) roots)
+            SpecFields.mem_cons_lemma x target st
           end
-          else begin
-            assert (st' == st);
-            assert (Seq.mem (x <: U64.t) roots)
-          end
-        else begin
-          assert (st' == st);
-          assert (Seq.mem (x <: U64.t) roots)
-        end
-      else begin
-        assert (st' == st);
-        assert (Seq.mem (x <: U64.t) roots)
-      end
-    else begin
-      assert (st' == st);
-      assert (Seq.mem (x <: U64.t) roots)
-    end
+          else assert (st' == st)
+        else assert (st' == st)
+      else assert (st' == st)
+    else assert (st' == st)
   in
   FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
 
@@ -395,15 +330,54 @@ let rec darken_roots_bounded_prefix_preserves_gray_objects_on_stack
 
 let darken_roots_bounded_spec_preserves_gray_objects_on_stack
   (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t) (cap: nat)
-  : Lemma
-      (requires
-        SpecMark.gray_objects_on_stack g st /\
-        Seq.length st + Seq.length roots <= cap)
-      (ensures
-        SpecMark.gray_objects_on_stack
-          (fst (MarkBounded.darken_roots_bounded_spec g st roots cap))
-          (snd (MarkBounded.darken_roots_bounded_spec g st roots cap)))
   =
   darken_roots_bounded_prefix_preserves_gray_objects_on_stack
     g st roots (Seq.length roots) cap
+#pop-options
+
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
+let check_and_darken_bounded_spec_preserves_create_graph
+  (g: heap) (st: Seq.seq obj_addr) (v: U64.t) (cap: nat)
+  =
+  if U64.v v >= U64.v zero_addr + U64.v mword &&
+     U64.v v < heap_size &&
+     U64.v v % U64.v mword = 0
+  then begin
+    let tgt : obj_addr = SpecObject.resolve_object (v <: obj_addr) g in
+    let h_addr = U64.sub tgt mword in
+    if U64.v h_addr + U64.v mword < heap_size then begin
+      let obj = SpecHeap.f_address h_addr in
+      let _ = SpecHeap.f_address_spec h_addr in
+      let _ = SpecHeap.hd_f_roundtrip h_addr in
+      if SpecObject.is_white obj g then begin
+        SpecObject.makeGray_eq obj g;
+        SpecMark.color_change_preserves_wf g obj Header.Gray;
+        SpecMark.color_preserves_create_graph obj g Header.Gray
+      end
+    end
+  end
+
+let rec darken_roots_bounded_prefix_preserves_create_graph
+  (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t)
+  (idx: nat{idx <= Seq.length roots}) (cap: nat)
+  =
+  if idx = 0 then darken_roots_bounded_prefix_base g st roots cap
+  else begin
+    let idx0 = idx - 1 in
+    darken_roots_bounded_prefix_preserves_create_graph g st roots idx0 cap;
+    let (g0, st0) = MarkBounded.darken_roots_bounded_prefix_spec g st roots idx0 cap in
+    MarkBounded.darken_roots_bounded_prefix_preserves_objects g st roots idx0 cap;
+    assert (SpecFields.objects zero_addr g0 == SpecFields.objects zero_addr g);
+    FStar.Classical.forall_intro (fun (x: obj_addr) ->
+      MarkBounded.darken_roots_bounded_prefix_preserves_resolve g st roots idx0 cap x
+      <: Lemma (SpecObject.resolve_object x g0 == SpecObject.resolve_object x g));
+    MarkBounded.root_points_to_object_transfer g g0 (Seq.index roots idx0);
+    MarkBounded.darken_roots_bounded_prefix_step g st roots idx0 cap;
+    check_and_darken_bounded_spec_preserves_create_graph g0 st0 (Seq.index roots idx0) cap
+  end
+
+let darken_roots_bounded_spec_preserves_create_graph
+  (g: heap) (st: Seq.seq obj_addr) (roots: Seq.seq U64.t) (cap: nat)
+  =
+  darken_roots_bounded_prefix_preserves_create_graph g st roots (Seq.length roots) cap
 #pop-options

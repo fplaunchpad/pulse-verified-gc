@@ -96,13 +96,6 @@ let get_field_addr_eq (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >= 1})
 /// Object fits in heap: header + fields all within bounds
 let object_fits_in_heap (h_addr: obj_addr) (g: heap) : GTot bool =
   U64.v (hd_address h_addr) + U64.v mword + U64.v (wosize_of_object h_addr g) * U64.v mword <= heap_size
-
-/// Intro lemma for object_fits_in_heap (use from outside the module)
-let object_fits_in_heap_intro (h: obj_addr) (g: heap) : Lemma
-  (requires U64.v (hd_address h) + 8 + Prims.op_Star (U64.v (wosize_of_object h g)) 8 <= Seq.length g)
-  (ensures object_fits_in_heap h g) 
-  = assert_norm (U64.v mword == 8)
-
 /// Intro lemma without hd_address: v h + wosize*8 <= Seq.length g suffices
 /// (Since hd_address h = h - 8, we have hd_address h + 8 = h)
 let object_fits_from_bound (h: obj_addr) (g: heap) : Lemma
@@ -119,6 +112,19 @@ let object_fits_to_bound (h: obj_addr) (g: heap) : Lemma
     assert_norm (U64.v mword == 8)
 
 /// Get all pointer fields of an object (for edges)
+/// The graph target denoted by a raw field word.
+///
+/// Vertices are whole objects, so an edge must name a whole object.  A field may
+/// hold an *interior* pointer into a closure (OCaml's encoding of mutually
+/// recursive functions); `resolve_object` maps such a value to the enclosing
+/// closure and is the identity on ordinary pointers.  Non-pointer words are
+/// returned unchanged (they never become edges).
+let resolve_field (g: heap) (v: U64.t) : GTot U64.t =
+  if is_pointer_field v then begin
+    is_pointer_field_is_obj_addr v;
+    GC.Spec.Object.resolve_object v g
+  end else v
+
 let rec get_pointer_fields_aux (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >= 1}) (ws: U64.t)
   : GTot (seq vertex_id) (decreases (U64.v ws - U64.v i + 1))
   =
@@ -133,9 +139,7 @@ let rec get_pointer_fields_aux (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >= 1}
     in
     if is_pointer_field v then begin
       is_pointer_field_is_obj_addr v;
-      // v is an obj_addr (pointer fields store object addresses in OCaml)
-      // Return v directly — vertices are obj_addrs, so edges should be too
-      Seq.cons v rest
+      Seq.cons (resolve_field g v) rest
     end
     else rest
 
@@ -185,7 +189,7 @@ let rec coerce_to_vertex_list (s: seq obj_addr) : Tot vertex_list (decreases Seq
   else Seq.cons (Seq.head s) (coerce_to_vertex_list (Seq.tail s))
 
 /// coerce preserves membership
-#push-options "--z3rlimit 50 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 12 --fuel 2 --ifuel 1"
 let rec coerce_mem_lemma (s: seq obj_addr) (x: obj_addr)
   : Lemma (ensures Seq.mem x s <==> Seq.mem x (coerce_to_vertex_list s))
           (decreases Seq.length s)
@@ -197,7 +201,7 @@ let rec coerce_mem_lemma (s: seq obj_addr) (x: obj_addr)
 #pop-options
 
 /// coerce preserves cons structure
-#push-options "--z3rlimit 50 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 12 --fuel 2 --ifuel 1"
 let coerce_cons_lemma (hd: obj_addr) (tl: seq obj_addr)
   : Lemma (coerce_to_vertex_list (Seq.cons hd tl) == Seq.cons hd (coerce_to_vertex_list tl))
   = assert (Seq.length (Seq.cons hd tl) > 0);
@@ -282,12 +286,15 @@ let rec make_edges_mem (h_addr: vertex_id) (succs: seq vertex_id) (v: vertex_id)
       Seq.mem_cons (h_addr, hd) (make_edges h_addr (Seq.tail succs))
     end
 
-/// If a pointer field at index j (i <= j <= ws) exists, it's in get_pointer_fields_aux
+/// If a pointer field at index j (i <= j <= ws) exists, its *resolved* target is
+/// in get_pointer_fields_aux.
 let rec get_pointer_fields_aux_mem (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >= 1}) (ws: U64.t)
   (j: U64.t{U64.v j >= 1})
   : Lemma (requires U64.v j >= U64.v i /\ U64.v j <= U64.v ws /\
                     is_pointer_field (get_field g obj j))
-          (ensures Seq.mem (get_field g obj j) (get_pointer_fields_aux g obj i ws))
+          (ensures (is_pointer_field_is_obj_addr (get_field g obj j);
+                    Seq.mem (GC.Spec.Object.resolve_object (get_field g obj j) g)
+                            (get_pointer_fields_aux g obj i ws)))
           (decreases (U64.v ws - U64.v i + 1))
   = if U64.v i > U64.v ws then ()
     else begin
@@ -300,16 +307,15 @@ let rec get_pointer_fields_aux_mem (g: heap) (obj: obj_addr) (i: U64.t{U64.v i >
         assert (v == get_field g obj j);
         if is_pointer_field v then begin
           is_pointer_field_is_obj_addr v;
-          Seq.mem_cons v rest
+          Seq.mem_cons (resolve_field g v) rest
         end else ()
       end else begin
         assert (U64.v j > U64.v i);
         assert (U64.v i < U64.v ws);
         get_pointer_fields_aux_mem g obj (U64.add i 1UL) ws j;
-        assert (Seq.mem (get_field g obj j) rest);
         if is_pointer_field v then begin
           is_pointer_field_is_obj_addr v;
-          Seq.mem_cons v rest
+          Seq.mem_cons (resolve_field g v) rest
         end else ()
       end
     end
@@ -341,14 +347,18 @@ let pointer_field_is_graph_edge (g: heap) (objs: seq obj_addr) (obj: obj_addr)
                     object_fits_in_heap obj g /\ ~(is_no_scan obj g) /\
                     U64.v j <= U64.v (wosize_of_object obj g) /\
                     is_pointer_field (get_field g obj j))
-          (ensures mem_graph_edge (create_graph_from_heap g objs) obj (get_field g obj j))
+          (ensures (is_pointer_field_is_obj_addr (get_field g obj j);
+                    mem_graph_edge (create_graph_from_heap g objs) obj
+                      (GC.Spec.Object.resolve_object (get_field g obj j) g)))
   = let ws = wosize_of_object obj g in
     let v = get_field g obj j in
+    is_pointer_field_is_obj_addr v;
+    let rv = GC.Spec.Object.resolve_object (v <: obj_addr) g in
     get_pointer_fields_aux_mem g obj 1UL ws j;
-    assert (Seq.mem v (get_pointer_fields_aux g obj 1UL ws));
-    assert (Seq.mem v (get_pointer_fields g obj));
-    make_edges_mem obj (get_pointer_fields g obj) v;
-    assert (Seq.mem (obj, v) (object_edges g obj));
+    assert (Seq.mem rv (get_pointer_fields_aux g obj 1UL ws));
+    assert (Seq.mem rv (get_pointer_fields g obj));
+    make_edges_mem obj (get_pointer_fields g obj) rv;
+    assert (Seq.mem (obj, rv) (object_edges g obj));
     all_edges_superset g objs obj
 
 /// ---------------------------------------------------------------------------
@@ -370,7 +380,7 @@ val successors_aux_make_edges_self : (h: vertex_id) -> (succs: seq vertex_id) ->
   Lemma (ensures Seq.equal (successors_aux (make_edges h succs) h) succs)
         (decreases Seq.length succs)
 
-#push-options "--fuel 4 --ifuel 2 --z3rlimit 200"
+#push-options "--fuel 4 --ifuel 2 --z3rlimit 50"
 let rec successors_aux_make_edges_self h succs =
   if Seq.length succs = 0 then ()
   else begin
@@ -392,7 +402,7 @@ val successors_aux_make_edges_other : (h: vertex_id) -> (succs: seq vertex_id) -
         (ensures Seq.equal (successors_aux (make_edges h succs) v) Seq.empty)
         (decreases Seq.length succs)
 
-#push-options "--fuel 4 --ifuel 2 --z3rlimit 200"
+#push-options "--fuel 4 --ifuel 2 --z3rlimit 50"
 let rec successors_aux_make_edges_other h succs v =
   if Seq.length succs = 0 then ()
   else begin
@@ -408,7 +418,7 @@ private val successors_aux_append : (e1: edge_list) -> (e2: edge_list) -> (v: ve
                            (Seq.append (successors_aux e1 v) (successors_aux e2 v)))
         (decreases Seq.length e1)
 
-#push-options "--z3rlimit 400 --fuel 4 --ifuel 2 --split_queries always"
+#push-options "--z3rlimit 100 --fuel 4 --ifuel 2"
 private let rec successors_aux_append e1 e2 v =
   if Seq.length e1 = 0 then begin
     assert (Seq.equal (Seq.append e1 e2) e2);
@@ -476,7 +486,7 @@ val successors_aux_all_edges : (g: heap) -> (objs: seq obj_addr) -> (x: obj_addr
                            (get_pointer_fields g x))
         (decreases Seq.length objs)
 
-#push-options "--z3rlimit 100 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 25 --fuel 2 --ifuel 1"
 let rec successors_aux_all_edges g objs x =
   if Seq.length objs = 0 then ()
   else begin

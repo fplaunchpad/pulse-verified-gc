@@ -247,8 +247,7 @@ val sweep_post_sweep_strong :
       stack_props h_init st /\
       fp_in_heap fp h_init /\
       no_black_objects h_init /\
-      no_pointer_to_blue h_init /\
-      no_scan_invariant h_init)
+      no_pointer_to_blue h_init)
     (ensures GC.Spec.Coalesce.post_sweep_strong (fst (sweep (mark h_init st) fp)))
 
 /// ---------------------------------------------------------------------------
@@ -305,7 +304,6 @@ val full_gc_correctness_through_coalesce :
       fp_in_heap fp h_init /\
       no_black_objects h_init /\
       no_pointer_to_blue h_init /\
-      no_scan_invariant h_init /\
       (forall (r: obj_addr). Seq.mem r roots <==> Seq.mem r st) /\
       (let graph = create_graph h_init in
        let roots' = HeapGraph.coerce_to_vertex_list roots in
@@ -342,7 +340,6 @@ val mark_post_intro :
       fp_in_heap fp h_init /\
       no_black_objects h_init /\
       no_pointer_to_blue h_init /\
-      no_scan_invariant h_mark /\
       (let g_init = create_graph h_init in
        let roots' = HeapGraph.coerce_to_vertex_list roots in
        graph_wf g_init /\ is_vertex_set roots' /\ subset_vertices roots' g_init.vertices ==>
@@ -380,9 +377,6 @@ val mark_post_elim_objects_gt0 : h_init:heap -> h_mark:heap -> roots:seq obj_add
 val mark_post_elim_fp : h_init:heap -> h_mark:heap -> roots:seq obj_addr -> fp:U64.t ->
   Lemma (requires mark_post h_init h_mark roots fp)
         (ensures fp_in_heap fp h_mark)
-val mark_post_elim_no_scan : h_init:heap -> h_mark:heap -> roots:seq obj_addr -> fp:U64.t ->
-  Lemma (requires mark_post h_init h_mark roots fp)
-        (ensures no_scan_invariant h_mark)
 
 let heap_reachable (h: heap) (roots: seq obj_addr) (x: obj_addr) : prop =
   let g = create_graph h in
@@ -409,7 +403,16 @@ let major_gc_live_subgraph_isomorphism
     heap_reachable h_init roots x /\
     U64.v i >= 1 /\
     U64.v i <= U64.v (wosize_of_object x h_init) ==>
-    HeapGraph.get_field h_init x i == HeapGraph.get_field h_final x i)
+    HeapGraph.get_field h_init x i == HeapGraph.get_field h_final x i) /\
+  /// Successor *lists* agree on live objects.  This is strictly stronger than
+  /// the edge clause above, which is guarded on both endpoints already being
+  /// live; without it, transferring reachability backwards (final ⇒ initial)
+  /// would be circular, since the induction meets successors that are not yet
+  /// known to be live.  See `GC.Gen.MajorReachabilityTransfer`.
+  (forall (x: obj_addr).
+    heap_reachable h_init roots x ==>
+    mem_graph_vertex (create_graph h_final) x /\
+    successors (create_graph h_init) x == successors (create_graph h_final) x)
 
 let major_gc_unreachable_final_blue
   (h_init h_final: heap) (roots: seq obj_addr) : prop =
@@ -428,7 +431,6 @@ val mark_satisfies_mark_post :
       fp_in_heap fp h_init /\
       no_black_objects h_init /\
       no_pointer_to_blue h_init /\
-      no_scan_invariant h_init /\
       (forall (r: obj_addr). Seq.mem r roots <==> Seq.mem r st) /\
       (let graph = create_graph h_init in
        let roots' = HeapGraph.coerce_to_vertex_list roots in
@@ -483,9 +485,45 @@ val major_gc_unreachable_final_blue_gen :
     (ensures major_gc_unreachable_final_blue
       h_init (fst (Coalesce.coalesce (fst (sweep h_mark fp)))) roots)
 
+/// The mark output that produced a given collector result.
+///
+/// `GC.Impl.collect_with_roots` runs mark, then sweep, then coalesce, and the
+/// intermediate marked heap never escapes.  Downstream clients (notably
+/// `GC.Gen.PostCollectionShape`, which re-establishes the generational shape
+/// invariant on the collector's output) need to know that the returned heap and
+/// free pointer really are `coalesce (sweep h_mark fp)` for *some* heap `h_mark`
+/// satisfying `mark_post`.  This predicate packages that existential so it can
+/// be carried across a Pulse postcondition.
+let gc_coalesce_source (h_init s2: heap) (roots: seq obj_addr) (fp final_fp: U64.t) : prop =
+  exists (h_mark: heap).
+    mark_post h_init h_mark roots fp /\
+    (s2, final_fp) == Coalesce.coalesce (fst (sweep h_mark fp))
+
+val gc_coalesce_source_intro :
+  (h_init: heap) -> (h_mark: heap) -> (roots: seq obj_addr) -> (fp: U64.t) ->
+  Lemma
+    (requires mark_post h_init h_mark roots fp)
+    (ensures (let r = Coalesce.coalesce (fst (sweep h_mark fp)) in
+              gc_coalesce_source h_init (fst r) roots fp (snd r)))
+
 /// Generalized gc_postcondition
 val gc_postcondition_gen :
   (h_init: heap) -> (h_mark: heap) -> (roots: seq obj_addr) -> (fp: U64.t) ->
   Lemma
     (requires mark_post h_init h_mark roots fp)
     (ensures gc_postcondition (fst (Coalesce.coalesce (fst (sweep h_mark fp)))))
+
+/// Free-list cells hold no interior pointers after a full collection.
+///
+/// Kept separate from `gc_postcondition` on purpose: the *post-sweep* heap does
+/// **not** satisfy this.  A dying object may hold interior pointers and
+/// `GC.Spec.Sweep.sweep_object` rewrites only its link word, so the corpse still
+/// points into the middle of other blocks.  It is the coalescing pass that makes
+/// the property true, by zeroing every field of a merged free block above the
+/// link (`GC.Spec.Coalesce.flush_blue`).  This is the establishment half of the
+/// `blue_fields_non_infix` conjunct of `GC.Gen.HeapInvariant.major_heap_shape`.
+val gc_blue_fields_non_infix_gen :
+  (h_init: heap) -> (h_mark: heap) -> (roots: seq obj_addr) -> (fp: U64.t) ->
+  Lemma
+    (requires mark_post h_init h_mark roots fp)
+    (ensures blue_fields_non_infix (fst (Coalesce.coalesce (fst (sweep h_mark fp)))))

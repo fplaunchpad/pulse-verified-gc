@@ -23,3 +23,17 @@ _verify.log
 generational/ocaml-integration/ocaml-4.14-unchanged
 generational/ocaml-integration/tests/gmon.out
 dep.graph
+_cache/
+
+# Scratch caches created by tools/try-module.sh and tools/try-batch.sh
+_scratch/
+_scratch_cache*/
+
+# Dependence-graph viewer output (`make depgraph`)
+_depgraph/
+
+# Review artifacts dropped in the worktree (e.g. finding-*.pdf); keep out of git
+*.pdf
+
+# Scratch PR description (not part of the repo)
+PR.md

@@ -22,6 +22,7 @@ module CheneyBFS = GC.Gen.CheneyBFS
 module CG = GC.Gen.CombinedGraph
 module MinorFwd = GC.Gen.MinorCollectForwarding
 module RBridge = GC.Gen.ReachabilityBridge
+module MCFH = GC.Gen.MinorCollectForwarding.Helpers
 module UpdatePtrs = GC.Gen.Impl.UpdatePtrs
 
 let spot_roots (c: obj_addr) : seq U64.t =
@@ -37,9 +38,6 @@ let spot_c_to_a_slot
 
 let spot_c_to_a_slot_spec
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
-  : Lemma (ensures
-      U64.v (spot_c_to_a_slot c) == U64.v c + Layout.c_to_a_field_index * 8 /\
-      U64.v (spot_c_to_a_slot c) == U64.v c + 8)
   =
   assert (Layout.c_to_a_field_index == 1);
   assert (heap_size < pow2 57);
@@ -52,42 +50,30 @@ let spot_slots
 
 let spot_slots_len
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
-  : Lemma (ensures Seq.length (spot_slots c) == 1)
   = ()
 
 let spot_slots_index
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (i: nat{i < Seq.length (spot_slots c)})
-  : Lemma (requires i < 1)
-          (ensures Seq.index (spot_slots c) i == spot_c_to_a_slot c)
   =
   assert (i == 0)
 
 let spot_roots_mem_c (c: obj_addr)
-  : Lemma (Seq.mem (c <: U64.t) (spot_roots c))
   = ()
 
 let spot_roots_mem_a (c: obj_addr)
-  : Lemma (Seq.mem Layout.a_minor (spot_roots c))
   = ()
 
 let spot_roots_len (c: obj_addr)
-  : Lemma (Seq.length (spot_roots c) == 2)
   = ()
 
 let spot_roots_index_c (c: obj_addr)
-  : Lemma (requires Seq.length (spot_roots c) > 0)
-          (ensures Seq.index (spot_roots c) 0 == (c <: U64.t))
   = ()
 
 let spot_roots_index_a (c: obj_addr)
-  : Lemma (requires Seq.length (spot_roots c) > 1)
-          (ensures Seq.index (spot_roots c) 1 == Layout.a_minor)
   = ()
 
 let spot_roots_cases (c: obj_addr) (root: U64.t)
-  : Lemma (requires Seq.mem root (spot_roots c))
-          (ensures root == (c <: U64.t) \/ root == Layout.a_minor)
   =
   SpecFields.mem_cons_lemma root (c <: U64.t) (Seq.cons Layout.a_minor Seq.empty);
   SpecFields.mem_cons_lemma root Layout.a_minor Seq.empty;
@@ -100,7 +86,6 @@ let spot_roots_cases (c: obj_addr) (root: U64.t)
 
 let spot_slots_singleton_distinct
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
-  : Lemma (UpdatePtrs.slots_pairwise_distinct (spot_slots c) 1)
   = Preconditions.singleton_slots_pairwise_distinct (spot_slots c) 1
 
 let spot_minor_scenario_pre
@@ -116,6 +101,9 @@ let spot_minor_scenario_pre
   U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size /\
   CG.classify_major_field minor major
     (SpecHeap.read_word major (spot_c_to_a_slot c)) == Some (CG.MinorV Layout.a_minor) /\
+  // in this scenario `c`'s field holds `a_minor` itself, not an interior pointer
+  ~(is_infix_in_minor minor
+      (to_minor_offset (SpecHeap.read_word major (spot_c_to_a_slot c)))) /\
   Seq.mem Layout.a_minor (minor_objects minor) /\
   Seq.mem Layout.b_minor (minor_objects minor) /\
   minor_wosize minor Layout.a_minor > 0 /\
@@ -126,23 +114,11 @@ let spot_minor_scenario_pre_intro_from_c_to_a
   (minor: minor_state) (major: heap) (fp: U64.t)
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (farr: seq U64.t)
-  : Lemma
-      (requires
-        Preconditions.minor_collect_full_pre
-          minor major fp (spot_roots c) farr (spot_slots c) 1 /\
-        ~(Promote.is_minor_pointer (c <: U64.t)) /\
-        Seq.mem c (SpecFields.objects zero_addr major) /\
-        ~(SpecObj.is_no_scan c major) /\
-        U64.v (SpecObj.wosize_of_object c major) > Layout.c_to_a_field_index /\
-        U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size /\
-        SpecHeap.read_word major (spot_c_to_a_slot c) == Layout.a_minor /\
-        Seq.mem Layout.a_minor (minor_objects minor) /\
-        Seq.mem Layout.b_minor (minor_objects minor) /\
-        minor_wosize minor Layout.a_minor > 0 /\
-        minor_wosize minor Layout.b_minor > 0 /\
-        CheneyBFS.cheney_no_oom minor major fp (spot_roots c))
-      (ensures spot_minor_scenario_pre minor major fp c farr)
   =
+  Preconditions.minor_collect_full_pre_elim minor major fp (spot_roots c) farr
+    (spot_slots c) 1;
+  GenInv.collection_heap_shape_elim minor major fp;
+  GenInv.minor_heap_shape_elim minor;
   let slot_v = SpecHeap.read_word major (spot_c_to_a_slot c) in
   assert (slot_v == Layout.a_minor);
   Layout.a_minor_is_minor_pointer ();
@@ -153,7 +129,8 @@ let spot_minor_scenario_pre_intro_from_c_to_a
   assert (to_minor_offset slot_v == Layout.a_minor);
   assert (Promote.is_minor_pointer (to_minor_offset slot_v));
   assert (Seq.mem (to_minor_offset slot_v) (minor_objects minor));
-  CG.classify_major_field_is_minor minor major slot_v;
+  minor_objects_not_infix minor (to_minor_offset slot_v);
+  CG.classify_major_field_is_minor_raw minor major slot_v;
   assert (CG.classify_major_field minor major slot_v ==
           Some (CG.MinorV (to_minor_offset slot_v)));
   assert (Some (CG.MinorV (to_minor_offset slot_v)) ==
@@ -183,11 +160,14 @@ let expose_spot_collection_facts
         RBridge.minor_no_pointer_to_blue minor major /\
         UpdatePtrs.ref_table_covers_minor_ptrs major (spot_slots c) 1 /\
         MinorFwd.remembered_targets_in_roots major (spot_roots c) (spot_slots c) 1 /\
-        RBridge.major_field_zero_no_minor minor major /\
-        RBridge.roots_valid_nonblue (spot_roots c) major)
+        RBridge.roots_valid_nonblue (spot_roots c) major /\
+        RBridge.major_field_zero_covered minor major (spot_roots c))
   =
   Preconditions.minor_collect_full_pre_elim
     minor major fp (spot_roots c) farr (spot_slots c) 1;
+  MCFH.roots_valid_for_minor_collection_nonblue minor major (spot_roots c);
+  MCFH.major_field_zero_covered_from_slots
+    minor major (spot_roots c) (spot_slots c) 1;
   GenInv.collection_heap_shape_elim minor major fp;
   GenInv.major_heap_shape_elim major fp;
   GenInv.minor_heap_shape_elim minor;
@@ -197,53 +177,42 @@ let spot_c_reachable_root
   (minor: minor_state) (major: heap) (fp: U64.t)
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (farr: seq U64.t)
-  : Lemma
-      (requires spot_minor_scenario_pre minor major fp c farr)
-      (ensures (
-        let cg = CG.build_combined_graph minor major in
-        CG.combined_reachable cg (CG.classify_roots (spot_roots c)) (CG.MajorV c)))
   =
   spot_roots_mem_c c;
-  CG.classify_roots_major_mem (spot_roots c) (c <: U64.t);
+  CG.classify_roots_major_mem minor (spot_roots c) (c <: U64.t);
   CG.major_vertex_char minor major c;
   assert (CG.mem_cv (CG.MajorV c) (CG.build_combined_graph minor major));
   CG.combined_reachable_root
     (CG.build_combined_graph minor major)
-    (CG.classify_roots (spot_roots c))
+    (CG.classify_roots minor (spot_roots c))
     (CG.MajorV c)
 
 let spot_a_reachable_root
   (minor: minor_state) (major: heap) (fp: U64.t)
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (farr: seq U64.t)
-  : Lemma
-      (requires spot_minor_scenario_pre minor major fp c farr)
-      (ensures (
-        let cg = CG.build_combined_graph minor major in
-        CG.combined_reachable
-          cg (CG.classify_roots (spot_roots c)) (CG.MinorV Layout.a_minor)))
   =
   spot_roots_mem_a c;
   Layout.a_minor_is_minor_pointer ();
-  CG.classify_roots_minor_mem (spot_roots c) Layout.a_minor;
+  // `classify_root` resolves interior pointers; `a_minor` is a nursery
+  // *object*, so here the resolution is the identity.
+  Preconditions.minor_collect_full_pre_elim minor major fp (spot_roots c) farr
+    (spot_slots c) 1;
+  GenInv.collection_heap_shape_elim minor major fp;
+  GenInv.minor_heap_shape_elim minor;
+  minor_objects_not_infix minor Layout.a_minor;
+  CG.classify_roots_minor_mem_raw minor (spot_roots c) Layout.a_minor;
   CG.minor_vertex_char minor major Layout.a_minor;
   assert (CG.mem_cv (CG.MinorV Layout.a_minor) (CG.build_combined_graph minor major));
   CG.combined_reachable_root
     (CG.build_combined_graph minor major)
-    (CG.classify_roots (spot_roots c))
+    (CG.classify_roots minor (spot_roots c))
     (CG.MinorV Layout.a_minor)
 
 let spot_a_promoted
   (minor: minor_state) (major: heap) (fp: U64.t)
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (farr: seq U64.t)
-  : Lemma
-      (requires spot_minor_scenario_pre minor major fp c farr)
-      (ensures (
-        let prom = Cheney.cheney_promote minor major fp (spot_roots c) in
-        Postconditions.promoted_image
-          minor major fp (spot_roots c) Layout.a_minor
-          (prom.fwd_map Layout.a_minor)))
   =
   expose_spot_collection_facts minor major fp c farr;
   spot_a_reachable_root minor major fp c farr;
@@ -259,33 +228,19 @@ let spot_c_field_rewritten_to_a_prime
   (minor: minor_state) (major: heap) (fp: U64.t)
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (farr: seq U64.t)
-  : Lemma
-      (requires spot_minor_scenario_pre minor major fp c farr)
-      (ensures (
-        let prom = Cheney.cheney_promote minor major fp (spot_roots c) in
-        let res = Cheney.cheney_collect_spec minor major fp (spot_roots c) in
-        Postconditions.promoted_image
-          minor major fp (spot_roots c) Layout.a_minor
-          (prom.fwd_map Layout.a_minor) /\
-        SpecHeap.read_word res.mc_major (spot_c_to_a_slot c) ==
-          prom.fwd_map Layout.a_minor))
   =
   expose_spot_collection_facts minor major fp c farr;
   spot_c_reachable_root minor major fp c farr;
   spot_a_reachable_root minor major fp c farr;
   Postconditions.major_minor_field_rewritten
     minor major fp (spot_roots c) (spot_slots c) 1 c Layout.a_minor
-    Layout.c_to_a_field_index
+    Layout.c_to_a_field_index;
+  // the stored word is `a_minor` itself, so the raw and resolved targets agree
+  resolve_minor_non_infix minor
+    (to_minor_offset (SpecHeap.read_word major (spot_c_to_a_slot c)))
 
 let spot_b_not_promoted_from_forwarding_zero
   (minor: minor_state) (major: heap) (fp: U64.t) (c: obj_addr)
-  : Lemma
-      (requires
-        (Cheney.cheney_promote minor major fp (spot_roots c)).fwd_map
-          Layout.b_minor == 0UL)
-      (ensures
-        Postconditions.minor_not_promoted
-          minor major fp (spot_roots c) Layout.b_minor)
   = Postconditions.not_promoted_from_zero_forwarding
       minor major fp (spot_roots c) Layout.b_minor
 
@@ -294,15 +249,5 @@ let spot_final_survives_from_gen_gc_post
   (c: obj_addr{U64.v c + Layout.c_to_a_field_index * 8 + 8 <= heap_size})
   (roots_out: seq U64.t) (ok: bool) (final_major: heap)
   (st: seq obj_addr) (cap: nat) (x: obj_addr)
-  : Lemma
-      (requires
-        ok /\
-        GC.Gen.Impl.gen_gc_reachable_subgraph_isomorphism_post
-          minor major fp (spot_roots c) ok final_major roots_out st cap /\
-        GC.Spec.Correctness.heap_reachable
-          (GC.Gen.Impl.gen_gc_prepared_major minor major fp (spot_roots c) st cap)
-          (GC.Gen.Impl.gen_gc_prepared_roots minor major fp (spot_roots c) st cap)
-          x)
-      (ensures Seq.mem x (SpecFields.objects zero_addr final_major))
   = Postconditions.final_major_survives_from_gen_gc_post
       minor major fp (spot_roots c) roots_out ok final_major st cap x

@@ -121,47 +121,16 @@ val fl_chain_2cycle_not_terminates (g: heap) (a b: U64.t) (n: nat)
                     read_word g (b <: obj_addr) = a)
           (ensures fl_chain_terminates g a n = false)
 
-val fl_chain_terminates_splice (g g_new: heap) (fp splice_point: U64.t) (steps tail_steps: nat)
-  : Lemma
-    (requires fl_chain_terminates g fp steps /\
-              GC.Spec.Allocator.Lemmas.Common.fl_valid g fp steps /\
-              (forall (a: U64.t).
-                 (U64.v a >= U64.v mword /\ U64.v a < heap_size /\ U64.v a % U64.v mword = 0 /\
-                  Seq.mem a (objects zero_addr g)) ==>
-                 (U64.v (wosize_of_object (a <: obj_addr) g) >= 1 /\
-                  U64.v (hd_address (a <: obj_addr)) + 16 <= heap_size /\
-                  a <> splice_point ==>
-                   read_word g_new (a <: obj_addr) == read_word g (a <: obj_addr))) /\
-              (U64.v splice_point >= U64.v mword /\ U64.v splice_point < heap_size /\
-               U64.v splice_point % U64.v mword = 0 /\
-               U64.v (hd_address (splice_point <: obj_addr)) + 16 <= heap_size ==>
-                fl_chain_terminates g_new (read_word g_new (splice_point <: obj_addr)) tail_steps))
-    (ensures fl_chain_terminates g_new fp (steps + tail_steps))
-
-
-val fl_valid_field_write (g: heap) (p: obj_addr) (v: U64.t) (fp: U64.t) (fuel tail_fuel: nat)
-  : Lemma
-    (requires GC.Spec.Allocator.Lemmas.Common.fl_valid g fp fuel /\
-              well_formed_heap g /\
-              Seq.mem p (objects zero_addr g) /\
-              U64.v (wosize_of_object p g) >= 1 /\
-              v <> p /\
-              GC.Spec.Allocator.Lemmas.Common.fl_valid (write_word g (p <: hp_addr) v) v tail_fuel /\
-              tail_fuel >= fuel)
-    (ensures GC.Spec.Allocator.Lemmas.Common.fl_valid (write_word g (p <: hp_addr) v) fp fuel)
-
-val fl_valid_field_write_tail (g: heap) (p: obj_addr) (v: U64.t) (fuel: nat)
-  : Lemma
-    (requires well_formed_heap g /\
-              Seq.mem p (objects zero_addr g) /\
-              U64.v (wosize_of_object p g) >= 1 /\
-              v <> p /\
-              GC.Spec.Allocator.Lemmas.Common.fl_valid g v fuel)
-    (ensures GC.Spec.Allocator.Lemmas.Common.fl_valid (write_word g (p <: hp_addr) v) v fuel)
 val chain_avoids (g: heap) (fp excl: U64.t) (steps: nat) : Tot bool
 
 val chain_avoids_null (g: heap) (excl: U64.t) (steps: nat)
   : Lemma (ensures chain_avoids g 0UL excl steps = true)
+
+/// With no steps left there is nothing to visit, so the walk trivially avoids
+/// `excl`.  Needed as the base case of any induction whose measure is something
+/// other than `steps`.
+val chain_avoids_zero (g: heap) (fp excl: U64.t)
+  : Lemma (ensures chain_avoids g fp excl 0 = true)
 
 val chain_avoids_unfold_step (g: heap) (fp excl: U64.t) (steps: nat)
   : Lemma (requires U64.v fp >= U64.v mword /\ U64.v fp < heap_size /\

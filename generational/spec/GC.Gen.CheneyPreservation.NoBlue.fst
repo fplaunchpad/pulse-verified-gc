@@ -25,33 +25,32 @@ module Fields = GC.Gen.CheneyPreservation.Fields
 module NonBlueOrigin = GC.Gen.CheneyPreservation.NonBlueOrigin
 module NoBlueUtil = GC.Gen.NoBlueUtil
 module GenInv = GC.Gen.HeapInvariant
+module AllocLemmas = GC.Spec.Allocator.Lemmas
 
-#push-options "--z3rlimit 80 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
 let cheney_promote_preserves_no_pointer_to_blue_from_shape
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
-  : Lemma
-    (requires GenInv.collection_heap_shape minor major fp)
-    (ensures Mark.no_pointer_to_blue
-      (cheney_promote minor major fp roots).major_final)
   =
   GenInv.collection_heap_shape_elim minor major fp;
   GenInv.major_heap_shape_elim major fp;
   GenInv.minor_heap_shape_elim minor;
-  reveal_opaque (`%well_formed_heap) well_formed_heap;
+  wf_parts ();
   cheney_promote_preserves_wfh_part1 minor major fp roots;
   cheney_promote_preserves_wfh_part4 minor major fp roots;
+  cheney_promote_preserves_objects minor major fp roots;
   Injectivity.cheney_promote_fwd_noninfix_sources_in_minor_objects minor major fp roots;
   let prom = cheney_promote minor major fp roots in
   let field_no_blue (src dst: obj_addr) (j: nat)
     : Lemma
       (requires Seq.mem src (objects zero_addr prom.major_final) /\
                 ~(is_blue src prom.major_final) /\
+                fields_constrained prom.major_final src /\
                 j < U64.v (wosize_of_object src prom.major_final) /\
                 U64.v src + j * 8 + 8 <= heap_size /\
                 is_pointer_to
                   (read_word prom.major_final (U64.uint_to_t (U64.v src + j * 8)))
                   dst)
-      (ensures ~(is_blue dst prom.major_final))
+      (ensures ~(is_blue (resolve_object dst prom.major_final) prom.major_final))
     =
     assert ((U64.v src + j * 8) % 8 == 0);
     let field_addr : hp_addr = U64.uint_to_t (U64.v src + j * 8) in
@@ -60,6 +59,11 @@ let cheney_promote_preserves_no_pointer_to_blue_from_shape
     if Seq.mem src (objects zero_addr major) && is_blue src major = false then begin
       Frame.cheney_promote_frame_old_header minor major fp roots src;
       color_of_header_eq src major prom.major_final;
+      tag_of_object_spec src major;
+      tag_of_object_spec src prom.major_final;
+      hd_address_spec src;
+      is_no_scan_spec src major;
+      is_no_scan_spec src prom.major_final;
       assert (~(is_blue src major));
       wosize_of_object_spec src major;
       wosize_of_object_spec src prom.major_final;
@@ -72,14 +76,16 @@ let cheney_promote_preserves_no_pointer_to_blue_from_shape
       assert (is_pointer_to (read_word major field_addr) dst);
       NoBlueUtil.field_pointer_target_in_objects_nat major src dst j;
       NoBlueUtil.field_pointer_no_blue_from_no_pointer_to_blue major src dst j;
-      Frame.cheney_promote_frame_old_header minor major fp roots dst;
-      color_of_header_eq dst major prom.major_final;
-      assert (~(is_blue dst prom.major_final))
+      // the target may be interior: frame the header of its *resolution*
+      let tgt = resolve_object dst major in
+      Frame.cheney_promote_frame_target_header minor major fp roots dst;
+      Frame.cheney_promote_frame_old_header minor major fp roots tgt;
+      color_of_header_eq tgt major prom.major_final
     end else begin
       assert (~(Seq.mem src (objects zero_addr major) /\
                 is_blue src major = false));
       NonBlueOrigin.cheney_promote_nonblue_origin minor major fp roots src;
-      let goal = ~(is_blue dst prom.major_final) in
+      let goal = ~(is_blue (resolve_object dst prom.major_final) prom.major_final) in
       let proof (x: U64.t)
         : Lemma
           (requires prom.fwd_map x == src /\ is_minor_pointer x)
@@ -96,7 +102,12 @@ let cheney_promote_preserves_no_pointer_to_blue_from_shape
         assert (Injectivity.fwd_noninfix_sources_in_minor_objects
                   minor prom.fwd_map prom.major_final);
         assert (Seq.mem x (minor_objects minor));
-        if j < minor_wosize minor x then begin
+        // `src` is `fields_constrained`, i.e. not no-scan; promotion copies the
+        // tag, so `x` was scannable and its scan window is its whole body.
+        Fields.cheney_promote_fwd_target_no_scan_iff_minor_tag minor major fp roots x;
+        assert (minor_tag minor x < 251);
+        minor_scan_wosize_cases minor x;
+        if j < minor_scan_wosize minor x then begin
           Fields.cheney_promote_fwd_target_fields_match minor major fp roots x j;
           assert (read_word prom.major_final field_addr ==
                   minor_read_field minor x j);
@@ -112,7 +123,10 @@ let cheney_promote_preserves_no_pointer_to_blue_from_shape
           assert (old_dst == dst);
           Frame.cheney_promote_frame_old_header minor major fp roots old_dst;
           color_of_header_eq old_dst major prom.major_final;
-          assert (~(is_blue dst prom.major_final))
+          assert (~(is_blue dst prom.major_final));
+          assert (well_formed_heap_part4 prom.major_final);
+          assert (~(is_infix dst prom.major_final));
+          resolve_non_infix dst prom.major_final
         end else begin
           Fields.cheney_promote_fwd_target_extra_field_not_pointer minor major fp roots x j;
           assert (~(is_pointer_field field_val));
@@ -128,7 +142,7 @@ let cheney_promote_preserves_no_pointer_to_blue_from_shape
   Mark.no_pointer_to_blue_intro_from_fields prom.major_final field_no_blue
 #pop-options
 
-#push-options "--z3rlimit 40 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 10 --fuel 0 --ifuel 0"
 private let header_eq_preserves_no_scan
   (g1 g2: heap) (obj: obj_addr)
   : Lemma
@@ -152,33 +166,25 @@ private let header_eq_preserves_infix
   is_infix_spec obj g2
 #pop-options
 
-#push-options "--z3rlimit 80 --fuel 0 --ifuel 0 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
 let update_major_pointers_preserves_no_pointer_to_blue
-  (major: heap) (fwd: forwarding_map)
-  : Lemma
-    (requires
-      well_formed_heap_part1 major /\
-      well_formed_heap (update_major_pointers major fwd) /\
-      no_scan_invariant (update_major_pointers major fwd) /\
-      Mark.no_pointer_to_blue major /\
-      Forwarding.fwd_valid_or_infix fwd major /\
-      Injectivity.fwd_targets_not_blue fwd major)
-    (ensures Mark.no_pointer_to_blue (update_major_pointers major fwd))
+  (major: heap) (fwd: forwarding_map) target_shape
   =
   let updated = update_major_pointers major fwd in
-  reveal_opaque (`%well_formed_heap) well_formed_heap;
+  wf_parts ();
   update_major_pointers_preserves_objects major fwd;
   update_major_pointers_preserves_wfh_part1 major fwd;
   let field_no_blue (src dst: obj_addr) (j: nat)
     : Lemma
       (requires Seq.mem src (objects zero_addr updated) /\
                 ~(is_blue src updated) /\
+                fields_constrained updated src /\
                 j < U64.v (wosize_of_object src updated) /\
                 U64.v src + j * 8 + 8 <= heap_size /\
                 is_pointer_to
                   (read_word updated (U64.uint_to_t (U64.v src + j * 8)))
                   dst)
-      (ensures ~(is_blue dst updated))
+      (ensures ~(is_blue (resolve_object dst updated) updated))
     =
     assert (Seq.mem src (objects zero_addr major));
     update_major_pointers_preserves_header major fwd src;
@@ -189,22 +195,44 @@ let update_major_pointers_preserves_no_pointer_to_blue
     assert (~(is_blue src major));
     assert (j < U64.v (wosize_of_object src major));
     assert ((U64.v src + j * 8) % 8 == 0);
-    NoBlueUtil.field_pointer_target_in_objects_nat updated src dst j;
-    assert (Seq.mem dst (objects zero_addr updated));
-    assert (Seq.mem dst (objects zero_addr major));
-    update_major_pointers_preserves_header major fwd dst;
     if is_no_scan src major then begin
+      // Vacuous: `no_pointer_to_blue` only constrains scannable sources.
       assert (is_no_scan src updated);
-      no_scan_invariant_elim updated src j;
-      assert (is_pointer_field
-        (read_word updated (U64.uint_to_t (U64.v src + j * 8))));
       assert False
     end else begin
       update_major_pointers_field_effect major fwd src j;
+      target_shape src j;
       let field_addr = U64.uint_to_t (U64.v src + j * 8) in
       let old_raw = read_word major field_addr in
       let old_val = to_minor_offset old_raw in
       let new_val = read_word updated field_addr in
+      // Whether the field was rewritten to a forwarding target or left alone,
+      // the resulting pointer is well formed *in `major`* and may be interior;
+      // the colour of its resolution is what carries over to `updated`.
+      let transfer (_: unit)
+        : Lemma (requires Seq.mem (resolve_object dst major) (objects zero_addr major) /\
+                          is_blue (resolve_object dst major) major = false /\
+                          infix_addr_wf major (objects zero_addr major) dst)
+                (ensures ~(is_blue (resolve_object dst updated) updated))
+        =
+        if is_infix dst major then begin
+          infix_addr_wf_elim major (objects zero_addr major) dst;
+          parent_closure_addr_nat_spec dst major;
+          resolve_infix_spec dst major;
+          let w = U64.v (wosize_of_object dst major) in
+          let pa : obj_addr = U64.uint_to_t (U64.v dst - w * 8) in
+          assert (resolve_object dst major == pa);
+          update_major_pointers_preserves_header major fwd pa;
+          color_of_header_eq pa major updated
+        end
+        else begin
+          resolve_non_infix dst major;
+          update_major_pointers_preserves_header major fwd dst;
+          color_of_header_eq dst major updated
+        end;
+        Frame.update_major_pointers_frame_target_header major fwd dst;
+        resolve_object_locality dst major updated
+      in
       if is_minor_pointer old_val && fwd old_val <> 0UL then begin
         assert (new_val == fwd old_val);
         assert (U64.v (fwd old_val) >= U64.v mword);
@@ -217,20 +245,18 @@ let update_major_pointers_preserves_no_pointer_to_blue
           assert False
         end;
         assert (fwd old_val == dst);
-        wf_objects_non_infix updated dst;
-        header_eq_preserves_infix major updated dst;
-        assert (is_infix dst major = false);
-        assert (is_infix (fwd old_val) major = false);
-        assert (is_val_addr (fwd old_val));
-        assert (is_blue ((fwd old_val) <: obj_addr) major = false);
-        color_of_header_eq dst major updated;
-        assert (~(is_blue dst updated))
+        transfer ()
       end else begin
         assert (new_val == old_raw);
         assert (is_pointer_to old_raw dst);
+        let old_obj : obj_addr = old_raw in
+        if old_obj <> dst then begin
+          hd_address_injective old_obj dst;
+          assert False
+        end;
+        assert (old_raw == dst);
         NoBlueUtil.field_pointer_no_blue_from_no_pointer_to_blue major src dst j;
-        color_of_header_eq dst major updated;
-        assert (~(is_blue dst updated))
+        transfer ()
       end
     end
   in

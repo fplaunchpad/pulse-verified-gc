@@ -28,7 +28,7 @@ let rec collect_minor_successors
   =
   if idx >= wosize then Seq.empty
   else
-    let field_val = to_minor_offset (minor_read_field ms obj idx) in
+    let field_val = resolve_minor ms (to_minor_offset (minor_read_field ms obj idx)) in
     let rest = collect_minor_successors ms obj (idx + 1) wosize in
     if is_minor_addr field_val && Seq.mem field_val (minor_objects ms)
     then Seq.cons field_val rest
@@ -38,14 +38,17 @@ let rec collect_minor_successors
 /// minor_successors
 /// ---------------------------------------------------------------------------
 
+/// A no-scan object has no successors: `minor_scan_wosize` is 0 for it, so the
+/// collection below is empty.  This keeps the reachability spec in step with
+/// `GC.Gen.Cheney.cheney_scan` and `GC.Gen.CombinedGraph.minor_object_edges`.
 let minor_successors (ms: minor_state) (obj: U64.t) : GTot (seq U64.t) =
-  collect_minor_successors ms obj 0 (minor_wosize ms obj)
+  collect_minor_successors ms obj 0 (minor_scan_wosize ms obj)
 
 /// ---------------------------------------------------------------------------
 /// Helper lemma: every element collected is in minor_objects
 /// ---------------------------------------------------------------------------
 
-#push-options "--z3rlimit 40 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 20 --fuel 2 --ifuel 1"
 
 let rec collect_minor_successors_valid
   (ms: minor_state)
@@ -60,7 +63,7 @@ let rec collect_minor_successors_valid
   =
   if idx >= wosize then ()
   else
-    let field_val = to_minor_offset (minor_read_field ms obj idx) in
+    let field_val = resolve_minor ms (to_minor_offset (minor_read_field ms obj idx)) in
     let rest = collect_minor_successors ms obj (idx + 1) wosize in
     if is_minor_addr field_val && Seq.mem field_val (minor_objects ms)
     then begin
@@ -78,10 +81,8 @@ let rec collect_minor_successors_valid
 #pop-options
 
 let minor_successors_valid (ms: minor_state) (obj: U64.t) (x: U64.t)
-  : Lemma (requires Seq.mem x (minor_successors ms obj))
-          (ensures Seq.mem x (minor_objects ms))
   =
-  collect_minor_successors_valid ms obj 0 (minor_wosize ms obj) x
+  collect_minor_successors_valid ms obj 0 (minor_scan_wosize ms obj) x
 
 /// ---------------------------------------------------------------------------
 /// BFS worklist algorithm for reachability
@@ -89,6 +90,10 @@ let minor_successors_valid (ms: minor_state) (obj: U64.t) (x: U64.t)
 
 /// Worklist-based BFS: process items from worklist, adding unvisited
 /// valid minor objects and their successors.
+///
+/// Query splitting makes every goal (including `fuel - 1 >= 0`) carry the
+/// whole context, so definitions like this one need fuel/ifuel pinned down.
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
 let rec minor_reachable_aux
   (ms: minor_state)
   (worklist: seq U64.t)
@@ -112,6 +117,7 @@ let rec minor_reachable_aux
       let new_worklist = Seq.append rest succs in
       let new_visited = Seq.cons obj visited in
       minor_reachable_aux ms new_worklist new_visited (fuel - 1)
+#pop-options
 
 /// Fuel bound: large enough to guarantee the BFS exhausts the worklist.
 /// Each of the at most n objects is processed once, adding < minor_heap_size
@@ -123,8 +129,17 @@ let minor_reachable_fuel (ms: minor_state) (roots: seq U64.t) : GTot nat =
 /// minor_reachable
 /// ---------------------------------------------------------------------------
 
+/// Roots are resolved before the traversal starts.  A root may be an interior
+/// pointer --- the bytecode interpreter pushes closure entry points directly
+/// onto the OCaml stack (`runtime/interp.c:601`, scanned by
+/// `runtime/roots_byt.c:39`), and `caml_modify` records major-to-minor interior
+/// stores in `ref_table` without any special case --- and the object such a
+/// root keeps alive is the closure it points into.
+let resolve_roots (ms: minor_state) (roots: seq U64.t) : GTot (seq U64.t) =
+  Seq.init_ghost (Seq.length roots) (fun i -> resolve_minor ms (Seq.index roots i))
+
 let minor_reachable (ms: minor_state) (roots: seq U64.t) : GTot (seq U64.t) =
-  minor_reachable_aux ms roots Seq.empty (minor_reachable_fuel ms roots)
+  minor_reachable_aux ms (resolve_roots ms roots) Seq.empty (minor_reachable_fuel ms roots)
 
 /// ---------------------------------------------------------------------------
 /// Proof: subset property
@@ -132,7 +147,7 @@ let minor_reachable (ms: minor_state) (roots: seq U64.t) : GTot (seq U64.t) =
 
 /// Key insight: visited only grows with items from minor_objects.
 /// We maintain the invariant that visited ⊆ minor_objects.
-#push-options "--z3rlimit 80 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 40 --fuel 2 --ifuel 1"
 
 let rec minor_reachable_aux_subset
   (ms: minor_state)
@@ -146,14 +161,15 @@ let rec minor_reachable_aux_subset
     (ensures Seq.mem x (minor_objects ms))
     (decreases fuel)
   =
-  if fuel = 0 || Seq.length worklist = 0
-  then ()
+  if fuel = 0 then ()
+  else if Seq.length worklist = 0 then ()
   else
+    let fuel' : nat = fuel - 1 in
     let obj = Seq.index worklist 0 in
     let rest = Seq.slice worklist 1 (Seq.length worklist) in
     if Seq.mem obj visited || not (Seq.mem obj (minor_objects ms))
     then
-      minor_reachable_aux_subset ms rest visited (fuel - 1) x
+      minor_reachable_aux_subset ms rest visited fuel' x
     else begin
       let succs = minor_successors ms obj in
       let new_worklist = Seq.append rest succs in
@@ -161,19 +177,18 @@ let rec minor_reachable_aux_subset
       // Establish: forall v. mem v new_visited ==> mem v (minor_objects ms)
       Seq.lemma_mem_append (Seq.create 1 obj) visited;
       Seq.seq_mem_k #U64.t (Seq.create 1 obj) 0;
-      minor_reachable_aux_subset ms new_worklist new_visited (fuel - 1) x
+      minor_reachable_aux_subset ms new_worklist new_visited fuel' x
     end
 
 #pop-options
 
 let minor_reachable_subset (ms: minor_state) (roots: seq U64.t)
-  : Lemma (ensures forall x. Seq.mem x (minor_reachable ms roots) ==>
-                             Seq.mem x (minor_objects ms))
   =
   let aux (x: U64.t)
     : Lemma (requires Seq.mem x (minor_reachable ms roots))
             (ensures Seq.mem x (minor_objects ms))
-    = minor_reachable_aux_subset ms roots Seq.empty (minor_reachable_fuel ms roots) x
+    = minor_reachable_aux_subset ms (resolve_roots ms roots) Seq.empty
+        (minor_reachable_fuel ms roots) x
   in
   Classical.forall_intro (Classical.move_requires aux)
 
@@ -182,7 +197,7 @@ let minor_reachable_subset (ms: minor_state) (roots: seq U64.t)
 /// ---------------------------------------------------------------------------
 
 /// Helper: anything in visited stays in the output (visited is monotone)
-#push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 
 let rec minor_reachable_aux_mem_visited
   (ms: minor_state)
@@ -195,27 +210,28 @@ let rec minor_reachable_aux_mem_visited
     (ensures Seq.mem x (minor_reachable_aux ms worklist visited fuel))
     (decreases fuel)
   =
-  if fuel = 0 || Seq.length worklist = 0
-  then ()
+  if fuel = 0 then ()
+  else if Seq.length worklist = 0 then ()
   else
+    let fuel' : nat = fuel - 1 in
     let obj = Seq.index worklist 0 in
     let rest = Seq.slice worklist 1 (Seq.length worklist) in
     if Seq.mem obj visited || not (Seq.mem obj (minor_objects ms))
     then
-      minor_reachable_aux_mem_visited ms rest visited (fuel - 1) x
+      minor_reachable_aux_mem_visited ms rest visited fuel' x
     else begin
       let succs = minor_successors ms obj in
       let new_worklist = Seq.append rest succs in
       let new_visited = Seq.cons obj visited in
       // x was in visited, so x is in new_visited (cons only adds)
       Seq.lemma_mem_append (Seq.create 1 obj) visited;
-      minor_reachable_aux_mem_visited ms new_worklist new_visited (fuel - 1) x
+      minor_reachable_aux_mem_visited ms new_worklist new_visited fuel' x
     end
 
 #pop-options
 
 /// Helper: if the head of the worklist is a valid minor object, it ends up in the output
-#push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
+#push-options "--z3rlimit 20 --fuel 1 --ifuel 1"
 
 let minor_reachable_aux_processes_head
   (ms: minor_state)
@@ -248,7 +264,7 @@ let minor_reachable_aux_processes_head
 
 /// Helper: position-based induction — if r is at position `pos` in the worklist,
 /// is a valid minor object, and fuel > pos, then r ends up in the output.
-#push-options "--z3rlimit 60 --fuel 1 --ifuel 1"
+#push-options "--z3rlimit 30 --fuel 1 --ifuel 1"
 
 let rec minor_reachable_aux_at_pos
   (ms: minor_state)
@@ -307,18 +323,26 @@ let rec seq_mem_to_index (#a: eqtype) (x: a) (s: seq a)
     1 + seq_mem_to_index x tl
   end
 
+/// A root's resolution sits at the same index in `resolve_roots`.
+let resolve_roots_index (ms: minor_state) (roots: seq U64.t) (i: nat)
+  : Lemma (requires i < Seq.length roots)
+          (ensures Seq.length (resolve_roots ms roots) == Seq.length roots /\
+                   Seq.index (resolve_roots ms roots) i ==
+                     resolve_minor ms (Seq.index roots i))
+  = ()
+
 let minor_reachable_roots (ms: minor_state) (roots: seq U64.t)
-  : Lemma (ensures forall r. Seq.mem r roots /\ Seq.mem r (minor_objects ms) ==>
-                             Seq.mem r (minor_reachable ms roots))
   =
   let fuel = minor_reachable_fuel ms roots in
+  let rroots = resolve_roots ms roots in
   let aux (r: U64.t)
-    : Lemma (requires Seq.mem r roots /\ Seq.mem r (minor_objects ms))
-            (ensures Seq.mem r (minor_reachable ms roots))
+    : Lemma (requires Seq.mem r roots /\ Seq.mem (resolve_minor ms r) (minor_objects ms))
+            (ensures Seq.mem (resolve_minor ms r) (minor_reachable ms roots))
     =
     let pos = seq_mem_to_index r roots in
+    resolve_roots_index ms roots pos;
     // pos < length roots, fuel >= length roots > pos
-    minor_reachable_aux_at_pos ms roots Seq.empty fuel r pos
+    minor_reachable_aux_at_pos ms rroots Seq.empty fuel (resolve_minor ms r) pos
   in
   Classical.forall_intro (Classical.move_requires aux)
 
@@ -349,10 +373,68 @@ let rec collect_minor_successors_length
 
 /// Length of minor_successors bounded by wosize
 let minor_successors_length (ms: minor_state) (obj: U64.t)
-  : Lemma (ensures Seq.length (minor_successors ms obj) <= minor_wosize ms obj)
-  = collect_minor_successors_length ms obj 0 (minor_wosize ms obj)
+  = collect_minor_successors_length ms obj 0 (minor_scan_wosize ms obj)
 
 /// Characterization of collect_minor_successors
+///
+/// The base and step cases are proved as separate lemmas: query splitting now
+/// checks the recursive lemma's postcondition as a single goal carrying both
+/// branches' contexts, which times out.
+
+/// Peel the first index off a bounded existential.  Proved in an empty context
+/// so the step lemma below only has to do propositional reasoning.
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+private let exists_peel (idx wosize: nat) (p: nat -> prop)
+  : Lemma (requires idx < wosize)
+          (ensures (exists (i: nat). idx <= i /\ i < wosize /\ p i) <==>
+                   (p idx \/ (exists (i: nat). idx + 1 <= i /\ i < wosize /\ p i)))
+  = ()
+#pop-options
+
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
+private let collect_char_base
+  (ms: minor_state)
+  (obj: U64.t)
+  (idx: nat)
+  (wosize: nat)
+  (y: U64.t)
+  : Lemma
+    (requires idx >= wosize)
+    (ensures Seq.mem y (collect_minor_successors ms obj idx wosize) <==>
+                    (exists (i:nat). idx <= i /\ i < wosize /\
+                                     resolve_minor ms (to_minor_offset (minor_read_field ms obj i)) == y /\
+                                     is_minor_addr y /\
+                                     Seq.mem y (minor_objects ms)))
+  = assert (collect_minor_successors ms obj idx wosize == Seq.empty)
+
+private let collect_char_step
+  (ms: minor_state)
+  (obj: U64.t)
+  (idx: nat)
+  (wosize: nat)
+  (y: U64.t)
+  : Lemma
+    (requires idx < wosize /\
+              (Seq.mem y (collect_minor_successors ms obj (idx + 1) wosize) <==>
+                    (exists (i:nat). idx + 1 <= i /\ i < wosize /\
+                                     resolve_minor ms (to_minor_offset (minor_read_field ms obj i)) == y /\
+                                     is_minor_addr y /\
+                                     Seq.mem y (minor_objects ms))))
+    (ensures Seq.mem y (collect_minor_successors ms obj idx wosize) <==>
+                    (exists (i:nat). idx <= i /\ i < wosize /\
+                                     resolve_minor ms (to_minor_offset (minor_read_field ms obj i)) == y /\
+                                     is_minor_addr y /\
+                                     Seq.mem y (minor_objects ms)))
+  = let field_val = resolve_minor ms (to_minor_offset (minor_read_field ms obj idx)) in
+    let rest = collect_minor_successors ms obj (idx + 1) wosize in
+    exists_peel idx wosize
+      (fun (i: nat) -> resolve_minor ms (to_minor_offset (minor_read_field ms obj i)) == y /\
+                       is_minor_addr y /\ Seq.mem y (minor_objects ms));
+    if is_minor_addr field_val && Seq.mem field_val (minor_objects ms)
+    then Seq.mem_cons field_val rest
+    else ()
+#pop-options
+
 #push-options "--fuel 1 --ifuel 1 --z3rlimit 20"
 private let rec collect_minor_successors_char
   (ms: minor_state)
@@ -363,28 +445,19 @@ private let rec collect_minor_successors_char
   : Lemma
     (ensures Seq.mem y (collect_minor_successors ms obj idx wosize) <==>
                     (exists (i:nat). idx <= i /\ i < wosize /\
-                                     to_minor_offset (minor_read_field ms obj i) == y /\
+                                     resolve_minor ms (to_minor_offset (minor_read_field ms obj i)) == y /\
                                      is_minor_addr y /\
                                      Seq.mem y (minor_objects ms)))
     (decreases (if idx < wosize then wosize - idx else 0))
   =
-  if idx >= wosize then ()
+  if idx >= wosize then collect_char_base ms obj idx wosize y
   else begin
-    let field_val = to_minor_offset (minor_read_field ms obj idx) in
-    let rest = collect_minor_successors ms obj (idx + 1) wosize in
     collect_minor_successors_char ms obj (idx + 1) wosize y;
-    if is_minor_addr field_val && Seq.mem field_val (minor_objects ms)
-    then Seq.mem_cons field_val rest
-    else ()
+    collect_char_step ms obj idx wosize y
   end
 #pop-options
 
 let minor_successors_char (ms: minor_state) (x y: U64.t)
-  : Lemma (ensures Seq.mem y (minor_successors ms x) <==>
-                    (exists (i:nat). i < minor_wosize ms x /\
-                                     to_minor_offset (minor_read_field ms x i) == y /\
-                                     is_minor_addr y /\
-                                     Seq.mem y (minor_objects ms)))
   = collect_minor_successors_char ms x 0 (minor_wosize ms x) y
 
 /// For objects in minor_objects, successors length < minor_heap_size
@@ -432,7 +505,7 @@ let rec count_not_mem_positive (objects: seq U64.t) (x: U64.t) (visited: seq U64
   end
 
 /// Adding a fresh element to visited decreases count by at least 1
-#push-options "--z3rlimit 40 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 20 --fuel 2 --ifuel 1"
 
 let rec count_not_mem_cons_mem (objects: seq U64.t) (x: U64.t) (visited: seq U64.t)
   : Lemma
@@ -479,7 +552,7 @@ and count_not_mem_monotone (objects: seq U64.t) (x: U64.t) (visited: seq U64.t)
 /// The BFS result is closed under successors for any object x that appears
 /// in the output but NOT in the initial visited set.
 /// Key invariant: fuel >= |worklist| + count_not_mem(minor_objects, visited) * minor_heap_size
-#push-options "--z3rlimit 150 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 75 --fuel 2 --ifuel 1"
 
 let rec minor_reachable_aux_closed_aux
   (ms: minor_state)
@@ -501,26 +574,25 @@ let rec minor_reachable_aux_closed_aux
     (ensures Seq.mem y (minor_reachable_aux ms worklist visited fuel))
     (decreases fuel)
   =
-  if fuel = 0 || Seq.length worklist = 0
-  then
-    // Base case: output = visited, x ∈ visited contradicts ¬(mem x visited).
-    // So precondition is false and this is vacuously true.
-    ()
+  // Base case: output = visited, x ∈ visited contradicts ¬(mem x visited).
+  // So precondition is false and this is vacuously true.
+  if fuel = 0 then ()
+  else if Seq.length worklist = 0 then ()
   else begin
+    let fuel' : nat = fuel - 1 in
     let obj = Seq.index worklist 0 in
     let rest = Seq.slice worklist 1 (Seq.length worklist) in
     if Seq.mem obj visited || not (Seq.mem obj (minor_objects ms))
     then begin
       // Skip case: result = minor_reachable_aux ms rest visited (fuel - 1)
       // count unchanged, |rest| = |wl| - 1, fuel - 1 >= |rest| + count * mhs
-      minor_reachable_aux_closed_aux ms rest visited (fuel - 1) x y
+      minor_reachable_aux_closed_aux ms rest visited fuel' x y
     end
     else begin
       // Process case: obj ∉ visited, obj ∈ minor_objects
       let succs = minor_successors ms obj in
       let new_worklist = Seq.append rest succs in
       let new_visited = Seq.cons obj visited in
-      let fuel' : nat = fuel - 1 in
       // Establish all new_visited ⊆ minor_objects
       Seq.mem_cons obj visited;
       // Arithmetic for fuel condition:
@@ -573,12 +645,9 @@ let rec minor_reachable_aux_closed_aux
 #pop-options
 
 /// Top-level closure lemma
-#push-options "--z3rlimit 80 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 40 --fuel 2 --ifuel 1"
 
 let minor_reachable_closed (ms: minor_state) (roots: seq U64.t) (x y: U64.t)
-  : Lemma (requires Seq.mem x (minor_reachable ms roots) /\
-                    Seq.mem y (minor_successors ms x))
-          (ensures Seq.mem y (minor_reachable ms roots))
   =
   minor_successors_valid ms x y;
   // Initial: visited = empty, so not (mem x empty) is trivially true.
@@ -586,7 +655,7 @@ let minor_reachable_closed (ms: minor_state) (roots: seq U64.t) (x y: U64.t)
   //   count_not_mem(minor_objects, empty) <= n (by count_not_mem_bound)
   //   So fuel >= |roots| + (n+1)*mhs >= |roots| + n*mhs >= |roots| + count*mhs
   count_not_mem_bound (minor_objects ms) (Seq.empty #U64.t);
-  minor_reachable_aux_closed_aux ms roots Seq.empty
+  minor_reachable_aux_closed_aux ms (resolve_roots ms roots) Seq.empty
     (minor_reachable_fuel ms roots) x y
 
 #pop-options
@@ -597,7 +666,7 @@ let minor_reachable_closed (ms: minor_state) (roots: seq U64.t) (x y: U64.t)
 
 /// Helper: if a predicate holds for all visited and worklist members,
 /// and is closed under successors, then it holds for all BFS output.
-#push-options "--z3rlimit 80 --fuel 2 --ifuel 1"
+#push-options "--z3rlimit 40 --fuel 2 --ifuel 1"
 
 let rec minor_reachable_aux_ind
   (ms: minor_state)
@@ -615,9 +684,10 @@ let rec minor_reachable_aux_ind
     (ensures p x)
     (decreases fuel)
   =
-  if fuel = 0 || Seq.length worklist = 0
-  then ()
+  if fuel = 0 then ()
+  else if Seq.length worklist = 0 then ()
   else begin
+    let fuel' : nat = fuel - 1 in
     let obj = Seq.index worklist 0 in
     let rest = Seq.slice worklist 1 (Seq.length worklist) in
     assert (forall (i:nat). i < Seq.length rest ==>
@@ -634,7 +704,7 @@ let rec minor_reachable_aux_ind
           assert (Seq.mem w worklist)
       in
       Classical.forall_intro (Classical.move_requires aux_rest);
-      minor_reachable_aux_ind ms rest visited (fuel - 1) p x
+      minor_reachable_aux_ind ms rest visited fuel' p x
     end
     else begin
       let succs = minor_successors ms obj in
@@ -662,17 +732,22 @@ let rec minor_reachable_aux_ind
         = ()
       in
       Classical.forall_intro (Classical.move_requires aux_nw);
-      minor_reachable_aux_ind ms new_worklist new_visited (fuel - 1) p x
+      minor_reachable_aux_ind ms new_worklist new_visited fuel' p x
     end
   end
 
 #pop-options
 
 let minor_reachable_ind (ms: minor_state) (roots: seq U64.t) (p: U64.t -> prop) (x: U64.t)
-  : Lemma (requires
-             Seq.mem x (minor_reachable ms roots) /\
-             (forall r. Seq.mem r roots /\ Seq.mem r (minor_objects ms) ==> p r) /\
-             (forall a b. p a /\ Seq.mem b (minor_successors ms a) ==> p b))
-          (ensures p x)
   =
-  minor_reachable_aux_ind ms roots Seq.empty (minor_reachable_fuel ms roots) p x
+  let rroots = resolve_roots ms roots in
+  let aux_w (w: U64.t)
+    : Lemma (requires Seq.mem w rroots /\ Seq.mem w (minor_objects ms))
+            (ensures p w)
+    = let i = seq_mem_to_index w rroots in
+      resolve_roots_index ms roots i;
+      Seq.lemma_index_is_nth roots i;
+      assert (Seq.mem (Seq.index roots i) roots)
+  in
+  Classical.forall_intro (Classical.move_requires aux_w);
+  minor_reachable_aux_ind ms rroots Seq.empty (minor_reachable_fuel ms roots) p x

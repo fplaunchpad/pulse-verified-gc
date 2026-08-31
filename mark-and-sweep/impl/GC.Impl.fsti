@@ -39,7 +39,6 @@ let gc_precondition_with_roots
   SpecSweep.fp_in_heap fp s /\
   SpecMark.no_black_objects s /\
   SpecMark.no_pointer_to_blue s /\
-  SpecFields.no_scan_invariant s /\
   (forall (x: GC.Spec.Base.obj_addr). Seq.mem x (SpecFields.objects GC.Spec.Base.zero_addr s) /\
     (GC.Spec.Object.is_gray x s \/ GC.Spec.Object.is_black x s) ==> Seq.mem x roots) /\
   (let graph = SpecHeapModel.create_graph s in
@@ -60,9 +59,11 @@ fn collect_with_roots
   returns final_fp: U64.t
   ensures exists* s2 st2. is_heap heap s2 ** is_gray_stack st st2 **
           pure (SpecGCPost.gc_postcondition s2 /\
+                SpecFields.blue_fields_non_infix s2 /\
                 SpecGCPost.full_gc_correctness 's s2 roots /\
                 SpecGCPost.major_gc_live_subgraph_isomorphism 's s2 roots /\
-                SpecGCPost.major_gc_unreachable_final_blue 's s2 roots)
+                SpecGCPost.major_gc_unreachable_final_blue 's s2 roots /\
+                SpecGCPost.gc_coalesce_source 's s2 roots fp final_fp)
 
 /// Main garbage collection entry point
 /// 1. Mark: bounded-stack mark with overflow handling
@@ -74,6 +75,8 @@ fn collect (heap: heap_t) (st: gray_stack) (fp: U64.t)
   returns final_fp: U64.t
   ensures exists* s2 st2. is_heap heap s2 ** is_gray_stack st st2 **
           pure (SpecGCPost.gc_postcondition s2 /\
+                SpecFields.blue_fields_non_infix s2 /\
                 SpecGCPost.full_gc_correctness 's s2 'st /\
                 SpecGCPost.major_gc_live_subgraph_isomorphism 's s2 'st /\
-                SpecGCPost.major_gc_unreachable_final_blue 's s2 'st)
+                SpecGCPost.major_gc_unreachable_final_blue 's s2 'st /\
+                SpecGCPost.gc_coalesce_source 's s2 'st fp final_fp)

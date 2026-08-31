@@ -37,36 +37,14 @@ open GC.Gen.MinorCollectForwarding.Helpers
 module MCFE = GC.Gen.MinorCollectForwarding.Edges
 open GC.Gen.MinorCollectForwarding.Edges
 
-#push-options "--z3rlimit 80 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 40 --fuel 0 --ifuel 1"
 let combined_reachable_edge_forwarded_normal
   (minor: minor_state) (major: heap) (fp: U64.t)
   (roots slots: seq U64.t) (n: nat)
   (u v: CG.combined_vertex)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      RBridge.major_field_zero_no_minor minor major /\
-      UpdatePtrs.ref_table_covers_minor_ptrs major slots n /\
-      remembered_targets_in_roots major roots slots n /\
-      Mark.no_pointer_to_blue major /\
-      RBridge.minor_no_pointer_to_blue minor major /\
-      RBridge.roots_valid_nonblue roots major /\
-      CheneyBFS.cheney_no_oom minor major fp roots /\
-      (let cg = CG.build_combined_graph minor major in
-       let combined_roots = CG.classify_roots roots in
-       CG.combined_reachable cg combined_roots u /\
-       CG.combined_reachable cg combined_roots v /\
-       CG.mem_ce (u, v) cg) /\
-      normal_edge_forward_ready minor major fp roots u v)
-    (ensures (
-      let prom = cheney_promote minor major fp roots in
-      let res = cheney_collect_spec minor major fp roots in
-      mem_graph_edge_at (HeapModel.create_graph res.mc_major)
-        (CG.fwd_morphism prom.fwd_map u)
-        (CG.fwd_morphism prom.fwd_map v)))
   =
     let cg = CG.build_combined_graph minor major in
-    let combined_roots = CG.classify_roots roots in
+    let combined_roots = CG.classify_roots minor roots in
     let prom = cheney_promote minor major fp roots in
     GenInv.collection_heap_shape_elim minor major fp;
     GenInv.major_heap_shape_elim major fp;
@@ -140,7 +118,7 @@ let combined_reachable_edge_forwarded_normal
       promoted_minor_minor_edge_forwarded minor major fp roots src dst i
 #pop-options
 
-#push-options "--z3rlimit 40 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
 private let fwd_disjoint_reachable_major_at
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
   (x y: U64.t)
@@ -151,7 +129,7 @@ private let fwd_disjoint_reachable_major_at
       RBridge.minor_no_pointer_to_blue minor major /\
       RBridge.roots_valid_nonblue roots major /\
       (let cg = CG.build_combined_graph minor major in
-       let combined_roots = CG.classify_roots roots in
+       let combined_roots = CG.classify_roots minor roots in
        let prom = cheney_promote minor major fp roots in
        CG.combined_reachable cg combined_roots (CG.MinorV x) /\
        CG.combined_reachable cg combined_roots (CG.MajorV y) /\
@@ -164,7 +142,7 @@ private let fwd_disjoint_reachable_major_at
   =
     let prom = cheney_promote minor major fp roots in
     let cg = CG.build_combined_graph minor major in
-    let combined_roots = CG.classify_roots roots in
+    let combined_roots = CG.classify_roots minor roots in
     GenInv.collection_heap_shape_elim minor major fp;
     GenInv.major_heap_shape_elim major fp;
     GenInv.minor_heap_shape_elim minor;
@@ -183,18 +161,11 @@ private let fwd_disjoint_reachable_major_at
 
 let fwd_disjoint_reachable_major_intro
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      Mark.no_pointer_to_blue major /\
-      RBridge.minor_no_pointer_to_blue minor major /\
-      RBridge.roots_valid_nonblue roots major)
-    (ensures fwd_disjoint_reachable_major minor major fp roots)
   =
     let aux (x y: U64.t) : Lemma
       (requires
         (let cg = CG.build_combined_graph minor major in
-         let combined_roots = CG.classify_roots roots in
+         let combined_roots = CG.classify_roots minor roots in
          let prom = cheney_promote minor major fp roots in
          CG.combined_reachable cg combined_roots (CG.MinorV x) /\
          CG.combined_reachable cg combined_roots (CG.MajorV y) /\
@@ -210,62 +181,25 @@ let fwd_disjoint_reachable_major_intro
     Classical.forall_intro_2 (Classical.move_requires_2 aux)
 #pop-options
 
-#push-options "--z3rlimit 40 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
 let minor_source_edge_not_no_scan
   (minor: minor_state) (major: heap) (fp: U64.t)
   (src: U64.t) (dst: CG.combined_vertex)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      CG.mem_ce (CG.MinorV src, dst) (CG.build_combined_graph minor major))
-    (ensures minor_tag minor src < 251)
   =
-    GenInv.collection_heap_shape_elim minor major fp;
-    GenInv.minor_heap_shape_elim minor;
-    assert (minor_no_scan_invariant minor);
     CG.minor_edge_elim minor major src dst;
-    assert (Seq.mem src (minor_objects minor));
+    // `minor_object_edges` enumerates `minor_scan_wosize` fields, which is 0 on
+    // a no-scan object, so a no-scan source emits no edge at all.  This used to
+    // be a contradiction argument against `minor_no_scan_invariant`.
     let i = FStar.IndefiniteDescription.indefinite_description_ghost nat
-      (fun i -> i < minor_wosize minor src /\
+      (fun i -> i < minor_scan_wosize minor src /\
         CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst) in
-    assert (i < minor_wosize minor src);
-    assert (CG.classify_minor_field minor major (minor_read_field minor src i) == Some dst);
-    if minor_tag minor src >= 251 then begin
-      let field = minor_read_field minor src i in
-      match dst with
-      | CG.MinorV d ->
-        CG.classify_minor_field_inv_minor minor major field d;
-        assert (to_minor_offset field == d);
-        assert (Seq.mem d (minor_objects minor));
-        minor_objects_valid minor d;
-        assert (is_minor_pointer d);
-        assert (is_minor_pointer (to_minor_offset field));
-        assert (~(is_minor_pointer (to_minor_offset field)));
-        assert False
-      | CG.MajorV d ->
-        CG.classify_minor_field_inv_major minor major field d;
-        assert (field == d);
-        assert (Seq.mem (d <: obj_addr) (objects zero_addr major));
-        objects_addresses_gt_start zero_addr major (d <: obj_addr);
-        assert (U64.v d > U64.v zero_addr);
-        assert (U64.v d >= U64.v zero_addr + U64.v mword);
-        assert (is_pointer_field field);
-        assert (~(is_pointer_field field));
-        assert False
-    end
+    assert (i < minor_scan_wosize minor src);
+    minor_scan_wosize_cases minor src
 #pop-options
 
-#push-options "--z3rlimit 30 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
 let combined_reachable_normal_injective
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      Mark.no_pointer_to_blue major /\
-      RBridge.minor_no_pointer_to_blue minor major /\
-      RBridge.roots_valid_nonblue roots major /\
-      fwd_disjoint_reachable_major minor major fp roots)
-    (ensures combined_reachable_normal_injective_prop minor major fp roots)
   =
     GenInv.collection_heap_shape_elim minor major fp;
     GenInv.major_heap_shape_elim major fp;
@@ -276,7 +210,7 @@ let combined_reachable_normal_injective
     let aux (u v: CG.combined_vertex) : Lemma
       (requires
         (let cg = CG.build_combined_graph minor major in
-         let combined_roots = CG.classify_roots roots in
+         let combined_roots = CG.classify_roots minor roots in
          CG.combined_reachable cg combined_roots u /\
          CG.combined_reachable cg combined_roots v /\
          (match u with
@@ -295,7 +229,7 @@ let combined_reachable_normal_injective
       (ensures u == v)
     =
       let cg = CG.build_combined_graph minor major in
-      let combined_roots = CG.classify_roots roots in
+      let combined_roots = CG.classify_roots minor roots in
       match u, v with
       | CG.MajorV x, CG.MajorV y -> ()
       | CG.MinorV x, CG.MinorV y ->
@@ -326,7 +260,7 @@ let combined_reachable_normal_injective
     Classical.forall_intro_2 (Classical.move_requires_2 aux)
 #pop-options
 
-#push-options "--z3rlimit 30 --fuel 0 --ifuel 1"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
 private let normal_minor_source_ready_intro
   (minor: minor_state) (major: heap) (fp: U64.t)
   (roots: seq U64.t) (src: U64.t) (dst: CG.combined_vertex)
@@ -358,8 +292,8 @@ private let normal_minor_source_ready_intro
     GenInv.major_heap_shape_elim major fp;
     GenInv.minor_heap_shape_elim minor;
     assert (well_formed_heap major);
-    assert (AllocLemmas.fl_valid major fp (heap_size / U64.v mword));
-    assert (AllocLemmas.fl_chain_terminates major fp (heap_size / U64.v mword));
+    assert (AllocLemmas.fl_valid major fp heap_words);
+    assert (AllocLemmas.fl_chain_terminates major fp heap_words);
     assert (chain_objects_blue major fp);
     assert (minor_wf minor);
     assert (minor_infix_wf minor);
@@ -372,7 +306,7 @@ private let normal_minor_source_ready_intro
     assert (Seq.mem (fwd_src <: obj_addr) (objects zero_addr prom.major_final));
     assert (is_blue (fwd_src <: obj_addr) prom.major_final = false);
     minor_source_edge_not_no_scan minor major fp src dst;
-    CheneyFields.cheney_promote_fwd_target_not_no_scan_of_minor_tag_lt
+    CheneyFields.cheney_promote_fwd_target_no_scan_iff_minor_tag
       minor major fp roots src;
     Cheney.cheney_promote_preserves_wfh_part1 minor major fp roots;
     assert (is_no_scan (fwd_src <: obj_addr) prom.major_final = false);
@@ -403,16 +337,6 @@ let normal_edge_forward_ready_intro
   (minor: minor_state) (major: heap) (fp: U64.t)
   (roots: seq U64.t)
   (u v: CG.combined_vertex)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      Mark.no_pointer_to_blue major /\
-      RBridge.minor_no_pointer_to_blue minor major /\
-      RBridge.roots_valid_nonblue roots major /\
-      normal_src_reachable minor major fp roots u /\
-      normal_src_reachable minor major fp roots v /\
-      CG.mem_ce (u, v) (CG.build_combined_graph minor major))
-    (ensures normal_edge_forward_ready minor major fp roots u v)
   =
     let prom = cheney_promote minor major fp roots in
     GenInv.collection_heap_shape_elim minor major fp;
@@ -469,21 +393,10 @@ let normal_edge_forward_ready_intro
       assert (is_minor_pointer dst)
 #pop-options
 
-#push-options "--z3rlimit 30 --fuel 0 --ifuel 1 --split_queries always"
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 1"
 let normal_src_images_injective
   (minor: minor_state) (major: heap) (fp: U64.t)
   (roots: seq U64.t) (u v: CG.combined_vertex)
-  : Lemma
-    (requires
-      GenInv.collection_heap_shape minor major fp /\
-      Mark.no_pointer_to_blue major /\
-      RBridge.minor_no_pointer_to_blue minor major /\
-      RBridge.roots_valid_nonblue roots major /\
-      normal_src_reachable minor major fp roots u /\
-      normal_src_reachable minor major fp roots v /\
-      (let prom = cheney_promote minor major fp roots in
-       CG.fwd_morphism prom.fwd_map u == CG.fwd_morphism prom.fwd_map v))
-    (ensures u == v)
   =
     let prom = cheney_promote minor major fp roots in
     GenInv.collection_heap_shape_elim minor major fp;

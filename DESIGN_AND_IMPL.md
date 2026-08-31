@@ -284,10 +284,140 @@ let well_formed_heap (g: heap) : prop =
 The four parts say:
 
 1. Every enumerated object fits in the heap.
-2. Every pointer field of every object points to another enumerated object.
+2. Every pointer field of every object points *into* another enumerated object:
+   the target's enclosing block (`resolve_object`) is enumerated.
 3. Infix objects are well-formed relative to their parent objects.
 4. The enumerated object list excludes infix sub-objects as independent roots of
    the object traversal.
+
+#### Interior (infix) pointers in major fields
+
+Parts 2 and 3 are stated on the **resolved** target, not on the raw field value:
+
+```fstar
+let well_formed_heap_part2 (g: heap) : prop =
+  forall (src dst: obj_addr).
+    Seq.mem src (objects zero_addr g) /\
+    exists_field_pointing_to_unchecked g src (wosize_of_object src g) dst ==>
+    Seq.mem (resolve_object dst g) (objects zero_addr g)
+```
+
+`resolve_object` is the identity on an ordinary pointer and maps an interior
+pointer to the head of the closure that contains it. So part 2 says *the
+enclosing block of every field target is an enumerated object*, which is exactly
+OCaml's rule, and part 3 (`infix_wf`) is the non-vacuous side condition that
+makes the mapping well defined: an infix header carries the offset back to its
+parent, that parent is itself an enumerated object, and it has `Closure_tag`.
+
+This matters because **mutually recursive OCaml closures are represented with
+interior pointers**: a single allocated block holds several code pointers, and
+the fields that refer to the second and later functions point *into* the middle
+of that block, at a header whose tag is `Infix_tag = 249`. An earlier version of
+this development stated part 2 on the raw field value, which — combined with
+part 4 (no enumerated object is itself infix) — made `well_formed_heap`
+*unsatisfiable* for any heap containing such a closure. The correctness theorem
+was sound but empty on that class of heaps.
+
+Two consequences of the resolved formulation:
+
+- `well_formed_heap_part3` is now load-bearing. The parent-closure machinery it
+  guards (`parent_closure_addr_nat`, `infix_wf_elim`, `infix_wf_intro`,
+  `infix_addr_wf`) does real work, and `resolve_object` is *not* the identity in
+  general.
+- The graph model resolves too. `GC.Spec.HeapGraph.get_pointer_fields_aux`
+  emits `resolve_field g v` rather than `v`, so an edge from a source object
+  always lands on an enumerated vertex, and `create_graph` is a graph over whole
+  objects even when the heap uses interior pointers.
+- The mark implementation resolves at the point of darkening.
+  `check_and_darken_bounded` reads the target's header and, when the tag is
+  `infix_tag`, darkens `v - wosize * 8` (the parent closure) instead. This is a
+  real change in the extracted C, not a proof-only artefact.
+
+##### Residual restriction: free-list cells only
+
+Both collectors handle interior pointers out of *live* objects in full
+generality.  The generational (Cheney) collector retains one narrow residual
+restriction: a **blue** (free-list) cell may not hold an interior pointer.  This
+is expressed by an explicit, opaque, **optional** predicate
+
+```fstar
+let blue_fields_non_infix (g: heap) : prop =
+  forall (src dst: obj_addr).
+    Seq.mem src (objects zero_addr g) /\ GC.Spec.Object.is_blue src g /\
+    exists_field_pointing_to_unchecked g src (wosize_of_object src g) dst ==>
+    ~(is_infix dst g)
+```
+
+which appears as a conjunct of `GC.Gen.HeapInvariant.major_heap_shape` and
+nowhere in `well_formed_heap`.  It is not a mutator-visible constraint: free-list
+cells are owned by the allocator, their fields hold link words and stale data,
+and no OCaml program can arrange for one to point into the interior of another.
+It sits alongside the pre-existing `minor_fields_no_infix_targets` and
+`major_minor_fields_no_infix_targets` clauses, which impose the same restriction
+on *nursery*-directed pointers.
+
+It is preserved across *minor* collection for free: the Cheney machinery already
+proves raw `well_formed_heap_part2` for blue objects, which
+`blue_fields_closed_implies_blue_fields_non_infix` converts.
+
+Across a *major* collection it is not free, and it is worth being precise about
+why it holds, because it would be false if the collector simply threaded dead
+blocks onto the free list.  A dying object may hold interior pointers, and sweep
+alone (`GC.Spec.Sweep.sweep_object`) rewrites only its link word -- the rest of
+the corpse survives untouched.  What makes the clause true is the **coalescing
+pass**: `GC.Spec.Coalesce.flush_blue` writes the blue header, sets the free-list
+link, and then calls `Alloc.zero_fields` over every remaining field of the merged
+block (extracted as `flush_blue_impl` / `zero_fields_loop`).  A blue cell
+therefore has exactly one pointer-shaped field, its link, which is an object
+address and never an interior one.
+
+That is proved by `GC.Spec.Coalesce.coalesce_blue_fields_non_infix`, lifted by
+`GC.Spec.Correctness.gc_blue_fields_non_infix_gen`, and carried through the
+postconditions of `GC.Impl.collect_with_roots` and `GC.Gen.Impl.gen_gc`.  The
+invariant is closed: what `major_heap_shape` demands on entry, `gen_gc`
+re-establishes on exit, on both the normal and the out-of-memory path.  Note it is kept out of `gc_postcondition` on purpose --
+that predicate is also asserted of the post-sweep, pre-coalesce heap, which does
+not satisfy the clause.
+
+Infix addresses survive as **roots** for both collectors, and inside Cheney's
+promotion machinery, which is what `find_infix_parents` and
+`synthesize_infix_forwarding` operate on in the extracted C.
+
+Getting here removed two obstructions.  The first was the graph model:
+`GC.Gen.CombinedGraph.classify_major_field` now resolves, returning
+`MajorV (resolve_object v major)` whenever the resolved value is enumerated, so
+an interior-pointer edge is no longer silently dropped;
+`GC.Gen.ReachabilityBridge.major_edge_points_to` exposes the raw field value
+alongside `dst == resolve_object raw major`.
+
+The second was the allocator.  `GC.Gen.Promote.blue_fields_closed` is stated on
+the *raw* field value of a free-list cell and is derived from part 2 by
+`wfh_part2_implies_blue_fields_closed`, which needs a non-infix hypothesis for
+exactly that step — but only over blue sources, which is what
+`blue_fields_non_infix` supplies.  Deliberately keeping `blue_fields_closed`
+raw is what makes this work: restating it in resolved form instead breaks
+`promote_object_preserves_bfc_close`, which would then have to transport a
+resolution across `copy_fields` on a block just carved off the free list.
+`docs/infix-support-plan.md` §5 records the measurement.
+
+##### End-to-end test
+
+`generational/ocaml-integration/tests/infix_closures.ml` exercises all of this
+against real OCaml code rather than a hand-built heap. It allocates mutually
+recursive closures, confirms with `Obj` that a heap field genuinely holds an
+interior pointer, checks every clause of `infix_addr_conds` numerically
+(including `parent == h - wosize*8`), forces real collections by allocating,
+and then verifies that a block reachable only through an interior pointer
+survives mark and sweep with an unchanged heap shape. It runs as part of
+`make -C generational/ocaml-integration test`, under both the verified runtime
+and stock OCaml. Rebuilt against the pre-fix `check_and_darken_bounded` it fails
+and then segfaults, so it is a genuine regression test and not a smoke test.
+
+The heaps it builds hold interior pointers in major fields.  Since
+`no_infix_field_targets` was narrowed to `blue_fields_non_infix`, they are inside
+`GC.Gen.HeapInvariant.major_heap_shape` and the composed `gen_gc` theorem applies
+to them: the generational reachability argument, not just the mark-and-sweep
+proofs, covers what the test stresses.
 
 The same module also states the no-scan invariant:
 
@@ -1096,6 +1226,70 @@ collapses back to the original non-moving story. For minor collection, the same
 statement allows minor addresses to disappear and be replaced by major
 addresses.
 
+### One isomorphism, end to end
+
+`gen_gc` runs a minor collection followed by a major one, and each phase proves
+its own isomorphism. For a while the top-level postcondition simply exposed
+both halves and left the caller to chain them:
+
+* minor collection, from the combined pre-collection graph into the *post-minor*
+  major heap, with `prom.fwd_map` as the morphism; and
+* major collection, from the *post-darkening* heap into the final one, with the
+  identity as the morphism.
+
+That is not a chain a caller can actually close, for three reasons.
+
+1. **Different vocabularies.** The minor half speaks
+   `result_post_reachable` / `result_post_edge` (`∃ root. reachable`, raw
+   `U64.t` addresses); the major half speaks `heap_reachable` / `heap_edge`
+   (membership in the DFS `reachable_set`, with `graph_wf`, `is_vertex_set` and
+   `subset_vertices` side conditions, over `obj_addr`).
+2. **A third heap in the middle.** Root darkening runs between the two phases,
+   so the heap the major collector starts from is not the heap the minor
+   collector produced.
+3. **A missing lemma.** Surjectivity of the composed morphism needs
+   reachability transferred *backwards*: reachable in the final heap implies
+   reachable in the post-minor heap. `major_gc_live_subgraph_isomorphism`'s
+   edge clause is guarded on **both** endpoints already being live, so the
+   obvious path induction is circular — the induction keeps meeting successors
+   that are not yet known to be live.
+
+All three are now handled inside the collector.
+
+* `major_gc_live_subgraph_isomorphism` gained a **successor clause**: live
+  objects have identical successor *lists* in the two heaps. That is strictly
+  stronger than the guarded edge clause and breaks the circularity. The fact was
+  already established inside `major_gc_live_subgraph_isomorphism_gen`'s proof
+  and simply discarded.
+* `GC.Impl.MarkBoundedRootLemmas` proves that root darkening preserves
+  `create_graph` — it only recolours headers — by induction over the darkening
+  prefix on top of `color_preserves_create_graph`.
+* `GC.Gen.MajorReachabilityTransfer` proves the generic graph lemma by
+  structural induction on the `reach` witness:
+
+  > two graphs that agree on the successor lists of a successor-closed vertex
+  > set have the same reachability and the same internal edges,
+
+  instantiates it at the major collection, and composes the halves.
+
+The result is a single conjunct in `gen_gc`'s postcondition:
+
+```fstar
+let end_to_end_isomorphism
+  (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
+  (final_major: heap) (final_roots: seq U64.t) : prop =
+  CG.reachable_subgraph_isomorphism
+    (MinorFwd.normal_src_reachable minor major fp roots)
+    (MCFH.result_post_reachable final_major final_roots)
+    (MinorFwd.normal_src_edge minor major fp roots)
+    (MCFH.result_post_edge final_major)
+    (cheney_promote minor major fp roots).fwd_map
+```
+
+The two intermediate isomorphisms are still exported, because they say things
+the composition cannot: the minor step says *where* each survivor went, and the
+major step says the survivors did not move again and are white.
+
 ## Generational GC
 
 The top-level generational implementation is
@@ -1152,7 +1346,6 @@ The precondition includes:
 - root-array length consistency;
 - a zeroed forwarding array of the expected size;
 - remembered slot soundness, coverage, distinctness, and root inclusion;
-- the `major_field_zero_no_minor` invariant used by the update code;
 - root validity and non-blue target facts.
 
 The postcondition states, among other facts:
@@ -1201,56 +1394,350 @@ fn gen_gc (gh: gen_heap_t)
   returns res: (U64.t & bool)
 ```
 
-Its precondition first describes the pre-minor heap, then describes the major
-collector state obtained by darkening the post-minor roots onto the supplied
-initial gray stack:
+Its precondition speaks only about the state the caller can observe on entry --
+the pre-minor heap, the nursery, and the arrays being passed in:
 
 ```fstar
-let result = CheneySpec.cheney_collect_spec minor_st 's 'fp 'rs in
 GenInv.collection_heap_shape minor_st 's 'fp /\
-Seq.length 'st <= stack_capacity st /\
-gen_gc_major_precondition minor_st 's 'fp 'rs 'st (stack_capacity st) /\
+MinorFwd.roots_valid_for_minor_collection minor_st 's 'rs /\
+gen_gc_stack_budget 'rs 'st (stack_capacity st) /\
 ...
 ```
 
-The key helper is part of the public interface:
+`gen_gc_stack_budget` is the whole of what the caller owes the major phase.  It
+mentions no heap at all:
+
+```fstar
+let gen_gc_stack_budget roots st cap =
+  Seq.length st == 0 /\
+  Seq.length roots <= cap /\
+  cap > 0
+```
+
+  * `Seq.length st == 0` — the gray stack starts empty.  It is collector scratch
+    space, not caller state, and both real clients (SPOT and the OCaml runtime
+    bridge) already passed an empty one.  Pinning it collapses two conjuncts of
+    `darken_precondition` (the stack is a subset of the roots; the stack has no
+    duplicates and points only to gray objects) to nothing.
+  * `Seq.length roots <= cap /\ cap > 0` — the sizing obligation, in the form a
+    caller can actually check.  Darkening pushes every root onto the gray stack,
+    so the stack must be able to hold them; `cap > 0` rules out the degenerate
+    zero-capacity stack.
+
+Both are decidable by inspection of the arguments being passed.  There is
+deliberately nothing else.
+
+### Out-of-memory is a runtime fact, not a proof obligation
+
+An intermediate version of this contract also required `cheney_no_oom` — "the
+nursery's live set fits in the major free list".  That was indefensible.
+`cheney_no_oom` is a statement about the outcome of the entire Cheney BFS; no
+caller can discharge it without simulating the collector, and `gen_gc` already
+reports promotion failure through the `ok` component of its result.  Demanding
+it up front made `gen_gc` un-callable in exactly the situation its own return
+type exists to describe.
+
+The fix is to consume the flag instead of the predicate.  `GC.Gen.Impl.Cheney`
+already proves `ok ==> cheney_no_oom` about its BFS loop; `minor_collect_full`
+now re-exports that, and `gen_gc` branches on it:
+
+```pulse
+  let ok = minor_collect_full gh roots nroots fwd_arr queue slots nslots;
+  ...
+  if ok {
+    darken_roots_bounded gh.major st roots nroots (stack_capacity st);
+    let final_fp = MajorGC.collect_with_roots gh.major st prepared_st fp_val;
+    ...
+  } else {
+    // hand back the post-minor heap untouched
+  }
+```
+
+Skipping the major phase on the out-of-memory path is not merely convenient, it
+is the only correct thing to do: when promotion fails, `rewrite_root` leaves the
+unforwarded minor roots as nursery addresses, so the rewritten root set no longer
+points into the major heap and mark-and-sweep has nothing meaningful to traverse.
+The extracted C gains a single `if (ok) { ... } else { ... }` around the major
+phase.  The OCaml bridge already treated `!ok` as fatal, so its behaviour is
+unchanged; it now simply aborts without having run an unsound collection first.
+
+Two postconditions moved under the `ok` guard as a result — `roots_match_stack`
+(half of `gen_gc_roots_post`) and `gen_gc_unreachable_final_blue_post`, since only
+the sweep makes unreachable objects blue.  The heap-shape postcondition did *not*
+need guarding: `major_heap_shape` records both `no_black_objects` and
+`no_gray_objects`, so the post-minor heap is white-or-blue everywhere and
+satisfies `gc_postcondition` on its own
+(`GC.Gen.MajorPrecondition.major_heap_shape_gc_postcondition`).
+
+### What failure means
+
+Reporting failure through a boolean is only honest if the boolean means
+something.  `gen_gc` therefore also carries a postcondition on the failure side:
+
+```fstar
+not ok ==> CheneyBFS.cheney_oom minor_st 's 'fp 'rs
+```
+
+`cheney_oom` is a *witness*, not a shrug.  Unfolded, it says: there is a state
+`cs` that this collection passes through, and an address the collector was about
+to forward there, whose promotion `promote_object` could not place because the
+free list of `cs.cs_major` had no block big enough.  Two ingredients make it
+meaningful:
+
+- **The object.** `promote_fails_at minor cs addr` requires `addr` to be an
+  allocated minor object of positive size that `cs` has not forwarded yet, and
+  `(promote_object minor cs.cs_major addr cs.cs_fp wz).new_addr == 0UL`.  For an
+  interior (infix) pointer it is the enclosing closure that did not fit, which is
+  what `cheney_forward_one` actually tries to promote; that is the second
+  disjunct of `promote_fails_for`.
+- **The point in the run.** `cheney_attempts minor cs final addr` ties `cs` to
+  this collection by the residual equation "finishing the collection from `cs`
+  yields `final`", and pins `addr` as the *next* address the collector forwards
+  there.  Its two disjuncts are the two loops that call `cheney_forward_one`:
+  the root loop, about to forward `roots[ridx]`, and the field loop, about to
+  forward field `fld` of the object being scanned.  Those residual equations are
+  exactly what the loops already carry as invariants, so the witness costs one
+  extra conjunct per loop and no new proof.
+
+Note that `cheney_oom` is not the literal negation of `cheney_no_oom`, and is not
+claimed to be.  `cheney_no_oom` is a property of the collection's *final*
+forwarding map; deriving its negation from a single failed promotion would need a
+monotonicity theorem about the first-fit free-list allocator — that an object the
+allocator once refused is never accepted later.  The witness above says something
+more direct, and more useful to a caller deciding what to do next: here is the
+object that did not fit, and here is where it did not fit.
+
+Both witness predicates (`cheney_oom_reaching`, `cheney_oom_fields`) are
+`opaque_to_smt` and come with intro/elim lemmas, because they are carried through
+four nested Pulse loop invariants where unfolding their existentials only slows
+Z3 down.  The field loop carries the smaller, local `cheney_oom_fields` — phrased
+in terms of the object being scanned — and converts it to the run-level witness
+once, on the way out, where the enclosing scan step's residual equation is in
+scope.  All of it is ghost: the extracted C is unchanged.
+
+### The invariant is inductive: `gen_gc` restores its own precondition
+
+`gen_gc` demands `GC.Gen.HeapInvariant.collection_heap_shape` of the heap it is
+handed.  For a long time it promised nothing of the heap it returned, which made
+that predicate an *assumption* rather than an invariant: a runtime driving a
+second collection had no way to satisfy the precondition again.  It is now a
+postcondition, and deliberately not behind a named wrapper — the `ensures`
+names the very predicate the `requires` names, so the two can be read against
+each other:
+
+```fstar
+  requires ... pure (
+    let minor_st : minor_state = { data = 'd; bump = 'b } in
+    GenInv.collection_heap_shape minor_st 's 'fp /\ ... )
+  ensures exists* d2 b2 s2 ... pure (
+    let minor_st_out : minor_state = { data = d2; bump = b2 } in
+    ...
+    GenInv.collection_heap_shape minor_st_out s2 (fst res) /\ ... )
+```
+
+The minor half is vacuous.  `minor_collect_full` finishes by calling
+`minor_heap_reset`, which clears the nursery *bytes* as well as the bump pointer,
+so the state it hands back is literally `GC.Gen.MinorHeap.minor_reset` — a fact
+the implementation always had and simply never stated.  With it,
+`collection_heap_shape_after_minor_reset` collapses the minor-side and
+cross-generation conjuncts and reduces the whole obligation to
+`major_heap_shape` of the major heap and free-list head.
+
+That is fifteen conjuncts, and it is where the work is.
+`GC.Gen.PostCollectionShape.major_gc_restores_major_heap_shape` proves them for
+`coalesce (sweep h_mark fp)` under nothing more than
+`GC.Spec.Correctness.mark_post`:
+
+| conjunct | supplied by |
+| --- | --- |
+| `well_formed_heap` | `GC.Spec.Coalesce.coalesce_preserves_wf` |
+| `fl_valid` | `GC.Spec.Coalesce.Descending.coalesce_fl_entry` |
+| `fl_chain_terminates` | `GC.Spec.Coalesce.Descending.coalesce_fl_entry` |
+| `fp_pointer_or_zero` | `GC.Spec.Coalesce.Shape.coalesce_fp_pointer_or_zero` |
+| `blue_link_fields_valid` | `GC.Spec.Coalesce.Shape.coalesce_blue_link_fields_valid` |
+| `heap_objects_dense` | `GC.Spec.Coalesce.Dense.coalesce_dense` |
+| `chain_objects_blue` | `GC.Spec.Coalesce.Shape.coalesce_chain_objects_blue` |
+| `objects` non-empty | `GC.Spec.Coalesce.Dense.coalesce_dense` |
+| `fp_valid` | `GC.Gen.FreeListShape`, from `fl_valid` |
+| `fp_in_heap` | `GC.Gen.FreeListShape`, from `fp_valid` |
+| `no_black_objects` | `GC.Spec.Coalesce.coalesce_all_white_or_blue` |
+| `no_gray_objects` | `GC.Spec.Coalesce.coalesce_all_white_or_blue` |
+| `no_pointer_to_blue` | `GC.Spec.Coalesce.Shape.coalesce_no_pointer_to_blue` |
+| `no_scan_invariant` | `GC.Spec.Coalesce.Shape.coalesce_no_scan_invariant` |
+| `blue_fields_non_infix` | `GC.Spec.Correctness.gc_blue_fields_non_infix_gen` |
+
+Two of these deserve comment.
+
+**The free list is earned, not inherited.**  Nothing about the *input* free list
+is required, which at first looks too good.  The reason is that the coalescer
+does not thread the sweep's list through at all: `coalesce` starts from a null
+head and rebuilds the list from scratch, pushing each merged block onto the front
+as the upward walk passes it.  Every link it writes therefore points back at a
+block the walk has already left behind, so the list is *descending*, and a
+descending list is trivially acyclic and bounded by the number of distinct
+8-aligned heap addresses.  `GC.Spec.FreeList.Descending` states that property and
+`GC.Spec.Coalesce.Descending` proves the coalescer maintains it, which discharges
+the allocator's two entry conditions outright.
+
+**Density needed a reformulation.**  `heap_objects_dense` — "the object walk
+tiles the heap, never stopping because a block overruns" — is the one conjunct
+that cannot transfer, because `heap_objects_dense_transfer` requires equal
+wosizes everywhere and merging a free run is precisely a change of wosize.
+Proving it directly founders on the fact that the pre- and post-coalesce walks
+do not visit the same addresses, so a pointwise correspondence does not exist.
+`GC.Spec.WalkEnd` removes the quantifier instead: `objects start g` is empty
+exactly when the walk has run out of room or the block at `start` overruns, so
+density is equivalent to the single scalar statement
+
+```fstar
+walk_end g zero_addr + 8 >= heap_size
+```
+
+where `walk_end` follows the same steps `objects` does and returns the address it
+stops at.  `GC.Spec.Coalesce.Dense` then runs the coalescing walk once more and
+shows the coalescer leaves that address alone — a merged block covers exactly the
+addresses its constituents covered, and a survivor keeps its header, so the last
+block still ends where it did.  The scalar invariant has the pleasant side effect
+of *supplying* the "objects empty implies no room left" fact that a direct proof
+would have had to assume.
+
+The Pulse entry point `GC.Impl.collect_with_roots` does not expose the marked
+heap, so it exposes `GC.Spec.Correctness.gc_coalesce_source` instead — "some
+marked heap satisfying `mark_post` produced this result".
+`major_gc_restores_major_heap_shape_of_source` discharges that existential, which
+is what `gen_gc` actually calls.  On the out-of-memory path nothing runs after
+the minor collection, so the invariant is the post-minor one, which
+`GC.Gen.CheneyPreservation.cheney_collect_preserves_collection_heap_shape`
+already provides.
+
+All of it is ghost: the extracted C is byte-identical.
+
+### Transporting the rest across the minor collection
+
+Everything else the major phase needs is derived internally.
+`GC.Gen.MajorPrecondition` does the work in two exported lemmas.  The first is
+the one that used to be the caller's hardest obligation — conjunct 10 of
+`darken_precondition`, that every **post-minor** root is a genuine non-blue major
+object:
+
+```fstar
+val post_minor_roots_valid_for_darkening minor major fp roots
+  : Lemma (requires
+             GenInv.collection_heap_shape minor major fp /\
+             MinorFwd.roots_valid_for_minor_collection minor major roots /\
+             CheneyBFS.cheney_no_oom minor major fp roots)
+          (ensures
+             let result = Cheney.cheney_collect_spec minor major fp roots in
+             forall (i: nat). i < Seq.length result.mc_roots ==>
+               MBP.root_valid_for_darkening result.mc_major
+                 (Seq.index result.mc_roots i))
+```
+
+This is really a theorem about minor collection, and its two cases are quite
+different.  A **non-minor** root survives `rewrite_root` untouched, so it only
+has to remain a non-blue object of the major heap, which Cheney's frame lemmas
+give directly.  A **minor** root is forwarded — BFS coverage from `cheney_no_oom`
+plus `minor_wosize > 0` (part of `roots_valid_for_minor_collection`) gives
+`fwd r <> 0` — and its target is an ordinary object rather than an interior
+pointer, because the source was a `minor_objects` member and therefore not an
+infix sub-object.  Both cases then transport across `update_major_pointers`,
+which preserves the object list and every header.
+
+The second lemma assembles the whole entry condition:The second lemma assembles the whole entry condition:
+
+```fstar
+val darken_precondition_after_minor minor major fp roots cap
+  : Lemma (requires
+             GenInv.collection_heap_shape minor major fp /\
+             MinorFwd.roots_valid_for_minor_collection minor major roots /\
+             CheneyBFS.cheney_no_oom minor major fp roots /\
+             Seq.length roots <= cap /\ cap > 0)
+          (ensures
+             let result = Cheney.cheney_collect_spec minor major fp roots in
+             MBP.darken_precondition
+               result.mc_major Seq.empty result.mc_roots result.mc_fp cap)
+```
+
+Note where the hypotheses live: the first two are already `gen_gc` preconditions
+for entirely independent reasons, the third is the runtime success flag, and the
+last is `gen_gc_stack_budget`.  There is no `..._intro` counterpart any more —
+there is nothing left for a caller to introduce.
+
+One conjunct deserves a note.  With an empty stack, `gray_objects_on_stack`
+reduces to "the major heap has no gray objects", which is a property of the
+pre-minor heap that `gen_gc` should not have to ask about separately.  It is
+therefore folded into `GC.Gen.HeapInvariant.major_heap_shape` (as
+`SweepInv.no_gray_objects`), where the rest of the major heap's well-formedness
+already lives, and `GC.Gen.CheneyPreservation` re-establishes it after the
+minor collection.
+
+`GC.Impl.collect_with_roots` demands its precondition on the *post*-darkening
+state.  That last step is also done inside the library:
+
+```fstar
+val gen_gc_major_precondition_elim minor major fp roots st cap
+  : Lemma (requires
+             GenInv.collection_heap_shape minor major fp /\
+             MinorFwd.roots_valid_for_minor_collection minor major roots /\
+             CheneyBFS.cheney_no_oom minor major fp roots /\
+             gen_gc_stack_budget roots st cap)
+          (ensures
+            MajorGC.gc_precondition_with_roots
+              (fst prepared) (snd prepared) (snd prepared) result.mc_fp cap /\
+            roots_match_stack result.mc_roots (snd prepared))
+```
+
+`gen_gc_prepared_state` is still exported, because the postcondition talks about
+the darkened heap:
 
 ```fstar
 let gen_gc_prepared_state minor major fp roots st cap =
   let result = CheneySpec.cheney_collect_spec minor major fp roots in
   MarkBoundedImpl.darken_roots_bounded_spec result.mc_major st result.mc_roots cap
-
-let gen_gc_major_precondition minor major fp roots st cap =
-  let result = CheneySpec.cheney_collect_spec minor major fp roots in
-  let prepared = gen_gc_prepared_state minor major fp roots st cap in
-  MajorGC.gc_precondition_with_roots
-    (fst prepared) (snd prepared) (snd prepared) result.mc_fp cap /\
-  roots_match_stack result.mc_roots (snd prepared)
 ```
 
-So callers do not have to pre-color roots or pre-seed the mark stack. They supply
-a stack with enough capacity and prove that, after the verified root-darkening
-step, the major collector precondition holds. The OCaml bridge uses the simplest
-case: an initially empty gray stack.
+So callers do not have to pre-color roots, pre-seed the mark stack, or reason
+about `darken_roots_bounded_spec` at all.
 
-The postcondition exports four named bundles:
+The effect on the concrete client is the honest measure of how much of the
+collector's internal reasoning the old contract leaked: SPOT's hand-proof of the
+entry condition went from ~374 lines of concrete case analysis over its three
+objects to a two-line lemma invocation.
+
+Note also that `Seq.length 'st <= stack_capacity st` is not restated in the
+precondition: it is recoverable from `is_gray_stack` via
+`GC.Impl.Stack.stack_facts`.
+
+The postcondition is two facts about the returned state plus three named
+bundles:
 
 ```fstar
-gen_gc_roots_post minor_st 's 'fp 'rs rs2 'st (stack_capacity st) /\
-gen_gc_heap_shape_post d2 b2 s2 /\
+minor_st_out == minor_reset minor_st /\
+GenInv.collection_heap_shape minor_st_out s2 (fst res) /\
+gen_gc_roots_post minor_st 's 'fp 'rs rs2 ok 'st (stack_capacity st) /\
 gen_gc_reachable_subgraph_isomorphism_post
   minor_st 's 'fp 'rs ok s2 rs2 'st (stack_capacity st) /\
-gen_gc_unreachable_final_blue_post minor_st 's 'fp 'rs s2
+gen_gc_unreachable_final_blue_post minor_st 's 'fp 'rs ok s2
   'st (stack_capacity st)
 ```
 
 In prose, after a successful full generational collection:
 
+- the nursery is reset -- not merely emptied, but zeroed;
+- the whole shape invariant holds again, verbatim the predicate the
+  precondition demands;
 - roots have been rewritten consistently with minor forwarding;
-- the minor heap is reset;
-- the final major heap satisfies the major GC postcondition;
 - the post-minor reachable graph is preserved by the major collector;
 - unreachable final major objects are blue/free.
+
+There is deliberately no `gc_postcondition` conjunct here even though clients
+want one.  It is a *consequence* of the shape invariant -- `well_formed_heap`
+plus `no_black_objects` plus `no_gray_objects` gives "every object is white or
+blue" by colour exhaustiveness -- so restating it would be redundant, and a
+redundant conjunct is both an extra obligation inside `gen_gc` and extra SMT
+context at every call site.  `gen_gc_heap_shape_post` packages that consequence
+for clients who want it without threading a free-list head, and
+`gen_gc_heap_shape_post_intro` is the one-line derivation.
 
 The final isomorphism story is compositional. Minor collection maps the original
 combined minor+major reachable subgraph into the post-minor major heap. Major
@@ -1298,6 +1785,9 @@ The active modules are structured as follows:
 | `GC.SPOT.CallMinor` / `ConcreteCallMinor` | Pulse wrappers that call the real `minor_collect_full` and prove concrete consequences. |
 | `GC.SPOT.CallFull` / `ConcreteCallFull` | Pulse wrappers that call the real `gen_gc` and prove final survival facts. |
 | `GC.SPOT.ThreeObjects` | The scenario layer: A is promoted, C.field1 is rewritten to A', B is not promoted, and C/A' survive full GC. |
+| `GC.SPOT.InfixMajor` | A second, independent scenario: a ten-word major heap containing a genuine OCaml interior (infix) pointer. |
+| `GC.SPOT.InfixPre` / `InfixPost` | Discharge `gen_gc`'s precondition for that heap over an empty nursery, and read back its postcondition. |
+| `GC.SPOT.InfixCall` | Pulse wrapper that calls the real `gen_gc` on the infix heap. |
 
 The main useful facts proved by the active SPOT are:
 
@@ -1323,6 +1813,34 @@ assumed by the caller.
 This is a powerful audit because it checks both sides of a public formal
 contract: the preconditions are not impossibly strong, and the postconditions
 are not too weak for clients to use.
+
+### The interior-pointer scenario
+
+A second SPOT audits the relaxation of the major-heap invariant that admits
+OCaml interior pointers. `GC.SPOT.InfixMajor` builds a ten-word major heap in
+which a one-field object `Q` points *into the body* of a five-word closure `P`,
+at an infix header. That target is never enumerated by `objects`, because its
+header sits inside `P`'s body and the object walk steps over it.
+
+The audit is two-sided, on one and the same heap:
+
+* `spot_infix_violates_no_infix_field_targets` proves the heap **refutes**
+  `GC.Spec.Fields.no_infix_field_targets`, the conjunct `major_heap_shape` used
+  to carry. Under the old invariant this heap could not have been handed to the
+  collector at all.
+* `spot_infix_major_heap_shape` proves the heap **satisfies** all fifteen
+  conjuncts of the current `GC.Gen.HeapInvariant.major_heap_shape` — in
+  particular `well_formed_heap` through the *resolved*-target formulation of
+  parts 2 and 3, with `resolve_object H == P` established from
+  `GC.Spec.Object.infix_addr_conds`.
+
+`GC.SPOT.InfixPre` discharges the remainder of `gen_gc`'s precondition (empty
+nursery, empty remembered table, single root `Q`) and proves the collection
+cannot run out of memory. `GC.SPOT.InfixCall.call_gen_gc_infix` then calls the
+real `gen_gc` and proves that it succeeds, that `collection_heap_shape` holds
+again of the state handed back, and that `Q` is still an enumerated object of
+the post-collection heap. Interior pointers are therefore supported by the
+shipped collector, not merely by an intermediate lemma.
 
 ## OCaml integration
 
@@ -1586,8 +2104,8 @@ ALL_KRML_MODS = \
   GC.Gen.Impl GC.Gen.Impl.MinorHeap GC.Gen.Impl.Cheney \
   GC.Gen.Impl.Promote GC.Gen.Impl.UpdatePtrs \
   GC.Gen.Base \
-  GC.Impl GC.Impl.Fields GC.Impl.Closure GC.Impl.Mark \
-  GC.Impl.MarkBounded GC.Impl.Sweep GC.Impl.Coalesce \
+  GC.Impl GC.Impl.Fields \
+  GC.Impl.MarkBounded GC.Impl.Coalesce \
   GC.Impl.FusedSweepCoalesce GC.Impl.Allocator \
   GC.Impl.ArrayWord GC.Impl.Heap GC.Impl.Object GC.Impl.Stack \
   GC.Spec.ZeroAddr GC.Spec.Base GC.Spec.Heap GC.Spec.Object \
@@ -1888,8 +2406,13 @@ cd generational && make snapshot
 ```
 
 For stubborn F* goals, the local Makefiles show the tuning already used in the
-project: `--split_queries always`, higher `--z3rlimit`, `--z3refresh`, and
-`--query_stats` on modules that stress the solver.
+project: `--retry 3` (a workaround for Z3 4.15.3 flakiness on trivial leaf
+goals), a raised `smt.qi.eager_threshold` on individually opted-in modules,
+higher `--z3rlimit`, `--z3refresh`, and `--query_stats` on modules that stress
+the solver. When `--retry` isn't enough, the standard remedy in this codebase is
+to lift the failing fact into a top-level helper lemma so it is proved in an
+empty context; `GC.Spec.Base` collects the recurring ones (`heap_words`,
+`mk_hp_addr`, `aligned_plus_mul8`).
 
 ## Looking ahead: incremental and concurrent GC
 

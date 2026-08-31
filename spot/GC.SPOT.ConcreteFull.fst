@@ -34,20 +34,23 @@ module CheneyBFS = GC.Gen.CheneyBFS
 module GenImpl = GC.Gen.Impl
 module MinorFwd = GC.Gen.MinorCollectForwarding
 module MCFH = GC.Gen.MinorCollectForwarding.Helpers
+module MCFH = GC.Gen.MinorCollectForwarding.Helpers
 module MajorGC = GC.Impl
 module MarkBoundedImpl = GC.Impl.MarkBounded
+module MBP = GC.Impl.MarkBoundedPrecondition
+module MajorPre = GC.Gen.MajorPrecondition
+module CheneyPres = GC.Gen.CheneyPreservation
 
-let roots_match_u64_mem_in_stack
-  (roots: seq U64.t) (st: seq obj_addr) (r: U64.t)
-  : Lemma
-      (requires GenImpl.roots_match_stack roots st /\ Seq.mem r roots)
-      (ensures is_val_addr r /\ Seq.mem (r <: obj_addr) st)
-  =
-  GenImpl.roots_match_stack_root_is_val_addr roots st r;
-  GC.Spec.Base.is_val_addr_spec r;
-  let r_obj = (r <: obj_addr) in
-  assert ((r_obj <: U64.t) == r);
-  GenImpl.roots_match_stack_root_in_stack roots st r_obj
+/// A nursery address whose header tag is not `Infix_tag` resolves to itself.
+/// Stated in an empty context: inside the big proofs below Z3 will not unfold
+/// `is_infix_in_minor` on its own.
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 10"
+let minor_non_infix_resolves_to_itself (ms: minor_state) (v: U64.t)
+  : Lemma (requires minor_tag ms v <> 249)
+          (ensures resolve_minor ms v == v)
+  = assert (~(is_infix_in_minor ms v));
+    resolve_minor_non_infix ms v
+#pop-options
 
 let post_roots_mem_c
   (r: unit{ConcreteMajor.spot_major_room})
@@ -59,9 +62,16 @@ let post_roots_mem_c
           (ConcreteMajor.spot_major_heap r)
           (ConcreteMajor.spot_major_fp r)
           (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap)
+          roots_out true st cap)
       (ensures
         Seq.mem (ConcreteMajor.spot_c r <: U64.t) roots_out /\
+        SpecObj.resolve_object (ConcreteMajor.spot_c r)
+          (Cheney.cheney_collect_spec
+            ConcreteMinor.spot_minor2
+            (ConcreteMajor.spot_major_heap r)
+            (ConcreteMajor.spot_major_fp r)
+            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))).mc_major ==
+          (ConcreteMajor.spot_c r <: U64.t) /\
         Seq.mem (ConcreteMajor.spot_c r)
           (GenImpl.gen_gc_prepared_roots
             ConcreteMinor.spot_minor2
@@ -100,8 +110,21 @@ let post_roots_mem_c
     (ConcreteMajor.spot_major_heap r)
     (ConcreteMajor.spot_major_fp r)
     roots st cap in
-  assert (GenImpl.roots_match_stack roots_out prepared_roots);
-  roots_match_u64_mem_in_stack roots_out prepared_roots (c <: U64.t)
+  // `c` is a major root: rewriting leaves it alone and it still names itself
+  // after the minor collection, so the darkened stack holds it literally.
+  ConcreteScenarios.spot_collection_heap_shape r;
+  ConcreteScenarios.spot_roots_valid_for_minor_collection r;
+  MajorPre.post_minor_major_root_valid
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots (c <: U64.t);
+  GenImpl.gen_gc_named_root_in_stack
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots roots_out st cap c;
+  assert (Seq.mem c prepared_roots)
 
 let post_roots_mem_a_prime
   (r: unit{ConcreteMajor.spot_major_room})
@@ -118,7 +141,7 @@ let post_roots_mem_a_prime
           (ConcreteMajor.spot_major_heap r)
           (ConcreteMajor.spot_major_fp r)
           (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap)
+          roots_out true st cap)
       (ensures (
         let prom = Cheney.cheney_promote
           ConcreteMinor.spot_minor2
@@ -134,6 +157,12 @@ let post_roots_mem_a_prime
           st cap in
         Seq.mem img roots_out /\
         is_val_addr img /\
+        SpecObj.resolve_object (img <: obj_addr)
+          (Cheney.cheney_collect_spec
+            ConcreteMinor.spot_minor2
+            (ConcreteMajor.spot_major_heap r)
+            (ConcreteMajor.spot_major_fp r)
+            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))).mc_major == img /\
         Seq.mem (img <: obj_addr) prepared_roots)
       )
   =
@@ -178,15 +207,35 @@ let post_roots_mem_a_prime
     (ConcreteMajor.spot_major_heap r)
     (ConcreteMajor.spot_major_fp r)
     roots st cap in
-  assert (GenImpl.roots_match_stack roots_out prepared_roots);
-  roots_match_u64_mem_in_stack roots_out prepared_roots img
+  // `a_minor` is an ordinary (non-interior) nursery root, so its promoted copy
+  // `img` names itself in the post-minor heap.
+  ConcreteScenarios.spot_collection_heap_shape r;
+  ConcreteMinor.spot_minor_two_object_layout ();
+  minor_objects_not_infix ConcreteMinor.spot_minor2 Layout.a_minor;
+  minor_non_infix_resolves_to_itself ConcreteMinor.spot_minor2 Layout.a_minor;
+  MCFH.fwd_image_resolves
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots Layout.a_minor;
+  assert (is_val_addr img);
+  assert (SpecObj.resolve_object (img <: obj_addr) res.mc_major == img);
+  GenImpl.gen_gc_named_root_in_stack
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots roots_out st cap (img <: obj_addr);
+  assert (Seq.mem (img <: obj_addr) prepared_roots)
 
 let root_heap_reachable_from_major_gc_pre
   (minor: minor_state) (major: heap) (fp: U64.t)
   (roots: seq U64.t) (st: seq obj_addr) (cap: nat) (r: obj_addr)
   : Lemma
       (requires
-        GenImpl.gen_gc_major_precondition minor major fp roots st cap /\
+        GenInv.collection_heap_shape minor major fp /\
+        MinorFwd.roots_valid_for_minor_collection minor major roots /\
+        CheneyBFS.cheney_no_oom minor major fp roots /\
+        GenImpl.gen_gc_stack_budget roots st cap /\
         Seq.mem r (GenImpl.gen_gc_prepared_roots minor major fp roots st cap))
       (ensures
         SpecCorrectness.heap_reachable
@@ -198,6 +247,7 @@ let root_heap_reachable_from_major_gc_pre
   let prepared_roots = GenImpl.gen_gc_prepared_roots minor major fp roots st cap in
   let graph = HeapModel.create_graph prepared_major in
   let roots' = HeapGraph.coerce_to_vertex_list prepared_roots in
+  GenImpl.gen_gc_major_precondition_elim minor major fp roots st cap;
   assert (MajorGC.gc_precondition_with_roots
     prepared_major prepared_roots prepared_roots
     (Cheney.cheney_collect_spec minor major fp roots).mc_fp cap);
@@ -207,35 +257,47 @@ let root_heap_reachable_from_major_gc_pre
   assert (Seq.mem r (SpecDFS.reachable_set graph roots'));
   assert (SpecCorrectness.heap_reachable prepared_major prepared_roots r)
 
+/// The concrete instance, so that the scenario proofs do not have to re-supply
+/// the pre-minor shape facts at every use.
+let spot_root_heap_reachable_from_major_gc_pre
+  (r: unit{ConcreteMajor.spot_major_room})
+  (st: seq obj_addr) (cap: nat) (v: obj_addr)
+  : Lemma
+      (requires (
+        let roots = ThreeObjects.spot_roots (ConcreteMajor.spot_c r) in
+        GenImpl.gen_gc_stack_budget roots st cap /\
+        Seq.mem v (GenImpl.gen_gc_prepared_roots
+          ConcreteMinor.spot_minor2
+          (ConcreteMajor.spot_major_heap r)
+          (ConcreteMajor.spot_major_fp r) roots st cap)))
+      (ensures (
+        let roots = ThreeObjects.spot_roots (ConcreteMajor.spot_c r) in
+        SpecCorrectness.heap_reachable
+          (GenImpl.gen_gc_prepared_major
+            ConcreteMinor.spot_minor2
+            (ConcreteMajor.spot_major_heap r)
+            (ConcreteMajor.spot_major_fp r) roots st cap)
+          (GenImpl.gen_gc_prepared_roots
+            ConcreteMinor.spot_minor2
+            (ConcreteMajor.spot_major_heap r)
+            (ConcreteMajor.spot_major_fp r) roots st cap)
+          v))
+  =
+  ConcreteScenarios.spot_collection_heap_shape r;
+  ConcreteScenarios.spot_roots_valid_for_minor_collection r;
+  ConcreteForwarding.spot_concrete_no_oom r;
+  root_heap_reachable_from_major_gc_pre
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
+    st cap v
+
 let spot_concrete_c_final_survives
   (r: unit{ConcreteMajor.spot_major_room})
   (d2: minor_heap) (b2: U64.t)
   (roots_out: seq U64.t) (ok: bool) (final_major: heap)
   (st: seq obj_addr) (cap: nat)
-  : Lemma
-      (requires (
-        let result =
-          Cheney.cheney_collect_spec
-            ConcreteMinor.spot_minor2
-            (ConcreteMajor.spot_major_heap r)
-            (ConcreteMajor.spot_major_fp r)
-            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
-        ok /\
-        GenImpl.gen_gc_roots_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap /\
-        GenImpl.gen_gc_heap_shape_post d2 b2 final_major /\
-        GenImpl.gen_gc_reachable_subgraph_isomorphism_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          ok final_major roots_out st cap))
-      (ensures Seq.mem (ConcreteMajor.spot_c r)
-        (SpecFields.objects zero_addr final_major))
   =
   let result =
     Cheney.cheney_collect_spec
@@ -253,18 +315,8 @@ let spot_concrete_c_final_survives
       (ConcreteMajor.spot_major_fp r)
       (ThreeObjects.spot_roots c)
       st cap));
-  assert (GenImpl.gen_gc_major_precondition
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap);
-  root_heap_reachable_from_major_gc_pre
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap c;
+  assert (GenImpl.gen_gc_stack_budget (ThreeObjects.spot_roots c) st cap);
+  spot_root_heap_reachable_from_major_gc_pre r st cap c;
   ThreeObjects.spot_final_survives_from_gen_gc_post
     ConcreteMinor.spot_minor2
     (ConcreteMajor.spot_major_heap r)
@@ -276,39 +328,6 @@ let spot_concrete_a_prime_final_survives
   (d2: minor_heap) (b2: U64.t)
   (roots_out: seq U64.t) (ok: bool) (final_major: heap)
   (st: seq obj_addr) (cap: nat)
-  : Lemma
-      (requires (
-        let result =
-          Cheney.cheney_collect_spec
-            ConcreteMinor.spot_minor2
-            (ConcreteMajor.spot_major_heap r)
-            (ConcreteMajor.spot_major_fp r)
-            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
-        ok /\
-        GenImpl.gen_gc_roots_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap /\
-        GenImpl.gen_gc_heap_shape_post d2 b2 final_major /\
-        GenImpl.gen_gc_reachable_subgraph_isomorphism_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          ok final_major roots_out st cap))
-      (ensures (
-        let prom =
-          Cheney.cheney_promote
-            ConcreteMinor.spot_minor2
-            (ConcreteMajor.spot_major_heap r)
-            (ConcreteMajor.spot_major_fp r)
-            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
-        exists (a_prime: obj_addr).
-          a_prime == prom.fwd_map Layout.a_minor /\
-          Seq.mem a_prime (SpecFields.objects zero_addr final_major))
-      )
   =
   let result =
     Cheney.cheney_collect_spec
@@ -334,18 +353,8 @@ let spot_concrete_a_prime_final_survives
       (ConcreteMajor.spot_major_fp r)
       (ThreeObjects.spot_roots c)
       st cap));
-  assert (GenImpl.gen_gc_major_precondition
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap);
-  root_heap_reachable_from_major_gc_pre
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap a_prime;
+  assert (GenImpl.gen_gc_stack_budget (ThreeObjects.spot_roots c) st cap);
+  spot_root_heap_reachable_from_major_gc_pre r st cap a_prime;
   ThreeObjects.spot_final_survives_from_gen_gc_post
     ConcreteMinor.spot_minor2
     (ConcreteMajor.spot_major_heap r)
@@ -441,7 +450,7 @@ let post_roots_shape
           (ConcreteMajor.spot_major_heap r)
           (ConcreteMajor.spot_major_fp r)
           (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap)
+          roots_out true st cap)
       (ensures (
         let c = ConcreteMajor.spot_c r in
         let prom = Cheney.cheney_promote
@@ -539,11 +548,8 @@ let prepared_roots_preserve_c_field1
           (ConcreteMajor.spot_major_heap r)
           (ConcreteMajor.spot_major_fp r)
           (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap /\
-        GenImpl.gen_gc_major_precondition
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
+          roots_out true st cap /\
+        GenImpl.gen_gc_stack_budget
           (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
           st cap)
       (ensures (
@@ -593,6 +599,14 @@ let prepared_roots_preserve_c_field1
   assert (SpecObj.wosize_of_object c prepared_major ==
           SpecObj.wosize_of_object c result.mc_major);
   assert (U64.v (SpecObj.wosize_of_object c prepared_major) >= 2);
+  ConcreteScenarios.spot_collection_heap_shape r;
+  ConcreteScenarios.spot_roots_valid_for_minor_collection r;
+  ConcreteForwarding.spot_concrete_no_oom r;
+  GenImpl.gen_gc_major_precondition_elim
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots st cap;
   assert (MajorGC.gc_precondition_with_roots
     prepared_major prepared_roots prepared_roots result.mc_fp cap);
   assert (SpecMarkBoundedInv.bounded_mark_inv prepared_major prepared_roots cap);
@@ -617,13 +631,18 @@ let prepared_roots_preserve_c_field1
           (U64.v (Seq.index roots_out i) >= U64.v zero_addr + U64.v mword /\
            U64.v (Seq.index roots_out i) < heap_size /\
            U64.v (Seq.index roots_out i) % U64.v mword == 0 ==>
-           U64.sub (Seq.index roots_out i) mword <> slot))
+           U64.sub (SpecObj.resolve_object (Seq.index roots_out i <: obj_addr)
+                                           result.mc_major) mword <> slot))
     =
     if i < Seq.length roots_out then begin
       assert (Seq.length roots_out == 2);
       match i with
       | 0 ->
         assert (Seq.index roots_out i == (c <: U64.t));
+        // `c` is a major root: it names itself, so darkening touches its own
+        // header and not `c`'s field slot.
+        assert (SpecObj.resolve_object (Seq.index roots_out i <: obj_addr)
+                                       result.mc_major == (c <: U64.t));
         object_header_not_c_field1 r prepared_major c;
         SpecHeap.hd_address_spec c;
         assert (U64.v (U64.sub (Seq.index roots_out i) mword) ==
@@ -632,6 +651,8 @@ let prepared_roots_preserve_c_field1
         assert (U64.sub (Seq.index roots_out i) mword == SpecHeap.hd_address c)
       | 1 ->
         assert (Seq.index roots_out i == img);
+        assert (SpecObj.resolve_object (Seq.index roots_out i <: obj_addr)
+                                       result.mc_major == img);
         object_header_not_c_field1 r prepared_major a_prime;
         assert (Seq.index roots_out i == (a_prime <: U64.t));
         SpecHeap.hd_address_spec a_prime;
@@ -646,6 +667,25 @@ let prepared_roots_preserve_c_field1
     end
   in
   FStar.Classical.forall_intro no_root_header;
+  // Every post-minor root is a genuine, non-infix major object -- a theorem
+  // about minor collection, not something the caller has to supply.
+  CheneyPres.cheney_collect_preserves_wfh_from_shape
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots;
+  MajorPre.post_minor_roots_valid_for_darkening
+    ConcreteMinor.spot_minor2
+    (ConcreteMajor.spot_major_heap r)
+    (ConcreteMajor.spot_major_fp r)
+    roots;
+  FStar.Classical.forall_intro (fun (i: nat) ->
+    (if i < Seq.length roots_out then
+       MBP.root_valid_for_darkening_points_to_object
+         result.mc_major (Seq.index roots_out i))
+    <: Lemma (i < Seq.length roots_out ==>
+              MarkBoundedImpl.root_points_to_object
+                result.mc_major (Seq.index roots_out i)));
   MarkBoundedImpl.darken_roots_bounded_spec_preserves_read_word
     result.mc_major st roots_out cap slot
 #pop-options
@@ -655,42 +695,6 @@ let spot_concrete_c_field_final_points_to_a_prime
   (d2: minor_heap) (b2: U64.t)
   (roots_out: seq U64.t) (ok: bool) (final_major: heap)
   (st: seq obj_addr) (cap: nat)
-  : Lemma
-      (requires (
-        let result =
-          Cheney.cheney_collect_spec
-            ConcreteMinor.spot_minor2
-            (ConcreteMajor.spot_major_heap r)
-            (ConcreteMajor.spot_major_fp r)
-            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
-        ok /\
-        GenImpl.gen_gc_roots_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          roots_out st cap /\
-        GenImpl.gen_gc_heap_shape_post d2 b2 final_major /\
-        GenImpl.gen_gc_reachable_subgraph_isomorphism_post
-          ConcreteMinor.spot_minor2
-          (ConcreteMajor.spot_major_heap r)
-          (ConcreteMajor.spot_major_fp r)
-          (ThreeObjects.spot_roots (ConcreteMajor.spot_c r))
-          ok final_major roots_out st cap))
-      (ensures (
-        let prom =
-          Cheney.cheney_promote
-            ConcreteMinor.spot_minor2
-            (ConcreteMajor.spot_major_heap r)
-            (ConcreteMajor.spot_major_fp r)
-            (ThreeObjects.spot_roots (ConcreteMajor.spot_c r)) in
-        Seq.mem (ConcreteMajor.spot_c r)
-          (SpecFields.objects zero_addr final_major) /\
-        exists (a_prime: obj_addr).
-          a_prime == prom.fwd_map Layout.a_minor /\
-          Seq.mem a_prime (SpecFields.objects zero_addr final_major) /\
-          SpecHeap.read_word final_major (ConcreteMajor.spot_c_field1 r) ==
-            a_prime))
   =
   let result =
     Cheney.cheney_collect_spec
@@ -726,24 +730,9 @@ let spot_concrete_c_field_final_points_to_a_prime
     st cap in
   assert (Seq.mem c prepared_roots);
   assert (Seq.mem a_prime prepared_roots);
-  assert (GenImpl.gen_gc_major_precondition
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap);
-  root_heap_reachable_from_major_gc_pre
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap c;
-  root_heap_reachable_from_major_gc_pre
-    ConcreteMinor.spot_minor2
-    (ConcreteMajor.spot_major_heap r)
-    (ConcreteMajor.spot_major_fp r)
-    (ThreeObjects.spot_roots c)
-    st cap a_prime;
+  assert (GenImpl.gen_gc_stack_budget (ThreeObjects.spot_roots c) st cap);
+  spot_root_heap_reachable_from_major_gc_pre r st cap c;
+  spot_root_heap_reachable_from_major_gc_pre r st cap a_prime;
   assert (SpecCorrectness.major_gc_live_subgraph_isomorphism
     prepared_major final_major prepared_roots);
   prepared_roots_preserve_c_field1 r roots_out st cap;

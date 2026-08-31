@@ -46,7 +46,7 @@ let normal_src_reachable
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
   (u: CG.combined_vertex) : prop =
   let cg = CG.build_combined_graph minor major in
-  let combined_roots = CG.classify_roots roots in
+  let combined_roots = CG.classify_roots minor roots in
   CG.combined_reachable cg combined_roots u /\
   normal_vertex_ready minor major fp roots u
 
@@ -116,7 +116,7 @@ val normal_post_non_pointer_fields_preserved
   : Lemma
     (requires
       GenInv.collection_heap_shape minor major fp /\
-      RBridge.major_field_zero_no_minor minor major /\
+      RBridge.major_field_zero_covered minor major roots /\
       UpdatePtrs.ref_table_covers_minor_ptrs major slots n /\
       remembered_targets_in_roots major roots slots n /\
       Mark.no_pointer_to_blue major /\

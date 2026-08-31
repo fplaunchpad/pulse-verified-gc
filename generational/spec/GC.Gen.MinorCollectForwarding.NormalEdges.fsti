@@ -79,7 +79,7 @@ val combined_reachable_edge_forwarded_normal
   : Lemma
     (requires
       GenInv.collection_heap_shape minor major fp /\
-      RBridge.major_field_zero_no_minor minor major /\
+      RBridge.major_field_zero_covered minor major roots /\
       UpdatePtrs.ref_table_covers_minor_ptrs major slots n /\
       remembered_targets_in_roots major roots slots n /\
       Mark.no_pointer_to_blue major /\
@@ -87,7 +87,7 @@ val combined_reachable_edge_forwarded_normal
       RBridge.roots_valid_nonblue roots major /\
       CheneyBFS.cheney_no_oom minor major fp roots /\
       (let cg = CG.build_combined_graph minor major in
-       let combined_roots = CG.classify_roots roots in
+       let combined_roots = CG.classify_roots minor roots in
        CG.combined_reachable cg combined_roots u /\
        CG.combined_reachable cg combined_roots v /\
        CG.mem_ce (u, v) cg) /\
@@ -99,25 +99,10 @@ val combined_reachable_edge_forwarded_normal
         (CG.fwd_morphism prom.fwd_map u)
         (CG.fwd_morphism prom.fwd_map v)))
 
-let combined_reachable_normal_edges_forwarded_prop
-  (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t) : prop =
-  let cg = CG.build_combined_graph minor major in
-  let combined_roots = CG.classify_roots roots in
-  let prom = cheney_promote minor major fp roots in
-  let res = cheney_collect_spec minor major fp roots in
-  forall (u v: CG.combined_vertex).
-    CG.combined_reachable cg combined_roots u /\
-    CG.combined_reachable cg combined_roots v /\
-    CG.mem_ce (u, v) cg /\
-    normal_edge_forward_ready minor major fp roots u v ==>
-    mem_graph_edge_at (HeapModel.create_graph res.mc_major)
-      (CG.fwd_morphism prom.fwd_map u)
-      (CG.fwd_morphism prom.fwd_map v)
-
 let fwd_disjoint_reachable_major
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t) : prop =
   let cg = CG.build_combined_graph minor major in
-  let combined_roots = CG.classify_roots roots in
+  let combined_roots = CG.classify_roots minor roots in
   let prom = cheney_promote minor major fp roots in
   forall (x y: U64.t).
     CG.combined_reachable cg combined_roots (CG.MinorV x) /\
@@ -161,14 +146,14 @@ let normal_src_reachable
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t)
   (u: CG.combined_vertex) : prop =
   let cg = CG.build_combined_graph minor major in
-  let combined_roots = CG.classify_roots roots in
+  let combined_roots = CG.classify_roots minor roots in
   CG.combined_reachable cg combined_roots u /\
   normal_vertex_ready minor major fp roots u
 
 let combined_reachable_normal_injective_prop
   (minor: minor_state) (major: heap) (fp: U64.t) (roots: seq U64.t) : prop =
   let cg = CG.build_combined_graph minor major in
-  let combined_roots = CG.classify_roots roots in
+  let combined_roots = CG.classify_roots minor roots in
   let prom = cheney_promote minor major fp roots in
   forall (u v: CG.combined_vertex).
     CG.combined_reachable cg combined_roots u /\

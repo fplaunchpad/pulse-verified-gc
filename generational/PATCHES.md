@@ -28,7 +28,7 @@ F\*/Pulse source so the extraction is usable directly.
 | 2  | Configurable heap_size | ✅ **ELIMINATED** | `heap_size_u64` is now `extern` from `GC.Spec.ZeroAddr.fsti`; defined in `compat.c` |
 | 3,4 | Scan range / HWM | ✅ **ELIMINATED** | Bridge now walks fwd_arr + calls `update_one_object`; `update_all_objects` reverted to clean extraction |
 | 9  | Infix forwarding | ✅ **DONE** | Phased calls + infix fwd fixup in bridge |
-| 14 | Infix-aware `check_and_darken_bounded` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Currently edited directly in `snapshot/GC_Gen_Impl.c`, so **`make snapshot` will silently revert it**. |
+| 14 | Infix-aware `check_and_darken_bounded` | ✅ **DONE** | Verified upstream; the extraction now redirects infix pointers itself. Hand patch retired. |
 | 15 | Guard the infix tag test with `Closure_tag` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Same file, same caveat. Exposed only after 14. |
 
 ### Extern Configuration (GC.Spec.ZeroAddr + GC.Gen.Base)
@@ -905,11 +905,28 @@ lacks a soundness fix.
 
 ---
 
-## Patch 14 — infix-aware darkening in the major mark phase (OPEN)
+## Patch 14 — infix-aware darkening in the major mark phase (CLOSED — verified upstream)
 
-**Status: hand patch applied to `snapshot/GC_Gen_Impl.c`. Unverified, and
-lost on the next `make snapshot`.** This is the highest-priority item in this
-document: it is a *soundness* patch, not a plumbing one.
+**Status: retired. `main` now resolves infix pointers in
+`check_and_darken_bounded` from the verified source**, so the extracted
+snapshot carries the redirection natively and the hand patch has been dropped
+from `patches/snapshot/0001-infix-handling.patch`. The extracted form is:
+
+```c
+uint64_t hdr = read_word(heap, target_hdr);
+if (getTag(hdr) == infix_tag && v >= getWosize0(hdr) * 8ULL + 8ULL)
+  darken_if_white_bounded(heap, st, v - getWosize0(hdr) * 8ULL - 8ULL);
+else
+  darken_if_white_bounded(heap, st, target_hdr);
+```
+
+Note that the verified version guards on the *bound* (`v >= off + 8`) but not
+on `Closure_tag`, where the hand patch required both — see Patch 15, which
+argues that the tag test alone is unsound against a word not known to be a
+header. Patch 15 remains open and still hand-patches the *minor* side; whether
+the major side needs the same hardening now depends on what the verified
+precondition of `check_and_darken_bounded` actually guarantees about
+`target_hdr`. The analysis below is kept for that reason.
 
 ### The bug
 

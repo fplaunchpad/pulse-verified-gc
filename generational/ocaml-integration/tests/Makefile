@@ -48,7 +48,29 @@ REGRESSION_BYTE   = $(addsuffix .byte, $(REGRESSIONS))
 REGRESSION_NATIVE = $(addsuffix .native, $(REGRESSIONS))
 NOSCAN_STRESS_ITERS ?= 300000
 
-BYTE_FILES = $(addsuffix .byte, $(BENCHMARKS))
+# Correctness tests (not benchmarks): run under both runtimes and compared.
+CORRECTNESS_TESTS = infix_closures no_scan make_vect_barrier nursery_no_scan_interior
+
+# infix_closures needs a small major heap so that real major collections
+# (mark & sweep) happen; it checks Gc.quick_stat to confirm they did.
+INFIX_MAJOR_WORDS ?= 300000
+
+# no_scan allocates 300 x 2KB no-scan blocks and then promotes 400 nursery
+# blocks, so it needs more room than infix_closures while still forcing real
+# major collections.
+NO_SCAN_MAJOR_WORDS ?= 4000000
+
+# make_vect_barrier promotes a large young live set ten times over.
+MAKE_VECT_MAJOR_WORDS ?= 4000000
+
+# nursery_no_scan_interior forges interior pointers into no-scan nursery
+# payloads.  It was a known-gap reproducer until the nursery scan window
+# became `GC.Gen.MinorHeap.minor_scan_wosize`; it is now a regression test.
+KNOWN_GAP_TESTS =
+NURSERY_NO_SCAN_MAJOR_WORDS ?= 4000000
+
+BYTE_FILES = $(addsuffix .byte, $(BENCHMARKS)) $(addsuffix .byte, $(CORRECTNESS_TESTS)) \
+             $(addsuffix .byte, $(KNOWN_GAP_TESTS)) $(REGRESSION_BYTE)
 NATIVE_FILES = $(addsuffix .native, $(BENCHMARKS))
 BENCH_TARGETS = $(addsuffix .bench, $(BENCHMARKS))
 STATS_TARGETS = $(addsuffix .stats, $(BENCHMARKS))
@@ -59,7 +81,7 @@ all: $(BYTE_FILES)
 
 # ---- Smoke tests (one run each, verified gen GC) ----
 
-test: $(BYTE_FILES)
+test: correctness $(BYTE_FILES)
 	@echo "=== Smoke tests (verified generational GC) ==="
 	@echo "--- binarytrees ---"
 	MIN_EXPANSION_WORDSIZE=$(BINARYTREES_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) binarytrees.byte 10
@@ -131,6 +153,79 @@ test-regression-native: $(REGRESSION_NATIVE)
 	@echo "--- noscan_stress: Custom_tag payloads must not be scanned as fields ---"
 	./noscan_stress.native $(NOSCAN_STRESS_ITERS)
 	@echo "=== All native regression tests passed ==="
+# ---- Correctness tests ----
+#
+# infix_closures.ml exercises interior (infix) pointers: mutually recursive
+# OCaml closures share one heap block, and every function after the first is
+# addressed by a pointer into the middle of that block.  The test confirms the
+# heap really contains such pointers, that the parent-address formula in
+# GC.Spec.Object.infix_addr_conds holds numerically, that a block reachable
+# only through an interior pointer survives mark & sweep, and that the
+# post-collection heap has exactly the shape it had before.
+#
+# Groups 8-10 do the same for the *nursery*: mutually recursive closures are
+# allocated young, so an interior pointer to one points into the middle of a
+# young block and Cheney copying must forward the enclosing block and re-apply
+# the offset.  Both the major -> minor edge (remembered set) and the
+# minor -> minor edge (Cheney scanning) are covered, and each is shown to have
+# actually been promoted, so the nursery path is really the one exercised.
+#
+# Groups 11-12 move the interior pointer out of the heap and into a *root*: a
+# local variable, scanned verbatim off the bytecode stack, is the only thing
+# referring to the closure block.  A root cannot be replaced by its enclosing
+# closure -- the mutator keeps calling through it -- so the offset has to
+# survive the collection.  Group 12 keeps 24 such roots live simultaneously,
+# one per frame of a recursion, with the collections forced at the bottom.
+# Both collectors resolve roots (forward_if_minor_infix in the nursery,
+# check_and_darken_bounded_spec in the major heap), and Phase H of
+# docs/minor-infix-support-plan.md brought the specifications into line.
+#
+# Group 13 audits the heap the collector is *handed* rather than what it did
+# with it: inside one collection-free window it establishes, on the live heap,
+# that the closure blocks are in the nursery (positionally, between two young
+# sentinels), that a root and a young field each hold an interior pointer into
+# one, and that infix_addr_conds holds numerically -- exactly the shape
+# GC.Gen.HeapInvariant.collection_heap_shape and
+# GC.Gen.MinorCollectForwarding.Helpers.roots_valid_for_minor_collection now
+# admit.  It then forces one minor collection and checks the result.
+# spot/GC.SPOT.MinorInfixPre and spot/GC.SPOT.MinorInfixCall are the
+# machine-checked counterparts: a concrete heap of exactly this shape, proved to
+# satisfy gen_gc's precondition, and a Pulse call that runs the collector on it.
+#
+# It is run under the verified runtime and, as a differential check, under
+# stock OCaml, where it must produce the same verdict.
+
+correctness: $(addsuffix .byte, $(CORRECTNESS_TESTS))
+	@echo "=== Correctness tests ==="
+	@echo "--- infix_closures (verified generational GC) ---"
+	MIN_EXPANSION_WORDSIZE=$(INFIX_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) infix_closures.byte
+	@echo "--- infix_closures (stock OCaml, differential check) ---"
+	$(UNCHANGED_OCAMLRUN) infix_closures.byte
+	@echo "--- no_scan (verified generational GC) ---"
+	MIN_EXPANSION_WORDSIZE=$(NO_SCAN_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) no_scan.byte
+	@echo "--- no_scan (stock OCaml, differential check) ---"
+	$(UNCHANGED_OCAMLRUN) no_scan.byte
+	@echo "--- make_vect_barrier (verified generational GC) ---"
+	MIN_EXPANSION_WORDSIZE=$(MAKE_VECT_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) make_vect_barrier.byte
+	@echo "--- make_vect_barrier (stock OCaml, differential check) ---"
+	$(UNCHANGED_OCAMLRUN) make_vect_barrier.byte
+	@echo "--- nursery_no_scan_interior (verified generational GC) ---"
+	MIN_EXPANSION_WORDSIZE=$(NURSERY_NO_SCAN_MAJOR_WORDS) $(VERIFIED_GEN_OCAMLRUN) nursery_no_scan_interior.byte
+	@echo "--- nursery_no_scan_interior (stock OCaml, differential check) ---"
+	$(UNCHANGED_OCAMLRUN) nursery_no_scan_interior.byte
+	@echo "=== Correctness tests passed ==="
+
+# ---- Known-gap reproducers (expected to FAIL under the verified GC) ----
+#
+# Run these deliberately, e.g. `make known-gaps`.  Each one passes under
+# stock OCaml and demonstrates a gap that is still open in the verified
+# collector.  See docs/known-issues.md.
+#
+# There are currently none: nursery_no_scan_interior graduated to
+# `correctness` when the nursery stopped scanning no-scan bodies.
+
+known-gaps: $(addsuffix .byte, $(KNOWN_GAP_TESTS))
+	@echo "=== No known-gap reproducers outstanding ==="
 
 # ---- Benchmarks with hyperfine (3-way comparison) ----
 
@@ -286,7 +381,7 @@ bench-min-heaps: $(MINHEAP_TARGETS)
 	head -n 1 results/binarytrees.minheap.csv > results/min_heaps.csv
 	tail -n +2 -q $(MINHEAP_CSVS) >> results/min_heaps.csv
 
-.PHONY: all test test-native benchmark bench-all bench-stats bench-min-heaps clean
+.PHONY: all test test-native correctness known-gaps benchmark bench-all bench-stats bench-min-heaps clean
 
 clean:
 	rm -f *.byte *.native *.cmi *.cmo *.cmx *.o

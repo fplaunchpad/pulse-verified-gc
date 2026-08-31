@@ -1,7 +1,7 @@
 diff --git a/generational/snapshot/GC_Gen_Impl.c b/generational/snapshot/GC_Gen_Impl.c
 --- a/generational/snapshot/GC_Gen_Impl.c
 +++ b/generational/snapshot/GC_Gen_Impl.c
-@@ -747,7 +747,22 @@
+@@ -754,7 +754,22 @@
            uint64_t hdr_addr0 = addr - 8ULL;
            uint64_t hdr = minor_read(minor, hdr_addr0);
            uint64_t tag = hdr & 0xFFULL;
@@ -25,7 +25,7 @@ diff --git a/generational/snapshot/GC_Gen_Impl.c b/generational/snapshot/GC_Gen_
            {
              uint64_t hdr_addr0 = addr - 8ULL;
              uint64_t hdr = minor_read(minor, hdr_addr0);
-@@ -918,7 +933,22 @@
+@@ -925,7 +940,22 @@
              uint64_t hdr_addr0 = r - 8ULL;
              uint64_t hdr = minor_read(minor, hdr_addr0);
              uint64_t tag = hdr & 0xFFULL;
@@ -49,7 +49,7 @@ diff --git a/generational/snapshot/GC_Gen_Impl.c b/generational/snapshot/GC_Gen_
              {
                uint64_t hdr_addr0 = r - 8ULL;
                uint64_t hdr = minor_read(minor, hdr_addr0);
-@@ -1096,6 +1126,18 @@
+@@ -1112,6 +1142,18 @@
          scan = s + (size_t)1U;
        else if (obj + wosize * 8ULL > minor_heap_size_u64)
          scan = s + (size_t)1U;
@@ -68,7 +68,7 @@ diff --git a/generational/snapshot/GC_Gen_Impl.c b/generational/snapshot/GC_Gen_
        else
        {
          uint64_t field_idx = 0ULL;
-@@ -1119,7 +1161,22 @@
+@@ -1135,7 +1177,22 @@
                    uint64_t hdr_addr0 = child - 8ULL;
                    uint64_t hdr = minor_read(minor, hdr_addr0);
                    uint64_t tag = hdr & 0xFFULL;
@@ -92,32 +92,3 @@ diff --git a/generational/snapshot/GC_Gen_Impl.c b/generational/snapshot/GC_Gen_
                    {
                      uint64_t hdr_addr0 = child - 8ULL;
                      uint64_t hdr = minor_read(minor, hdr_addr0);
-@@ -1839,6 +1896,28 @@
-   {
-     uint64_t target_hdr_raw = v - 8ULL;
-     uint64_t target_hdr = target_hdr_raw;
-+    /* HAND PATCH 14 (see ../PATCHES.md) -- UNVERIFIED.
-+       An infix pointer aims at an Infix_tag(249) header INSIDE a closure, not
-+       at the closure's own header. Darkening v-8 recolours that inner header
-+       and leaves the enclosing closure white, so a closure reachable only via
-+       infix pointers is swept while live. Stock caml_darken does
-+       `v -= Infix_offset_val(v)` first; mirror that. The infix header's
-+       wosize field holds the offset back to the closure, in words. */
-+    {
-+      uint64_t ih = read_word(heap, target_hdr_raw);
-+      if ((ih & 0xFFULL) == 249ULL) {
-+        /* Same soundness condition as HAND PATCH 15: `tag == 249` is applied
-+           to a word not known to be a header, and an OCaml integer can have
-+           low byte 0xf9. Require the implied parent to be in-heap AND a real
-+           Closure_tag(247) block before redirecting -- without the bounds
-+           test the computed parent can fall below zero_addr and
-+           darken_if_white_bounded would then read/write outside the heap. */
-+        uint64_t parent = v - ((ih >> 10U) * 8ULL);
-+        if (parent > zero_addr1 + 8ULL && parent < heap_size_u640 &&
-+            (read_word(heap, parent - 8ULL) & 0xFFULL) == 247ULL)
-+          target_hdr = parent - 8ULL;
-+      }
-+    }
-     darken_if_white_bounded(heap, st, target_hdr);
-   }
- }

@@ -22,6 +22,7 @@ module Seq = FStar.Seq
 module V = Pulse.Lib.Vec
 module B = Pulse.Lib.Box
 module SZ = FStar.SizeT
+module U64 = FStar.UInt64
 
 /// ---------------------------------------------------------------------------
 /// Gray Stack Type
@@ -58,6 +59,17 @@ let is_gray_stack (st: gray_stack) (s: Seq.seq obj_addr) : slprop =
       (forall (i:nat). i < Seq.length s ==>
         (Seq.index s i <: U64.t) == Seq.index contents (SZ.v t + i))
     )
+
+ghost
+fn stack_facts (st: gray_stack)
+  requires is_gray_stack st 's
+  ensures is_gray_stack st 's **
+          pure (Seq.length 's <= stack_capacity st /\ stack_capacity st > 0)
+{
+  unfold is_gray_stack;
+  with t contents. _;
+  fold (is_gray_stack st 's);
+}
 
 /// ---------------------------------------------------------------------------
 /// Helper Lemmas (pure F*)
@@ -182,20 +194,7 @@ fn is_full (st: gray_stack)
   b
 }
 
-fn stack_len (st: gray_stack)
-  requires is_gray_stack st 's
-  returns n: SZ.t
-  ensures is_gray_stack st 's ** pure (SZ.v n == Seq.length 's)
-{
-  unfold is_gray_stack;
-  with t contents. _;
-  let top_val = B.op_Bang st.top;
-  let n = SZ.sub st.cap top_val;
-  fold (is_gray_stack st 's);
-  n
-}
-
-#push-options "--z3rlimit 20"
+#push-options "--z3rlimit 10"
 fn push (st: gray_stack) (addr: obj_addr)
   requires is_gray_stack st 's ** pure (Seq.length 's < stack_capacity st)
   ensures is_gray_stack st (Seq.cons addr 's)
@@ -211,7 +210,7 @@ fn push (st: gray_stack) (addr: obj_addr)
 }
 #pop-options
 
-#push-options "--z3rlimit 20"
+#push-options "--z3rlimit 10"
 fn pop (st: gray_stack)
   requires is_gray_stack st 's ** pure (Seq.length 's > 0)
   returns v: obj_addr

@@ -29,7 +29,9 @@ F\*/Pulse source so the extraction is usable directly.
 | 3,4 | Scan range / HWM | ✅ **ELIMINATED** | Bridge now walks fwd_arr + calls `update_one_object`; `update_all_objects` reverted to clean extraction |
 | 9  | Infix forwarding | ✅ **DONE** | Phased calls + infix fwd fixup in bridge |
 | 14 | Infix-aware `check_and_darken_bounded` | ✅ **DONE** | Verified upstream; the extraction now redirects infix pointers itself. Hand patch retired. |
-| 15 | Guard the infix tag test with `Closure_tag` | ⚠️ **HAND PATCH — UNVERIFIED** | See below. Same file, same caveat. Exposed only after 14. |
+| 15 | Guard the infix tag test with `Closure_tag` | ✅ **RETIRED** | Matches stock OCaml's `caml_darken`, which tests `Infix_tag` alone. See below. |
+| 15b | Bound the infix offset before dereferencing | ✅ **RETIRED** | Removed with 15; it existed only to make 15's dereference safe. See below. |
+| 16 | No-scan guard in the minor BFS | ✅ **DONE** | Verified upstream as `GC.Gen.MinorHeap.minor_scan_wosize` (0 for tag >= 251). Hand patch redundant. |
 
 ### Extern Configuration (GC.Spec.ZeroAddr + GC.Gen.Base)
 
@@ -874,6 +876,46 @@ leverage change for closing the performance gap with stock OCaml.
    or accept as 1-word bridge patch
 5. **Verified alloc/init** (B1, B12) — move heap init and retry loop into
    verified Pulse code
+
+---
+
+## Status: the snapshot carries no hand patches
+
+As of the merge of `msr/main` into `native`, `generational/snapshot/` is
+**byte-identical to the KaRaMeL extraction** — every hand patch has been
+retired and `patches/snapshot/` is gone. `make snapshot` now reproduces the
+committed tree exactly, and the `git diff --quiet` check in
+`.github/workflows/verify.yml` is a straight equality test again.
+
+Why each one went:
+
+  * **14** (infix-aware darkening, major heap) — upstream proved it in
+    `GC.Impl.MarkBounded`; the extraction redirects infix pointers itself.
+  * **16** (no-scan guard in the minor BFS) — upstream retired the
+    `minor_no_scan_invariant` hypothesis and made the nursery scan window
+    `GC.Gen.MinorHeap.minor_scan_wosize`, which is 0 for `tag >= 251`. The
+    guard became unreachable code.
+  * **15 / 15b** (`Closure_tag` side condition, and the bound that made its
+    dereference safe) — *not* superseded by a proof. Retired on two grounds:
+    stock OCaml's own `caml_darken` (`runtime/major_gc.c:287`) tests
+    `t == Infix_tag` with no tag or bounds check either, so keeping them made
+    us stricter than the collector we are a drop-in replacement for; and the
+    mechanism that manufactured false positives was patch 16's bug, now fixed
+    at the source. With no-scan bodies no longer scanned, `scan_loop` only
+    ever sees genuine OCaml values, and a genuine value is either an odd
+    immediate or a pointer to a real block start.
+
+  **What this costs, stated plainly.** `minor_infix_wf`
+  (`generational/spec/GC.Gen.MinorHeap.fsti:325`) and `infix_addr_conds`
+  (`common/spec/GC.Spec.Object.fsti:445`) both still *assume* that an
+  infix-looking address has a real `Closure_tag` parent at a sane offset.
+  Nothing checks it at runtime any more. If that assumption is ever violated
+  — by a bridge bug rather than by the mutator — `parent` is unbounded, and
+  both `minor_read` (an unchecked `read_u64_le`) and `fwd_arr[parent_idx]`
+  (a raw index into a nursery-sized `calloc`) will read out of bounds. That
+  is the measured SIGSEGV of bug 13, 15.3 MiB below a 2 MiB nursery. The
+  sections below are kept for that reason: they are the write-up of what the
+  runtime no longer defends against.
 
 ---
 

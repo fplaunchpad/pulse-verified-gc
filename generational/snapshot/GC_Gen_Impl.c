@@ -1666,8 +1666,18 @@ K___uint64_t_uint64_t allocate(heap_t heap, uint64_t fp, uint64_t wosize)
           }
           else
           {
-            uint64_t alloc_hdr = makeHeader(block_wz, white, 0ULL);
+            /* HAND PATCH (experiment): give the object EXACTLY the requested
+               size. A 1-word leftover cannot be linked into the free list, so
+               leave it as its own zero-length block: the heap stays parseable
+               and fused_sweep_coalesce absorbs it (flush_blue_impl already
+               declines to link a wz==0 run). Mirrors stock OCaml's
+               nf_allocate_block (runtime/freelist.c:113). Previously the header
+               took block_wz, so the object declared a field it did not have. */
+            uint64_t alloc_hdr = makeHeader(wz, white, 0ULL);
             write_word(heap, hd_addr, alloc_hdr);
+            if (block_wz > wz)
+              write_word(heap, hd_addr + (wz + 1ULL) * 8ULL,
+                         makeHeader(0ULL, white, 0ULL));
             if (vp == 0ULL)
             {
               head_fp = next;
@@ -1796,8 +1806,18 @@ K___uint64_t_uint64_t allocate_part1(heap_t heap, uint64_t fp, uint64_t wosize)
           }
           else
           {
-            uint64_t alloc_hdr = makeHeader(block_wz, white, 0ULL);
+            /* HAND PATCH (experiment): give the object EXACTLY the requested
+               size. A 1-word leftover cannot be linked into the free list, so
+               leave it as its own zero-length block: the heap stays parseable
+               and fused_sweep_coalesce absorbs it (flush_blue_impl already
+               declines to link a wz==0 run). Mirrors stock OCaml's
+               nf_allocate_block (runtime/freelist.c:113). Previously the header
+               took block_wz, so the object declared a field it did not have. */
+            uint64_t alloc_hdr = makeHeader(wz, white, 0ULL);
             write_word(heap, hd_addr, alloc_hdr);
+            if (block_wz > wz)
+              write_word(heap, hd_addr + (wz + 1ULL) * 8ULL,
+                         makeHeader(0ULL, white, 0ULL));
             if (vp == 0ULL)
             {
               head_fp = next;

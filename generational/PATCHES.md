@@ -32,6 +32,7 @@ F\*/Pulse source so the extraction is usable directly.
 | 15 | Guard the infix tag test with `Closure_tag` | ✅ **RETIRED** | Matches stock OCaml's `caml_darken`, which tests `Infix_tag` alone. See below. |
 | 15b | Bound the infix offset before dereferencing | ✅ **RETIRED** | Removed with 15; it existed only to make 15's dereference safe. See below. |
 | 16 | No-scan guard in the minor BFS | ✅ **DONE** | Verified upstream as `GC.Gen.MinorHeap.minor_scan_wosize` (0 for tag >= 251). Hand patch redundant. |
+| 17 | Allocator declares the whole block, not the request | ⚠️ **HAND PATCH — UNVERIFIED** | A 1-word leftover is absorbed and counted in the header, so the object declares a field it does not have. See below. |
 
 ### Extern Configuration (GC.Spec.ZeroAddr + GC.Gen.Base)
 
@@ -879,13 +880,14 @@ leverage change for closing the performance gap with stock OCaml.
 
 ---
 
-## Status: the snapshot carries no hand patches
+## Status: the snapshot carries one hand patch
 
-As of the merge of `msr/main` into `native`, `generational/snapshot/` is
-**byte-identical to the KaRaMeL extraction** — every hand patch has been
-retired and `patches/snapshot/` is gone. `make snapshot` now reproduces the
-committed tree exactly, and the `git diff --quiet` check in
-`.github/workflows/verify.yml` is a straight equality test again.
+The merge of `msr/main` into `native` retired every hand patch, leaving
+`generational/snapshot/` byte-identical to the KaRaMeL extraction. **Patch 17
+below reopened it**: `patches/snapshot/` holds one patch again, and the
+committed snapshot is once more "extraction + one documented hand patch".
+Everything said below about the mechanism still applies; the difference is that
+there is something for it to re-apply.
 
 Why each one went:
 
@@ -1501,3 +1503,125 @@ depend on the layout", and the two should not be conflated again.
 
 Until one of these lands, the unverified status of the fast path should be
 stated explicitly wherever the project describes what is verified.
+
+---
+
+## Patch 17 — the allocator declares the whole block, not the request (OPEN)
+
+**Status: hand patch in `patches/snapshot/0001-alloc-exact-wosize.patch`.
+Unverified. Fixes a memory-safety bug; the fix belongs in the F* source.**
+
+### The bug
+
+`allocate_part1` (promotion) and `allocate` (direct major allocation) split a
+free block only when the remainder can itself be a block — one word for a
+header plus at least one for a body:
+
+```c
+uint64_t leftover = block_wz - wz;
+if (leftover >= 2ULL) { /* split; remainder gets its own blue header */ }
+else                  { /* leftover 0 or 1: hand over the WHOLE block */
+  uint64_t alloc_hdr = makeHeader(block_wz, white, 0ULL);   /* <-- full size */
+}
+```
+
+A leftover of exactly 1 cannot be represented, so the whole block is allocated
+— and the header is written with `block_wz`, one more than was requested. The
+promoted object therefore **declares a field it does not have**. Promotion
+zero-fills that word:
+
+```c
+if (actual_wz > wosize1) write_word(major, new_obj + wosize1 * 8ULL, 0ULL);
+```
+
+and `0` is not a representable OCaml value: immediates are odd (`Val_int(0) ==
+1`) and pointers are non-null. Every generic traversal — `caml_hash`,
+polymorphic compare, marshalling, the collector's own field scan — reads it,
+finds `Is_block(0)` true, and dereferences a header at `0 - 8`.
+
+Worse, the size is *program-visible*: `Array.length` and `Obj.size` read
+`Wosize_val` straight from the header, so an over-allocated array reports a
+phantom extra element. `Hashtbl` relies on its bucket array's length being a
+power of two, which is how this surfaced.
+
+### How it was found
+
+`tests/ast-invariants/'test.ml'` — the one entry in the OCaml testsuite not in
+`ci/expected-failures.txt`. Deterministic reproducer, no `OCAMLRUNPARAM`
+needed:
+
+```
+MIN_EXPANSION_WORDSIZE=8388608 ./test.opt <ocaml-tree-root>     -> SIGSEGV
+```
+
+It is pressure-gated because over-allocation needs a fragmented free list:
+`allocate_part1` is first-fit, so while a large unallocated region remains it
+always splits that and never touches small fragments. Below ~4M words the
+heap-capacity check fires first and reports cleanly; above ~32M there is no
+fragmentation; in between, it crashes. Both bytecode and native are affected,
+measured — the testsuite only reports native because the test's own header
+declares `** native`. Stock OCaml passes the same program in both flavours.
+
+### The applied patch
+
+Give the object exactly the requested size and leave the spare word as its own
+zero-length block:
+
+```c
+uint64_t alloc_hdr = makeHeader(wz, white, 0ULL);
+write_word(heap, hd_addr, alloc_hdr);
+if (block_wz > wz)
+  write_word(heap, hd_addr + (wz + 1ULL) * 8ULL, makeHeader(0ULL, white, 0ULL));
+```
+
+This is safe because the sweeper already understands fragments:
+`flush_blue_impl` writes a header for a one-word run but deliberately does
+*not* link it (`if (wz > 0ULL)` guards the link), precisely because a
+zero-length block has no body word to hold the free-list pointer.
+`fused_sweep_coalesce` then absorbs it into an adjacent garbage run.
+
+Stock OCaml solves the same case the same way, and its comment is worth
+quoting (`runtime/freelist.c:113`, `nf_allocate_block`):
+
+> *"The free block is 1 word longer than the requested size. Detach the block
+> from the free list. The remaining word cannot be linked: turn it into an
+> empty block (header only), and return the rest."*
+
+Stock right-justifies the object inside the free block, putting the spare word
+*before* it; this patch leaves it *after*. Stock's ordering exists to keep
+free-list links stable across a **split**, which does not apply here, so the
+simpler placement is equivalent for the leftover-1 case.
+
+A consequence: the `if (actual_wz > wosize1)` padding writes in the promotion
+path are now dead code, since the allocator no longer over-allocates.
+
+### Evidence
+
+Every previously failing configuration passes, on both flavours:
+
+| heap (words) | native before | native after | bytecode before | bytecode after |
+|---|---|---|---|---|
+| 4,194,304  | SIGSEGV | pass | SIGSEGV | pass |
+| 8,388,608  | SIGSEGV | pass | SIGSEGV | pass |
+| 16,777,216 | SIGSEGV | pass | SIGSEGV | pass |
+| default + `OCAMLRUNPARAM=b` (the CI config) | SIGSEGV | pass | — | — |
+
+No regressions: `infix_closures` (2597 checks), `no_scan`, `make_vect_barrier`
+and `nursery_no_scan_interior` all pass, each also differentially against
+stock; `noscan_stress` and the native smoke tests are clean.
+
+Note that an earlier, smaller candidate — writing `Val_long(0)` into the pad
+word instead of `0` — appeared to fix native and did not. It worked only
+because `1` is the representation of `Hashtbl`'s `Empty`, so the phantom bucket
+read as empty by luck; bytecode still crashed, and a poison pad value
+(`Val_long(0xBAD)`) showed the interpreter reading the padding as data. The
+size, not the pad value, is the bug.
+
+### Plan to eliminate
+
+Fix `GC.Impl.Allocator` so the allocated block's declared wosize equals the
+requested wosize, emitting the one-word remainder as a `wosize = 0` block. The
+property to state and prove is exactly that equality; `GC.Spec.Allocator`'s
+split lemmas already distinguish the splittable and non-splittable cases, so
+the work is in the non-splittable branch. Until then this patch is re-applied
+by `make -C generational apply-snapshot-patches`.

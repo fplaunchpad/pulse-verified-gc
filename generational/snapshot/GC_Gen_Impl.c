@@ -1666,13 +1666,27 @@ K___uint64_t_uint64_t allocate(heap_t heap, uint64_t fp, uint64_t wosize)
           }
           else
           {
-            /* HAND PATCH (experiment): give the object EXACTLY the requested
-               size. A 1-word leftover cannot be linked into the free list, so
-               leave it as its own zero-length block: the heap stays parseable
-               and fused_sweep_coalesce absorbs it (flush_blue_impl already
-               declines to link a wz==0 run). Mirrors stock OCaml's
-               nf_allocate_block (runtime/freelist.c:113). Previously the header
-               took block_wz, so the object declared a field it did not have. */
+            /* HAND PATCH 17 (see ../PATCHES.md) -- UNVERIFIED.
+               Give the object EXACTLY the requested size. A 1-word leftover
+               cannot be linked into the free list (a free block needs a header
+               plus a body word to hold the link), so leave it as its own
+               zero-length block: the heap stays tiled and
+               fused_sweep_coalesce absorbs it -- flush_blue_impl already
+               declines to link a wz==0 run. Mirrors stock OCaml's
+               nf_allocate_block (runtime/freelist.c:113).
+
+               The header used to take block_wz, one more than requested, which
+               broke two different things:
+
+                 - promotion kept that header and zero-filled the phantom
+                   field, and 0 is not a representable OCaml value (immediates
+                   are odd, pointers non-null), so every generic traversal
+                   dereferenced it;
+
+                 - on the direct path caml_alloc_shr_aux overwrites the header
+                   with the REQUESTED wosize, so the spare word ended up in no
+                   block at all and the linear heap walk read it as the next
+                   header, losing its place. */
             uint64_t alloc_hdr = makeHeader(wz, white, 0ULL);
             write_word(heap, hd_addr, alloc_hdr);
             if (block_wz > wz)
@@ -1806,13 +1820,27 @@ K___uint64_t_uint64_t allocate_part1(heap_t heap, uint64_t fp, uint64_t wosize)
           }
           else
           {
-            /* HAND PATCH (experiment): give the object EXACTLY the requested
-               size. A 1-word leftover cannot be linked into the free list, so
-               leave it as its own zero-length block: the heap stays parseable
-               and fused_sweep_coalesce absorbs it (flush_blue_impl already
-               declines to link a wz==0 run). Mirrors stock OCaml's
-               nf_allocate_block (runtime/freelist.c:113). Previously the header
-               took block_wz, so the object declared a field it did not have. */
+            /* HAND PATCH 17 (see ../PATCHES.md) -- UNVERIFIED.
+               Give the object EXACTLY the requested size. A 1-word leftover
+               cannot be linked into the free list (a free block needs a header
+               plus a body word to hold the link), so leave it as its own
+               zero-length block: the heap stays tiled and
+               fused_sweep_coalesce absorbs it -- flush_blue_impl already
+               declines to link a wz==0 run. Mirrors stock OCaml's
+               nf_allocate_block (runtime/freelist.c:113).
+
+               The header used to take block_wz, one more than requested, which
+               broke two different things:
+
+                 - promotion kept that header and zero-filled the phantom
+                   field, and 0 is not a representable OCaml value (immediates
+                   are odd, pointers non-null), so every generic traversal
+                   dereferenced it;
+
+                 - on the direct path caml_alloc_shr_aux overwrites the header
+                   with the REQUESTED wosize, so the spare word ended up in no
+                   block at all and the linear heap walk read it as the next
+                   header, losing its place. */
             uint64_t alloc_hdr = makeHeader(wz, white, 0ULL);
             write_word(heap, hd_addr, alloc_hdr);
             if (block_wz > wz)

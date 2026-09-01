@@ -1544,6 +1544,46 @@ Worse, the size is *program-visible*: `Array.length` and `Obj.size` read
 phantom extra element. `Hashtbl` relies on its bucket array's length being a
 power of two, which is how this surfaced.
 
+### Two different consequences, one root cause
+
+The over-declared header breaks two paths in different ways, and only the
+first was diagnosed from a crash.
+
+**Promotion** keeps the allocator's header, so the object declares a field it
+does not have, and fills it with `0`:
+
+```c
+if (actual_wz > wosize1) write_word(major, new_obj + wosize1 * 8ULL, 0ULL);
+```
+
+That is the `ast-invariants` crash: a live block with a field no traversal can
+interpret.
+
+**Direct major allocation** behaves differently, because the runtime writes the
+header itself after `verified_allocate` returns
+(`patches/runtime_gen.patch`, `caml_alloc_shr_aux`):
+
+```c
+hp = (header_t *) verified_allocate(wosize, (uint8_t)tag);
+Hd_hp (hp) = Make_header_with_profinfo (wosize, tag, Caml_white, profinfo);
+```
+
+Here the size is *corrected* — the header ends up saying `wosize` — so there is
+no phantom field. But the block was `wosize + 2` words and the object occupies
+only `wosize + 1`, which leaves the final word **in no block at all**. Every
+linear heap walk computes `next = cur + (wosize + 1) * 8`, lands exactly on
+that orphaned word, and decodes whatever stale free-block content is there as
+the next header. The walk loses its place, and every block after it in that
+pass is misparsed.
+
+So the promotion path corrupts a *value*; the direct path corrupts the *heap
+tiling*. Patching both allocators fixes both, but note the confidence
+difference: the promotion bug was reproduced, instrumented and re-tested, while
+the direct-path desync is inferred from the arithmetic above and has no failing
+test of its own. It needs an allocation above `Max_young_wosize` (256 words)
+landing on a free block exactly one word too large — the same rare
+fragmentation condition, in a rarer size class.
+
 ### How it was found
 
 `tests/ast-invariants/'test.ml'` — the one entry in the OCaml testsuite not in

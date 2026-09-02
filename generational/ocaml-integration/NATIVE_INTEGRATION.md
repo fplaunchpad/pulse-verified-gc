@@ -229,12 +229,23 @@ It is called from `vergc_native_run_minor_collection()` and from the top of
 `do_full_gc()`, because a full GC can be entered without passing through the
 minor path (`verified_allocate()` runs one when a major allocation needs space).
 
-`verified_gc/spike_young_ptr_invariant.c` is a standalone emulation of this dance
-— 200,000 allocations over a 4 KB buffer, asserting `young_ptr == result - 8`
-after every trap and no overlap between epochs. It caught a real bug (missing the
-`young_ptr += whsize` undo before computing `used_bytes`). Note it cannot catch
-the complement error: its only assertion on the value is `bump_ref <= HEAP_SIZE`,
-true either way, and its stand-in collector never reads `bump_ref`.
+A standalone spike once emulated this dance — 200,000 allocations over a 4 KB
+buffer, asserting `young_ptr == result - 8` after every trap and no overlap
+between epochs — and it earned its keep by catching a real bug here: the missing
+`young_ptr += whsize` undo before computing `used_bytes`. It has since been
+removed (it was `verified_gc/spike_young_ptr_invariant.c`, added in 65d1f3b and
+never part of any build), because the translation is now exercised against a
+real runtime by the native smoke and regression targets rather than against an
+emulation:
+
+```
+make -C generational/ocaml-integration/tests test-native
+```
+
+Worth recording what the spike could *not* do, since it bounds how much
+reassurance to take from that era: it could never catch the complement error —
+its only assertion on the value was `bump_ref <= HEAP_SIZE`, true either way,
+and its stand-in collector never read `bump_ref`.
 
 ### 2.7 Infix pointers
 

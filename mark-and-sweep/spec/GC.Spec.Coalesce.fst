@@ -3580,7 +3580,7 @@ private let flush_preserves_linkable
       end
     end
 
-(*private let coalesce_empty_case
+private let coalesce_empty_case
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   (all_objs: seq obj_addr)
@@ -4023,4 +4023,3 @@ let coalesce_establishes_fl_exact g fp =
   FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
   coalesce_aux_fl_exact g g zero_addr (objects zero_addr g) 0UL 0 0UL
     (objects zero_addr g)
-*)

@@ -3132,8 +3132,12 @@ private let rec flush_walk_reaches
       U64.v s <= U64.v (hd_address (first_blue <: obj_addr)) /\
       Seq.mem y (objects (hd_address (first_blue <: obj_addr))
                    (fst (flush_blue g first_blue run_words fp))))
-    (ensures
-      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+     (ensures
+      (let g' = fst (flush_blue g first_blue run_words fp) in
+       Seq.mem y (objects s g') /\
+       (Seq.mem y (objects (hd_address (first_blue <: obj_addr)) g') \/
+        (Seq.mem y (objects s g) /\
+         U64.v y + U64.v mword <= U64.v (hd_address (first_blue <: obj_addr))))))
     (decreases (Seq.length (objects s g)))
   = let g' = fst (flush_blue g first_blue run_words fp) in
     flush_blue_preserves_length g first_blue run_words fp;
@@ -3337,7 +3341,7 @@ private let flush_objects_cases
        (U64.v y + U64.v (wosize_of_object y g) * U64.v mword
           <= U64.v (hd_address (first_blue <: obj_addr)) \/
         U64.v (hd_address y) >= run_end)))
-  = admit ()
+  = admit()
 
 private let flush_objects_reflect
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)

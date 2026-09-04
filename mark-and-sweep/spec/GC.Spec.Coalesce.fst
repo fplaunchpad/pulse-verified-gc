@@ -3318,21 +3318,46 @@ private let flush_preserves_prefix_membership
   = objects_addresses_gt_start zero_addr g y;
     flush_prefix_from g first_blue run_words fp zero_addr y
 
-private let flush_objects_reflect
-  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
+private let flush_objects_cases
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr) (run_end: nat)
   : Lemma
     (requires
-      run_words > 0 /\
+      run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
       Seq.length g == heap_size /\
       U64.v first_blue >= U64.v mword /\
       U64.v first_blue < heap_size /\
       U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == run_end /\
+      run_end <= heap_size /\
+      Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))))
+    (ensures
+      y == (first_blue <: obj_addr) \/
+      (Seq.mem y (objects zero_addr g) /\
+       (U64.v y + U64.v (wosize_of_object y g) * U64.v mword
+          <= U64.v (hd_address (first_blue <: obj_addr)) \/
+        U64.v (hd_address y) >= run_end)))
+  = admit ()
+
+private let flush_objects_reflect
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      run_words - 1 < pow2 54 /\
+      U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword <= heap_size /\
       Seq.mem y (objects zero_addr (fst (flush_blue g first_blue run_words fp))) /\
       y <> (first_blue <: obj_addr))
     (ensures Seq.mem y (objects zero_addr g) /\
              (U64.v y + U64.v (wosize_of_object y g) * U64.v mword <= U64.v (hd_address (first_blue <: obj_addr)) \/
               U64.v (hd_address y) >= U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword))
-  = admit ()
+  = hd_address_spec (first_blue <: obj_addr);
+    flush_objects_cases g first_blue run_words fp y
+      (U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword)
 
 private let rec flush_above_from
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)

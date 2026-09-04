@@ -3543,15 +3543,44 @@ private let flush_preserves_linkable
   : Lemma
     (requires
       run_words >= 2 /\
+      run_words - 1 < pow2 54 /\
       Seq.length g == heap_size /\
       U64.v first_blue >= U64.v mword /\
       U64.v first_blue < heap_size /\
       U64.v first_blue % U64.v mword == 0 /\
+      U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword <= heap_size /\
       linkable_heap g)
     (ensures linkable_heap (fst (flush_blue g first_blue run_words fp)))
-  = admit ()
+  = hd_address_spec (first_blue <: obj_addr);
+    flush_blue_preserves_length g first_blue run_words fp;
+    flush_blue_header_spec g (first_blue <: obj_addr) run_words fp;
+    let g' = fst (flush_blue g first_blue run_words fp) in
+    let run_end = U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword in
+    introduce forall (obj: obj_addr).
+      Seq.mem obj (objects zero_addr g') ==>
+      (U64.v (wosize_of_object obj g') >= 1 /\
+       U64.v (hd_address obj) + U64.v mword * 2 <= heap_size)
+    with introduce _ ==> _
+    with begin
+      flush_objects_cases g first_blue run_words fp obj run_end;
+      if obj = (first_blue <: obj_addr) then begin
+        let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
+        makeHeader_getWosize wz_u64 Blue 0UL;
+        wosize_of_object_spec obj g';
+        assert (U64.v (wosize_of_object obj g') >= 1);
+        assert (U64.v (hd_address obj) + U64.v mword * 2 <= heap_size)
+      end
+      else begin
+        hd_address_spec obj;
+        flush_blue_preserves_outside g first_blue run_words fp (hd_address obj);
+        wosize_of_object_spec obj g;
+        wosize_of_object_spec obj g';
+        assert (U64.v (wosize_of_object obj g') >= 1);
+        assert (U64.v (hd_address obj) + U64.v mword * 2 <= heap_size)
+      end
+    end
 
-private let coalesce_empty_case
+(*private let coalesce_empty_case
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   (all_objs: seq obj_addr)
@@ -3994,3 +4023,4 @@ let coalesce_establishes_fl_exact g fp =
   FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
   coalesce_aux_fl_exact g g zero_addr (objects zero_addr g) 0UL 0 0UL
     (objects zero_addr g)
+*)

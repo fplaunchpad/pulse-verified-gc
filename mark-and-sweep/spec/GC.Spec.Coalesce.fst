@@ -3363,6 +3363,56 @@ private let flush_objects_reflect
     flush_objects_cases g first_blue run_words fp y
       (U64.v (hd_address (first_blue <: obj_addr)) + run_words * U64.v mword)
 
+module SI = GC.Spec.SweepInv
+
+private let rec run_walk_reaches_end
+  (g: heap) (s: hp_addr) (run_end: nat) (y: obj_addr)
+  : Lemma
+    (requires
+      Seq.length g == heap_size /\
+      U64.v s % U64.v mword == 0 /\
+      U64.v s <= run_end /\
+      run_end < heap_size /\
+      run_end % U64.v mword == 0 /\
+      SI.heap_objects_dense g /\
+      U64.v s + U64.v mword < heap_size /\
+      Seq.mem (f_address s) (objects zero_addr g) /\
+      Seq.mem (f_address s) (objects zero_addr g) /\
+      Seq.length (objects s g) > 0 /\
+      (forall (t: hp_addr).
+        U64.v s <= U64.v t /\ U64.v t < run_end /\
+        Seq.length (objects t g) > 0 ==>
+        U64.v t + (U64.v (getWosize (read_word g t)) + 1) * U64.v mword <= run_end) /\
+      Seq.mem y (objects (U64.uint_to_t run_end) g))
+    (ensures Seq.mem y (objects s g))
+    (decreases (Seq.length (objects s g)))
+  = if U64.v s = run_end then ()
+    else begin
+      objects_nonempty_next s g;
+      f_address_spec s;
+      let obj = f_address s in
+      let wz = getWosize (read_word g s) in
+      let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+      if next_nat >= heap_size then assert False
+      else begin
+        let next : hp_addr = U64.uint_to_t next_nat in
+        Seq.lemma_tl obj (objects next g);
+        assert (Seq.tail (objects s g) == objects next g);
+        if Seq.length (objects next g) = 0 then begin
+          SI.objects_dense_step s g;
+          assert False
+        end
+        else begin
+          SI.objects_dense_step s g;
+          SI.objects_dense_obj_in s g;
+          SI.obj_in_objects_elim (U64.uint_to_t (next_nat + U64.v mword)) g;
+          f_address_spec next;
+          run_walk_reaches_end g next run_end y;
+          mem_cons_lemma y obj (Seq.tail (objects s g))
+        end
+      end
+    end
+
 private let rec flush_above_from
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   (s: hp_addr) (y: obj_addr) (run_end: nat)

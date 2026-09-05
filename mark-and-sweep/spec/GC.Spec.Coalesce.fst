@@ -1020,6 +1020,30 @@ private let merged_block_decompose
     end
 #pop-options
 
+private let merged_block_recompose
+  (g': heap) (fb: obj_addr) (run_words: pos) (start: U64.t) (y: obj_addr)
+  : Lemma
+    (requires
+      Seq.length g' == heap_size /\
+      U64.v fb >= U64.v mword /\
+      U64.v fb < heap_size /\
+      U64.v fb % U64.v mword == 0 /\
+      U64.v fb - U64.v mword + run_words * U64.v mword == U64.v start /\
+      run_words - 1 < pow2 54 /\
+      U64.v start < heap_size /\
+      U64.v start % U64.v mword == 0 /\
+      read_word g' (hd_address fb) == makeHeader (U64.uint_to_t (run_words - 1)) Blue 0UL /\
+      Seq.mem y (objects (start <: hp_addr) g'))
+    (ensures Seq.mem y (objects (hd_address fb) g'))
+  = hd_address_spec fb;
+    let sync = hd_address fb in
+    let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
+    makeHeader_getWosize wz_u64 Blue 0UL;
+    f_address_spec sync;
+    objects_nonempty_next sync g';
+    Seq.lemma_tl fb (objects (start <: hp_addr) g');
+    mem_cons_lemma y fb (Seq.tail (objects sync g'))
+
 /// Helper: flush preserves headers of white objects that come later in the walk.
 /// Used to maintain the walk_pre invariant across the white case.
 /// ---------------------------------------------------------------------------
@@ -3372,25 +3396,29 @@ private let rec run_walk_reaches_end
       Seq.length g == heap_size /\
       U64.v s % U64.v mword == 0 /\
       U64.v s <= run_end /\
-      run_end < heap_size /\
+      run_end + U64.v mword < heap_size /\
       run_end % U64.v mword == 0 /\
       SI.heap_objects_dense g /\
       U64.v s + U64.v mword < heap_size /\
-      Seq.mem (f_address s) (objects zero_addr g) /\
       Seq.mem (f_address s) (objects zero_addr g) /\
       Seq.length (objects s g) > 0 /\
       (forall (t: hp_addr).
         U64.v s <= U64.v t /\ U64.v t < run_end /\
         Seq.length (objects t g) > 0 ==>
         U64.v t + (U64.v (getWosize (read_word g t)) + 1) * U64.v mword <= run_end) /\
-      Seq.mem y (objects (U64.uint_to_t run_end) g))
-    (ensures Seq.mem y (objects s g))
+      U64.v (hd_address y) >= run_end)
+    (ensures (Seq.mem y (objects s g) <==>
+              Seq.mem y (objects (U64.uint_to_t run_end) g)))
     (decreases (Seq.length (objects s g)))
   = if U64.v s = run_end then ()
     else begin
       objects_nonempty_next s g;
       f_address_spec s;
       let obj = f_address s in
+      hd_address_spec obj;
+      assert (U64.v (hd_address obj) == U64.v s);
+      assert (U64.v s < run_end);
+      assert (y <> obj);
       let wz = getWosize (read_word g s) in
       let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
       if next_nat >= heap_size then assert False
@@ -3413,6 +3441,50 @@ private let rec run_walk_reaches_end
       end
     end
 
+private let rec walk_agree_above_run
+  (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
+  (s: hp_addr) (y: obj_addr) (run_end: nat)
+  : Lemma
+    (requires
+      run_words >= 2 /\
+      Seq.length g == heap_size /\
+      U64.v first_blue >= U64.v mword /\
+      U64.v first_blue < heap_size /\
+      U64.v first_blue % U64.v mword == 0 /\
+      U64.v first_blue - U64.v mword + run_words * U64.v mword == run_end /\
+      run_end <= heap_size /\
+      U64.v s >= run_end /\
+      Seq.mem y (objects s g))
+    (ensures
+      Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
+    (decreases (Seq.length (objects s g)))
+  = let g' = fst (flush_blue g first_blue run_words fp) in
+    flush_blue_preserves_length g first_blue run_words fp;
+    hd_address_spec (first_blue <: obj_addr);
+    objects_nonempty_next s g;
+    f_address_spec s;
+    let obj = f_address s in
+    let wz = getWosize (read_word g s) in
+    let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+    flush_blue_preserves_outside g first_blue run_words fp s;
+    assert (read_word g' s == read_word g s);
+    objects_nonempty_next s g';
+    Seq.cons_head_tail (objects s g);
+    mem_cons_lemma y obj (Seq.tail (objects s g));
+    if y = obj then mem_cons_lemma obj obj (Seq.tail (objects s g'))
+    else begin
+      if next_nat >= heap_size then objects_tail_empty_when_done s g
+      else begin
+        let next : hp_addr = U64.uint_to_t next_nat in
+        Seq.lemma_tl obj (objects next g);
+        walk_agree_above_run g first_blue run_words fp next y run_end;
+        Seq.lemma_tl obj (objects next g');
+        mem_cons_lemma y obj (Seq.tail (objects s g'))
+      end
+    end
+
+#push-options "--z3rlimit 400 --fuel 1 --ifuel 1"
+
 private let rec flush_above_from
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t)
   (s: hp_addr) (y: obj_addr) (run_end: nat)
@@ -3425,16 +3497,71 @@ private let rec flush_above_from
       U64.v first_blue < heap_size /\
       U64.v first_blue % U64.v mword == 0 /\
       U64.v first_blue - U64.v mword + run_words * U64.v mword == run_end /\
-      run_end <= heap_size /\
+      run_end + U64.v mword < heap_size /\
       run_end % U64.v mword == 0 /\
       U64.v s % U64.v mword == 0 /\
       U64.v s <= U64.v (hd_address (first_blue <: obj_addr)) /\
+      (forall (t: hp_addr).
+        U64.v s <= U64.v t /\
+        U64.v t < U64.v (hd_address (first_blue <: obj_addr)) /\
+        Seq.length (objects t g) > 0 ==>
+        U64.v t + (U64.v (getWosize (read_word g t)) + 1) * U64.v mword
+          <= U64.v (hd_address (first_blue <: obj_addr))) /\
       U64.v (hd_address y) >= run_end /\
+      SI.heap_objects_dense g /\
+      U64.v s + U64.v mword < heap_size /\
+      Seq.mem (f_address s) (objects zero_addr g) /\
+      (forall (t: hp_addr).
+        U64.v s <= U64.v t /\ U64.v t < run_end /\
+        Seq.length (objects t g) > 0 ==>
+        U64.v t + (U64.v (getWosize (read_word g t)) + 1) * U64.v mword <= run_end) /\
       Seq.mem y (objects s g))
     (ensures
       Seq.mem y (objects s (fst (flush_blue g first_blue run_words fp))))
     (decreases (Seq.length (objects s g)))
-  = admit ()
+  = let g' = fst (flush_blue g first_blue run_words fp) in
+    flush_blue_preserves_length g first_blue run_words fp;
+    hd_address_spec (first_blue <: obj_addr);
+    if U64.v s = U64.v (hd_address (first_blue <: obj_addr)) then
+    begin
+      assert (U64.v s <= run_end);
+      assert (Seq.length (objects s g) > 0);
+      run_walk_reaches_end g s run_end y;
+      assert (Seq.mem y (objects (U64.uint_to_t run_end) g));
+      walk_agree_above_run g first_blue run_words fp (U64.uint_to_t run_end) y run_end;
+      assert (Seq.mem y (objects (U64.uint_to_t run_end) g'));
+      flush_blue_header_spec g (first_blue <: obj_addr) run_words fp;
+      merged_block_recompose g' (first_blue <: obj_addr) run_words
+        (U64.uint_to_t run_end) y
+    end
+    else begin
+      objects_nonempty_next s g;
+      f_address_spec s;
+      let obj = f_address s in
+      let wz = getWosize (read_word g s) in
+      let next_nat = U64.v s + (U64.v wz + 1) * U64.v mword in
+      flush_blue_preserves_outside g first_blue run_words fp s;
+      assert (read_word g' s == read_word g s);
+      objects_nonempty_next s g';
+      if next_nat >= heap_size then assert False
+      else begin
+        let next : hp_addr = U64.uint_to_t next_nat in
+        Seq.lemma_tl obj (objects next g);
+        assert (Seq.tail (objects s g) == objects next g);
+        mem_cons_lemma y obj (Seq.tail (objects s g));
+        if y = obj then mem_cons_lemma obj obj (Seq.tail (objects s g'))
+        else begin
+          SI.objects_dense_obj_in s g;
+          SI.obj_in_objects_elim (U64.uint_to_t (next_nat + U64.v mword)) g;
+          f_address_spec next;
+          flush_above_from g first_blue run_words fp next y run_end;
+          Seq.lemma_tl obj (objects next g');
+          mem_cons_lemma y obj (Seq.tail (objects s g'))
+        end
+      end
+    end
+
+#pop-options
 
 private let flush_objects_above
   (g: heap) (first_blue: U64.t) (run_words: nat) (fp: U64.t) (y: obj_addr) (run_end: nat)

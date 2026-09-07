@@ -1,0 +1,310 @@
+# Allocator size-exactness: investigation notes
+
+Working notes for retiring hand patch 17 (`generational/patches/snapshot/0001-alloc-exact-wosize.patch`,
+on branch `native`, marked `UNVERIFIED`) by fixing the F* source instead.
+
+Status: **investigation complete, no code changed yet.** Step 0 of the plan is done.
+
+---
+
+## 1. The bug, stated at the spec level
+
+The allocator may hand out a block declaring **one word more** than requested. This is not
+an implementation slip — it is a proved theorem.
+
+`generational/spec/GC.Gen.AllocProps.fst:125` `alloc_from_block_wosize_lemma`:
+
+```fstar
+  : Lemma (requires U64.v (getWosize hdr) >= wz)
+          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
+                    U64.v (wosize_of_object obj g') >= wz /\
+                    U64.v (wosize_of_object obj g') <= wz + 1))
+```
+
+Source, `mark-and-sweep/spec/GC.Spec.Allocator.fsti:85` `alloc_from_block`, terminal branch
+(`:122-127`):
+
+```fstar
+    else begin
+      // Exact fit (or leftover = 1, use whole block)
+      let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
+```
+
+`block_wz`, not `requested_wz`. The `leftover >= 2` guard above it is forced by the
+free-list representation: a *linked* free block needs a header **plus a body word** for the
+link (`rem_field = rem_hd + 8` ← `next_fp`), so a 1-word remainder cannot be a cell.
+
+### Why the F* argument is sound and still wrong
+
+Promotion compensates by zeroing the extra word (`zero_promote_padding`,
+`GC.Gen.Promote.fsti:77`, writes literal `0UL`), and the spec's own traversals are happy:
+`is_pointer` (`GC_Gen_Impl.c:167`) is a range check, `v >= zero_addr + 8`, so `is_pointer(0)`
+is **false** — the verified collector skips the word.
+
+OCaml disagrees. `Is_block(x)` is `((x) & 1) == 0` (`mlvalues.h:71`), so `0` is
+pointer-shaped, and specifically NULL. The two predicates disagree *exactly* on the value
+the spec chose as filler:
+
+| | `is_pointer(0)` | `Is_block(0)` |
+|---|---|---|
+| verdict | false — skipped | true — followed to NULL |
+
+`is_pointer(v) ⟹ Is_block(v)` (8-aligned implies even), never the converse. They answer
+different questions: `Is_block` is about value *encoding*; `is_pointer` is about address
+*classification*. Stock keeps these separate (`mlvalues.h` vs `address_class.h`) and
+conjoins them at use sites — `caml_darken` is `if (Is_block(v) && Is_in_heap(v))`
+(`major_gc.c:283`). So `is_pointer ≈ Is_block && Is_in_heap`, with alignment folded in.
+
+`0` is uniquely bad: rejected by `is_pointer`, accepted by `Is_block`, and not a valid
+immediate either (`Val_long(x) = (x << 1) + 1`, so `Val_int(0) == 1`). Hence "0 is not a
+representable OCaml value".
+
+### What actually crashes — no GC traversal required
+
+The dominant mechanism is not a traversal at all. The size is **program-visible**:
+
+```c
+/* array.c:39 */  return Wosize_val(array);                                     // Array.length
+/* array.c:56 */  if (idx < 0 || idx >= Wosize_val(array)) caml_array_bound_error();
+```
+
+Both read the header, so the bounds check is computed from the same inflated size — the
+safety net is defeated by the same lie. Then `stdlib/hashtbl.ml:355` (and `:504`):
+
+```ocaml
+(H.hash h.seed key) land (Array.length h.data - 1)
+```
+
+valid only for a power-of-two length, which `Hashtbl` guarantees by construction. Declare a
+`2^n` bucket array as `2^n + 1` and the mask becomes `2^n`, so the index can *be* `2^n`: in
+bounds per the header, past the real payload. It reads the phantom `0`, matches it as a
+`Cons` block, and dereferences `0 - 8`. That is the `ast-invariants` SIGSEGV, and
+`ocamlcommon` is full of `Hashtbl`s.
+
+Secondary (live, but not what surfaced it): stock structural traversals take
+`len = Wosize_val(v)` and iterate every field — `compare.c:282-283`, `hash.c:266,289`. We
+replaced the collector, not the rest of the runtime.
+
+**Correction to a claim in `PATCHES.md`:** it lists "the collector's own field scan" among
+the things that dereference the phantom word. That is wrong — `is_pointer(0)` is false, so
+the verified collector is the one reader that is immune.
+
+**Rejected shortcut (already tried):** writing `Val_long(0)` = `1` into the pad instead of
+`0`. Per `native:generational/PATCHES.md`, it appeared to fix native only because `1` is
+`Hashtbl`'s `Empty`, so the phantom bucket read as empty by luck; bytecode still crashed and
+a poison pad (`Val_long(0xBAD)`) showed the interpreter reading padding as data. *The size,
+not the pad value, is the bug.*
+
+---
+
+## 2. What stock OCaml does — the model we adopt
+
+`runtime/freelist.c:113` `nf_allocate_block`, three cases; case 1 is ours:
+
+> *"The free block is 1 word longer than the requested size. Detach the block from the free
+> list. The remaining word cannot be linked: turn it into an empty block (header only), and
+> return the rest."*
+
+implemented as `Hd_op (cur) = Make_header (0, 0, Caml_white)`.
+
+Two details that matter:
+
+- The fragment is **white**, not blue. That is deliberate: it routes the word into
+  `case Caml_white: caml_fl_merge_block(...)` in the sweeper (`major_gc.c:883-930`), which
+  is how stock reclaims it.
+- Stock **right-justifies**: `return &Field (cur, Wosize_hd (h) - wh_sz)`. The blue block
+  shrinks in place, keeping its address *and* its link, so the free list is never touched on
+  a split.
+
+Stock also debits `caml_fl_cur_wsz` by the whole block, i.e. the fragment word is
+explicitly accounted as *not free*. The verified spec has no analogue of that counter.
+
+Best-fit merge (`freelist.c:1636-1703`) absorbs a wosize-0 white block size-agnostically
+(`wosz = Wosize_whsize(cur - start)`), and when a whole run is one word it does exactly what
+verified `flush_blue` does — header, no insert — except stock writes white.
+
+---
+
+## 3. Reclamation is already proved (no coalescer change needed)
+
+This was the open question ("does the coalescing spec claim the word back?"). Answer: yes,
+structurally, and it is wosize-agnostic.
+
+- `fused_aux` (`mark-and-sweep/spec/GC.Spec.SweepCoalesce.Defs.fst:30`) branches on
+  `is_black obj g0` vs **everything else**, so a white wosize-0 fragment is accumulated like
+  any garbage block: `fused_aux g0 g rest new_fb (rw + ws + 1) fp`.
+- Run geometry, `GC.Spec.Coalesce.fst:862`:
+  `first_blue - mword + run_words * mword == start`. The accumulate branch adds `ws + 1`
+  while the walk advances `(ws+1)*8`, so it is preserved for **any** `ws`, including `0`.
+  Same invariant in the Pulse loop, `GC.Impl.FusedSweepCoalesce.fst:110-116`.
+- Conservation is `walk_end`-shaped, not a size sum. `coalesce_dense`
+  (`GC.Spec.Coalesce.Dense.fst:251`); helper `merged_block_walk_end` (`:36`) takes
+  `run_words: pos`, so run_words = 1 is in scope. Wired into
+  `GC.Gen.PostCollectionShape.fst:183`. There is no `caml_fl_cur_wsz` analogue anywhere in
+  the repo.
+- `objects` (`common/spec/GC.Spec.Fields.fst:185`) puts no lower bound on `wz` — a wosize-0
+  block advances exactly 8 bytes and is enumerated normally.
+
+What is *missing* is a citable lemma, not a proof. Plan step 5.
+
+**Colour rule (important):** the allocator's fragment must be **white**; `flush_blue`'s
+1-word run must stay **blue**. `major_gc_unreachable_final_blue`
+(`GC.Spec.Correctness.fsti:417`) requires every unreachable object in a *post-collection*
+heap to be blue. An allocator fragment appears between collections, so it is exempt. Do not
+change `flush_blue`'s colour.
+
+---
+
+## 4. What mark-and-sweep fails to handle at wosize 0
+
+All three in `sweep_object`'s white branch (`mark-and-sweep/spec/GC.Spec.Sweep.fsti:39-50`).
+This is precisely what `linkable_heap` exists to exclude.
+
+1. **Blue but not a cell.** `makeBlue obj g'` runs unconditionally while the link write is
+   guarded by `if U64.v ws > 0 && …`. So the block is blue with an unwritten link.
+   `fl_cell` requires blue ∧ wosize≥1 → blue-yet-not-a-cell → falsifies `fl_complete`.
+2. **The existing free list is dropped.** It returns `(g'', obj)` regardless, so `obj`
+   becomes the head without ever receiving the incoming `fp`; everything already on the list
+   becomes unreachable.
+3. **A header is followed as a link.** `fl_next g a = read_word g a`
+   (`GC.Spec.FreeList.fst:42`), and the link is written by `set_field g obj 1UL fp` →
+   `hd_address(obj) + mword*1` = `obj` itself. For a wosize-0 block, spanning only
+   `[hd, hd+8)`, that word **is the next block's header**.
+
+**None of it is reachable.** Verified:
+- Nothing consumes `snd (sweep …)`. The only three references repo-wide are proof-internal:
+  `GC.Spec.FreeList.Sweep.fst:93,149` (asserts) and `GC.Spec.Sweep.fst:692`.
+- Every composed theorem uses `Coalesce.coalesce (fst (sweep h_mark fp))`
+  (`GC.Spec.Correctness.fsti:313,466,476,486,500,506`) — heap only, free pointer discarded —
+  and `coalesce` restarts from `0UL`.
+- The shipped pipeline is `fused_sweep_coalesce` (`mark-and-sweep/impl/GC.Impl.fst:87`),
+  with a bridge lemma proving `fused_sweep_coalesce == coalesce (fst (sweep …))`.
+  `sweep_object` does not appear in extracted C at all (`grep` on
+  `generational/snapshot/GC_Gen_Impl.c`: 0 hits; the only sweeper is
+  `fused_sweep_coalesce` at `:251`).
+
+So `GC.Spec.Sweep.sweep` is reference semantics for an equivalence proof, not shipped code.
+Weakening `linkable_heap` **cannot introduce a runtime bug**; the exposure is re-proving a
+leaf module. `GC.Spec.FreeList.fst` is imported by nothing (only the weaker
+`.Descending` is), and `fl_exact` / `sweep_preserves_fl_exact` are not consumed by
+`GC.Spec.Correctness` or anything under `impl/`.
+
+Separate follow-up, not in scope here: fix `sweep_object` to not return an unlinked head.
+
+---
+
+## 5. Design chosen: right-justify, as stock does
+
+Let `hd = hd_address obj`, `leftover = block_wz - requested_wz`.
+
+| | remainder at `hd` | allocated header | free list |
+|---|---|---|---|
+| `leftover = 0` | none | `hd`, wosize `wz` | block detached |
+| `leftover = 1` | wosize 0, **white**, unlinked | `hd + 8`, wosize `wz` | block detached |
+| `leftover >= 2` | wosize `leftover - 1`, blue, link untouched | `hd + leftover*8`, wosize `wz` | **unchanged** |
+
+One uniform formula covers all three: `obj_out = f_address (hd + leftover * 8)`.
+
+Why this over patch 17's "fragment after the object": for `leftover >= 2` the blue block
+keeps its address and link, so `alloc_spec_preserves_fl_valid_part1` /
+`_fl_chain_terminates_part1` (`GC.Spec.Allocator.Lemmas.fsti:209,217`) become near-trivial,
+the "a new object appeared" reasoning in `alloc_from_block_rem_in_objects_part1` /
+`alloc_from_block_objects_backward_part1` disappears, and `fl_descending` holds trivially.
+
+**Ruled out:** making leftover=1 a split with a wosize-0 **blue** remainder. `alloc_spec`'s
+`fp_out` would *be* that remainder, so `fl_valid r.heap_out r.fp_out` is flatly false —
+`fl_valid` (`GC.Spec.Allocator.Lemmas.Common.fst:15`) requires `wosize >= 1` of every cell.
+
+---
+
+## 6. Step 0 results — build re-verifiability
+
+**Orphan `.checked` files are inert. Not a blocker.** Initially flagged as a risk (modules
+with `.checked` but no source, e.g. `GC.Spec.Allocator.Lemmas.{ObjNotInChain,SearchBase,
+SearchChain}`, `GC.Gen.PromoteUpdate.PromoteFields.*`, `GC.Impl.{Mark,Sweep,Closure}`).
+Confirmed harmless:
+
+- The build writes `.checked` into `$(CACHE_DIR)` = `_cache` (`Makefile:47,175,189,215`).
+- Every existing `.checked` sits *next to its source* — the old per-directory layout — so
+  the current build ignores all of them.
+- `_cache/` does not exist, so a build starts cold and regenerates everything.
+- Zero `.checked` are tracked by git; `.gitignore:1` covers `*.checked`, `:26` covers
+  `_cache/`.
+- The committed `.depend` is untracked, mtime **Aug 24**, while the newest sources are
+  **Aug 31**, and it references modules whose sources no longer exist. It is stale and gets
+  regenerated by the `--dep full` scan.
+
+**Toolchain mismatch — needs a decision before verifying.**
+
+| | pinned | local |
+|---|---|---|
+| F* | nightly-**2026-08-15** (`setup.sh:28`, `verify.yml` cache key) | **2026.05.17** (`fstar/version.txt`) |
+| Z3 | 4.15.3 | `fstar/lib/fstar/z3-4.15.3/` present |
+| cache | `_cache/` | absent |
+
+`setup.sh:68-78` compares versions and on mismatch does `rm -rf "$FSTAR_DIR"` and
+reinstalls — so running it **destroys the working local F* install** and re-downloads.
+`.checked` cache version differs between the two (nightly-2026-08-15 emits version 89), so
+old artifacts are unusable regardless.
+
+Also note: `which fstar.exe` resolves to `~/.local/bin/fstar.exe`, a different install. The
+Makefiles ignore `PATH` and use `$(CURDIR)/fstar` / `../fstar`, so that one is not in play.
+
+Use `gmake`, not `make` — the Makefile uses `private` on a target-specific variable,
+needing GNU Make ≥ 3.82.
+
+---
+
+## 7. Cost and coupling
+
+- **172 `.checked` files** in the allocator's reverse-dependency closure.
+- `GC.Spec.Allocator` is the worst cost-per-line in the repo: **188 lines, 370 s**
+  (`PROOF_COMPLEXITY.md:294`). Needs `smt.qi.eager_threshold 100` or it hangs >15 min
+  (`Makefile:26-38`).
+- `GC.Spec.Allocator.Lemmas.Part2.fst` is **3,381 lines**, a 2 (split vs exact) × 3 × 7
+  product of ~30 hand-written inductions, with measured >90 min hangs under Z3 4.15.3
+  (`Makefile:66-79`). **The split-vs-exact axis is exactly what changes** — this is the
+  schedule risk; size it first.
+- `alloc_from_block_exact` (`GC.Spec.Allocator.fsti:290`) is the one lemma whose *statement*
+  changes shape: **32 call sites**, 19 of them in `Lemmas.Part2.fst`.
+- **118** case-split sites on `leftover` vs `2`, across 11 files.
+- Full verify ~12-13 min on 24 cores warm (`PROOF_COMPLEXITY.md:1266`); CI is multi-hour
+  (360 min timeout). `--retry 3` is on by default and hides instability — re-run before
+  concluding a change is green.
+
+**Coupling with `origin/sheera/coalesce-exact`** (active, last commit 2026-09-04, 4 admits).
+Its walk-invariant clause 5, `run_words > 0 ==> run_words >= 2`, exists specifically to
+*rule out the wosize-0 flush*, and derives from `linkable_heap`. Its admitted
+`flush_preserves_linkable` is directly affected. This is the one item needing another
+person's agreement rather than just proof effort.
+
+---
+
+## 8. Payoff beyond the crash fix
+
+Exact allocation makes `promote_object_extra_field_not_pointer` (`GC.Gen.Promote.fsti:499`)
+**vacuous** — `field_idx >= wz /\ field_idx < wosize` becomes unsatisfiable. That retires:
+
+- `zero_promote_padding` and its 9 lemmas (`GC.Gen.Promote.fsti:150,156,161,167,175,181,191,
+  231,247`); the two largest have 26 and 19 call sites.
+- 3 padding-only private helpers (`Cheney.Dense.fst:233`, `CheneyPreservation.fst:130,601`).
+- Pulse `zero_padding_step` (`generational/impl/GC.Gen.Impl.Promote.fst:182`, called `:306`,
+  `inline_for_extraction` → 7 copies in the C).
+- The whole `fwd_target_extra_fields_state` chain
+  (`CheneyPreservation.Fields.fst:917-1136`) and its 5 consumers.
+
+It also closes half of the documented "Known gap" in
+`.github/copilot-instructions.md:216-219` — *"objects grows by exactly the remainder"* — by
+forcing `alloc_from_block_exact_objects_eq_part1` (`GC.Gen.AllocProps.fst:780`) to be
+restated as a case split (it is **false as stated** once `leftover = 1` adds a fragment).
+
+---
+
+## 9. Docs that are now wrong and need updating
+
+- `DESIGN_AND_IMPL.md` (~lines 990-1005) documents the over-allocation as correct-by-design
+  and describes `zero_promote_padding` as load-bearing. Blob `334b7525`, **byte-identical on
+  `ci`, `native-integration`, `native`, `main` and `msr/main`** — so even `native`, which
+  carries patch 17, contradicts its own design doc.
+- `generational/PATCHES.md` patch 17 section: the "collector's own field scan" claim (see §1)
+  and, once this lands, the whole section becomes closed rather than OPEN.

@@ -260,10 +260,57 @@ the "a new object appeared" reasoning in `alloc_from_block_rem_in_objects_part1`
 
 ## 6. Step 0 results — build re-verifiability
 
-**Orphan `.checked` files are inert. Not a blocker.** Initially flagged as a risk (modules
-with `.checked` but no source, e.g. `GC.Spec.Allocator.Lemmas.{ObjNotInChain,SearchBase,
-SearchChain}`, `GC.Gen.PromoteUpdate.PromoteFields.*`, `GC.Impl.{Mark,Sweep,Closure}`).
-Confirmed harmless:
+**Stale `.checked` files are NOT inert — delete them before building.** This was my first
+conclusion and it was wrong. They do not get *used*, but F* still finds them along the
+`--include` paths, judges them corrupt (they were emitted by a different F* and so carry a
+different cache version), and that **blocks writing the new cache**. The first cold build
+reported, once per module:
+
+```
+* Warning 247 at generational/spec/GC.Gen.PostCollectionShape.fst(0,0-0,0):
+  - Checked file _cache/GC.Gen.PostCollectionShape.fst.checked was not written.
+  - Reason: checked file generational/spec/GC.Gen.FreeListShape.fsti.checked is corrupt
+```
+
+Verification still *succeeded* (exit 0, "all modules verified") — but `_cache/` stayed
+empty, so every subsequent build would be a full cold re-verify. For a change touching 172
+modules in the allocator's closure, that is the difference between an iterable loop and an
+unusable one.
+
+**And `.depend` must go with them, in that order.** Deleting the `.checked` files alone is
+not enough. `.depend` is keyed on sources only (`Makefile:124`), so removing build artifacts
+does not invalidate it — and the copy generated during the first build had *mixed layouts*:
+the target in `_cache/`, the prerequisites in the old per-directory paths, because F* points
+a dependency at wherever it found an existing checked file.
+
+```make
+_cache/GC.Spec.FreeList.fst.checked: \
+	mark-and-sweep/spec/GC.Spec.FreeList.fst \
+	common/spec/GC.Spec.Fields.fst.checked \     # old layout -- never created again
+	common/spec/GC.Spec.Base.fsti.checked
+```
+
+With those prerequisites gone and no rule to remake them, the ordering collapsed and
+Warning 247 came back with a new reason — `checked file _cache/GC.Spec.Base.fsti.checked
+does not exist` — so still nothing cached.
+
+Full recipe, once:
+
+```sh
+find . -path ./fstar -prune -o -path ./_cache -prune -o \
+       \( -name '*.checked' -o -name '*.checked.lax' \) -print0 | xargs -0 rm -f
+rm -f .depend generational/.depend mark-and-sweep/.depend spot/.depend
+gmake -j$(nproc)
+```
+
+224 stale `.checked`, all matched by `.gitignore:1`, none tracked. Do **not** touch
+`fstar/`'s own 1151 `.checked` files — those are the toolchain's — and leave the `.depend`
+files under `generational/ocaml-integration/ocaml-4.14-*/`, which are OCaml's own.
+
+After this: Warning 247 count **0**, `.depend` consistently `_cache/`-rooted, and the cache
+populates normally.
+
+The rest of the original finding stands, and explains why deleting them is safe:
 
 - The build writes `.checked` into `$(CACHE_DIR)` = `_cache` (`Makefile:47,175,189,215`).
 - Every existing `.checked` sits *next to its source* — the old per-directory layout — so

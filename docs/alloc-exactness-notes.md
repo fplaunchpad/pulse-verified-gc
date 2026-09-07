@@ -455,3 +455,44 @@ restated as a case split (it is **false as stated** once `leftover = 1` adds a f
   carries patch 17, contradicts its own design doc.
 - `generational/PATCHES.md` patch 17 section: the "collector's own field scan" claim (see §1)
   and, once this lands, the whole section becomes closed rather than OPEN.
+
+---
+
+## 10. Step 2 progress — the root module is done
+
+`GC.Spec.Allocator.{fsti,fst}` both verify with the right-justified definition.
+
+**`GC.Spec.Allocator.fst`: OK in 20.8 s.** `PROOF_COMPLEXITY.md:294` records the previous
+definition at **369.5 s** for 188 lines — the worst cost-per-line in the repository. The new
+geometry is ~18x cheaper because the split case performs two writes instead of three (the
+remainder keeps its link, so there is no third write) and the two high-end bounds cases
+disappear. If that holds downstream it materially changes the cost estimate for this work.
+
+### Changes that were not in the plan
+
+- **`alloc_from_block_exact` had to split in two.** It covered `leftover < 2`, and those two
+  cases now differ. Narrowed to `leftover = 0`; new `alloc_from_block_frag` covers
+  `leftover = 1`. Its 32 call sites each sit in an `if bwz - wz < 2` arm and must now
+  dispatch on 0 vs 1.
+- **The two `_oob` lemmas collapsed into one.** `_split_rem_hd_oob` / `_split_rem_obj_oob`
+  existed only because the remainder sat at the high end and could run past `heap_size`.
+  With the remainder at `hd` there is a single way to fail — the object header — so
+  `alloc_from_block_oob` replaces both. 17 call sites in `GC.Gen.AllocProps.fst` and
+  `GC.Gen.PromoteUpdate.BlueAlloc.fst` need rewriting.
+- **`alloc_split_normal_read_rem_field` changed meaning.** It used to say the fresh
+  remainder's field was set to `next`. The remainder now keeps `hd` and its link at `hd + 8`
+  is never written, so it is a *preservation* fact: `read_word g' obj == read_word g obj`.
+  This is what makes the free list bit-identical across a split.
+- **`alloc_split_normal_pre` lost a conjunct** — only `hd + leftover * 8 < heap_size` is
+  needed now, not the two old high-end bounds.
+- **A `leftover < 0` guard was required.** `alloc_from_block` has no precondition tying
+  `requested_wz <= block_wz`; the old code fell into the exact-fit arm harmlessly, but the
+  new code computes `hd + leftover * 8` and needs non-negativity to typecheck. Defensive
+  arm returns `(g, next_fp)`; `alloc_search` and every unfolding lemma establish
+  `bwz >= wz`, so it is unreachable.
+
+### Measured iteration cost
+
+`tools/try-module.sh <mod> --z3smtopt '(set-option :smt.qi.eager_threshold 100)'` — the
+eager-QI flag is mandatory for this module (`Makefile:26-38`; without it, >15 min hang).
+A *failing* run costs 130-410 s because `--retry 3` retries; a passing one is 20 s.

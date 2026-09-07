@@ -3,7 +3,9 @@
 Working notes for retiring hand patch 17 (`generational/patches/snapshot/0001-alloc-exact-wosize.patch`,
 on branch `native`, marked `UNVERIFIED`) by fixing the F* source instead.
 
-Status: **investigation complete, no code changed yet.** Step 0 of the plan is done.
+Status: **investigation complete, no code changed yet.**
+Step 0 done except the baseline build, which is running. Branch: `alloc-exactness`, off
+`main` (`8bd4559`). Toolchain reinstalled to the pinned F* nightly-2026-08-15.
 
 ---
 
@@ -131,8 +133,8 @@ This was the open question ("does the coalescing spec claim the word back?"). An
 structurally, and it is wosize-agnostic.
 
 - `fused_aux` (`mark-and-sweep/spec/GC.Spec.SweepCoalesce.Defs.fst:30`) branches on
-  `is_black obj g0` vs **everything else**, so a white wosize-0 fragment is accumulated like
-  any garbage block: `fused_aux g0 g rest new_fb (rw + ws + 1) fp`.
+  `is_black obj g0` vs **everything else**, so a wosize-0 fragment is accumulated like any
+  garbage block regardless of its colour: `fused_aux g0 g rest new_fb (rw + ws + 1) fp`.
 - Run geometry, `GC.Spec.Coalesce.fst:862`:
   `first_blue - mword + run_words * mword == start`. The accumulate branch adds `ws + 1`
   while the walk advances `(ws+1)*8`, so it is preserved for **any** `ws`, including `0`.
@@ -147,11 +149,50 @@ structurally, and it is wosize-agnostic.
 
 What is *missing* is a citable lemma, not a proof. Plan step 5.
 
-**Colour rule (important):** the allocator's fragment must be **white**; `flush_blue`'s
-1-word run must stay **blue**. `major_gc_unreachable_final_blue`
-(`GC.Spec.Correctness.fsti:417`) requires every unreachable object in a *post-collection*
-heap to be blue. An allocator fragment appears between collections, so it is exempt. Do not
-change `flush_blue`'s colour.
+### Colour of the fragment: blue, not white (corrected)
+
+Initially recommended **white**, following stock literally. That is wrong for this codebase.
+Make the fragment **blue**.
+
+`flush_blue` (`GC.Spec.Coalesce.fst:75-88`) *already* produces exactly this shape — it
+writes `makeHeader wz_u64 Blue 0UL` unconditionally and the `if wz >= 1` guard then skips
+the link write, returning `(g1, fp)`:
+
+```fstar
+        let hdr = makeHeader wz_u64 Blue 0UL in
+        let g1 = write_word g hd hdr in
+        if wz >= 1 && U64.v hd + U64.v mword * 2 <= heap_size then begin
+          ... set_field g1 fb 1UL fp ...
+        end
+        else
+          (g1, fp)          // wz = 0: blue header, never linked
+```
+
+So blue wosize-0 unlinked blocks are already part of this collector's vocabulary; a white
+one would be a novel shape.
+
+| | **blue** | white (stock's literal choice) |
+|---|---|---|
+| `alloc_spec_new_objects_blue_part1` (+3 consumers) | preserved | **broken** |
+| `major_gc_unreachable_final_blue` (`Correctness.fsti:417`) | satisfied | at risk |
+| `fl_valid` / `fl_cell` (require wosize ≥ 1) | not a cell, unaffected | unaffected |
+| reclaimed by `fused_aux` (non-black ⇒ accumulated) | yes | yes |
+| `no_pointer_to_blue` (`Mark.fsti:233`) | vacuous — nothing points at a fragment | vacuous |
+| shape already produced here | yes (`flush_blue`) | novel |
+
+The decisive constraint is `alloc_spec_new_objects_blue_part1`
+(`GC.Spec.Allocator.Lemmas.fsti:314`): *every* object created by allocation is blue.
+A white fragment falsifies it, taking down its three consumers
+(`GC.Gen.CheneyPreservation.fst:484`, `GC.Gen.PromoteUpdate.BlueProm.fst:495`,
+`GC.Gen.CheneyPreservation.NonBlueOrigin.fst:273`).
+
+Why stock differs: its sweeper dispatches on colour
+(`major_gc.c:883` `case Caml_white: caml_fl_merge_block(...)`), so white is *how* stock
+routes the fragment to reclamation. `fused_aux` dispatches on `is_black` vs everything-else,
+so blue is reclaimed identically. Different mechanism, so the colour need not match — we
+match stock's *handling* (an empty header-only block), not its colour.
+
+Do not change `flush_blue`'s colour either.
 
 ---
 
@@ -200,7 +241,7 @@ Let `hd = hd_address obj`, `leftover = block_wz - requested_wz`.
 | | remainder at `hd` | allocated header | free list |
 |---|---|---|---|
 | `leftover = 0` | none | `hd`, wosize `wz` | block detached |
-| `leftover = 1` | wosize 0, **white**, unlinked | `hd + 8`, wosize `wz` | block detached |
+| `leftover = 1` | wosize 0, **blue**, unlinked | `hd + 8`, wosize `wz` | block detached |
 | `leftover >= 2` | wosize `leftover - 1`, blue, link untouched | `hd + leftover*8`, wosize `wz` | **unchanged** |
 
 One uniform formula covers all three: `obj_out = f_address (hd + leftover * 8)`.

@@ -496,3 +496,54 @@ disappear. If that holds downstream it materially changes the cost estimate for 
 `tools/try-module.sh <mod> --z3smtopt '(set-option :smt.qi.eager_threshold 100)'` — the
 eager-QI flag is mandatory for this module (`Makefile:26-38`; without it, >15 min hang).
 A *failing* run costs 130-410 s because `--retry 3` retries; a passing one is 20 s.
+
+---
+
+## 11. Downstream fallout — measured, and much smaller than feared
+
+Full `gmake -k RETRY= -j16` after the root change. **6 modules reported errors, 12 lines
+total** — and `GC.Spec.Allocator.Lemmas.Part2.fst`, the 3,381-line schedule risk, showed
+only **2**.
+
+| module | errors | note |
+|---|---|---|
+| `GC.Spec.Allocator.Lemmas.Core.fst` | 3 | exact-fit arm |
+| `GC.Gen.AllocProps.fst` | 3 | all at one lemma (61,2-77,5) |
+| `GC.Spec.Allocator.Lemmas.Part2.fst` | 2 | exact-fit arm (432-463) |
+| `GC.Gen.MinorCollectForwarding.fst` | 2 | **flake — see below** |
+| `GC.Spec.Allocator.Lemmas.Part1.fst` | 1 | 147-177 |
+| `GC.Impl.Allocator.fst` | 1 | the Pulse impl |
+
+**`RETRY=` produces false failures.** `MinorCollectForwarding.fst` reported two
+`FStar.UInt.size (src + x * 8) 64` overflow obligations under `RETRY=`, and passes cleanly
+(**OK 75.6 s**) with `--retry 3` restored. Use `RETRY=` only to *enumerate* the frontier,
+never to judge whether a module is fixed. Real list: **5 modules**.
+
+Caveat: `make -k` cannot build anything whose prerequisites failed, so 32 of 105 modules
+verified and the rest were skipped. More may surface behind these five.
+
+### The recurring repair, and where it snags
+
+Every failure is the same shape: an `else` arm covering `leftover < 2`, which must now
+dispatch on `leftover = 0` (one write at `hd`, `alloc_from_block_exact`) versus
+`leftover = 1` (two writes — fragment at `hd`, object header at `obj` —
+`alloc_from_block_frag`).
+
+Applying that split to `Lemmas.Core.fst:120` took it from **3 errors to 1**. The survivor is
+instructive: `alloc_from_block_frag`'s precondition `bwz - wz == 1`, which follows from
+three enclosing branch conditions by pure linear arithmetic, **times out**.
+
+- Asserting it explicitly does not help — the assert itself times out.
+- Raising `--z3rlimit` 50 → 200 does not help either: the run goes 80 s → 335 s and still
+  fails. That is a non-converging query, not an underfunded one — the pathology
+  `Makefile:26-38` documents for Z3 4.15.3.
+- The eager-QI flag is *not* the fix here: `Lemmas.Core.fst` is not in `EAGER_QI_CHECKED`
+  (`Makefile:264`), so `tools/try-module.sh` with no extra flags already matches what the
+  Makefile does. (`GC.Spec.Allocator.fst`, `Lemmas.Part2.fst` and `GC.Impl.Allocator.fst`
+  *are* in that list and must be run with `$(EAGER_QI)`.)
+
+Z3 is being swamped by the surrounding `alloc_search` invariant before it reaches a trivial
+goal. The repo's own idiom for this is to extract the arm into a private helper lemma whose
+context is small — which is what `alloc_exact_preserves_wfh_part1` and friends already do in
+`Lemmas.Part2.fst`. That is the next step, and it is the shape the remaining four repairs
+will most likely need too.

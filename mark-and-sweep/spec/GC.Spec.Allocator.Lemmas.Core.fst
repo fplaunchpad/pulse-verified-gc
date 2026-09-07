@@ -123,9 +123,21 @@ private let rec alloc_search_preserves_objects_part1
               objects_separated zero_addr g prev obj
             else
               objects_separated zero_addr g obj prev;
-            let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-            alloc_from_block_exact g obj wz next_fp;
-            read_write_different g hd (hd_address prev) alloc_hdr
+            let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+            if block_wz = wz then begin
+              // leftover = 0: one write, at hd
+              alloc_from_block_exact g obj wz next_fp;
+              read_write_different g hd (hd_address prev) alloc_hdr
+            end else begin
+              // leftover = 1: empty block at hd, object header at obj.
+              // block_wz >= wz, not (block_wz - wz >= 2) and block_wz <> wz.
+              assert (block_wz - wz == 1);
+              let frag = make_header 0UL blue_bits 0UL in
+              alloc_from_block_frag g obj wz next_fp;
+              read_write_different g hd (hd_address prev) frag;
+              read_write_different (write_word g hd frag) (obj <: hp_addr)
+                                   (hd_address prev) alloc_hdr
+            end
           end;
           wosize_of_object_spec prev g';
           assert (wosize_of_object prev g' == wosize_of_object prev g);

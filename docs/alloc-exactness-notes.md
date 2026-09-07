@@ -3,9 +3,14 @@
 Working notes for retiring hand patch 17 (`generational/patches/snapshot/0001-alloc-exact-wosize.patch`,
 on branch `native`, marked `UNVERIFIED`) by fixing the F* source instead.
 
-Status: **investigation complete, no code changed yet.**
-Step 0 done except the baseline build, which is running. Branch: `alloc-exactness`, off
-`main` (`8bd4559`). Toolchain reinstalled to the pinned F* nightly-2026-08-15.
+Status: **Steps 0 and 1 complete, no code changed yet.** Branch `alloc-exactness`, off
+`main` (`8bd4559`); toolchain on the pinned F* nightly-2026-08-15.
+
+Baseline is green and cached: root `gmake -j16` — 105 modules, 0 errors, 0 Warning 247,
+190 `.checked`; `gmake -C spot` — 26 modules, 0 errors. The only "admits" are 36
+`Interface X is admitted without an implementation`, the normal F*/Pulse interface-stub
+pattern (library modules plus `GC.Spec.ZeroAddr`, `GC.Impl.ArrayWord`). **No proof admits
+in the baseline** — so any that appear later are mine.
 
 ---
 
@@ -231,6 +236,60 @@ leaf module. `GC.Spec.FreeList.fst` is imported by nothing (only the weaker
 `GC.Spec.Correctness` or anything under `impl/`.
 
 Separate follow-up, not in scope here: fix `sweep_object` to not return an unlinked head.
+
+---
+
+## 4b. Step 1 result — `linkable_heap` is assumed, never established
+
+Machine-checked on the clean baseline. `linkable_heap` is:
+
+- **defined** at `GC.Spec.FreeList.fst:140`
+- a **hypothesis** at `GC.Spec.FreeList.fst:147` (`linkable_is_fl_node`) and at all ten
+  `GC.Spec.FreeList.Sweep.fst` sites (`:34,60,84,141,189,205,235,262,285`)
+- **concluded** in exactly one place, `sweep_object_preserves_linkable`
+  (`FreeList.Sweep.fst:207`) — which is *preservation*, not establishment
+
+Nothing derives it from `well_formed_heap` or from any concrete heap, and
+`fl_exact` / `sweep_preserves_fl_exact` / `sweep_establishes_fl_exact` have **no consumers
+outside the leaf** (grep confirms). So:
+
+> **The change breaks no proof.** It makes `linkable_heap` false of heaps the real allocator
+> produces, which makes the sweep-exactness theorems *vacuous* for those heaps. That is a
+> meaningfulness problem, not a build failure — the hypothesis is never discharged anywhere,
+> so nothing fails to typecheck.
+
+That reframes Step 1 from "repair 12 broken proofs" to "keep a leaf theorem meaningful".
+
+### The weakening a *blue* fragment needs (correcting the plan)
+
+The plan said "restrict `linkable_heap` to blue objects". **That does not work now that the
+fragment is blue** — it is blue with wosize 0, so it still violates the restricted form.
+
+For a blue fragment, two predicates in the same leaf file need to change:
+
+| predicate | current | needed |
+|---|---|---|
+| `linkable_heap` (`FreeList.fst:140`) | every *object* has wosize ≥ 1 | every *free-list cell* has wosize ≥ 1 |
+| `fl_complete` (`FreeList.fst:~124`) | blue ⟹ on the chain | blue **∧ wosize ≥ 1** ⟹ on the chain |
+
+`fl_complete` must move too, because a blue-but-unlinked fragment is a direct
+counterexample to "every blue object is a cell". `fl_cell`
+(`FreeList.Descending.fsti:39`) already carries the `wosize >= 1` conjunct, so the
+restricted forms are consistent with what the allocator side already assumes
+(`fl_valid_gives_wosize`).
+
+Contrast, for the record:
+
+| | blue fragment | white fragment |
+|---|---|---|
+| `linkable_heap` | weaken to cells | weaken to blue objects |
+| `fl_complete` | weaken to wosize ≥ 1 | unchanged |
+| `alloc_spec_new_objects_blue_part1` + 3 live consumers | **untouched** | **broken** |
+| where breakage lands | entirely in the dead leaf | dead leaf **+ live Cheney/promotion proofs** |
+
+Blue therefore remains the right choice: it confines every consequence to the unconsumed
+leaf module. The reason is different from what I first wrote, though — not "blue keeps
+`linkable_heap` satisfiable" (it does not), but "blue keeps the *live* proofs intact".
 
 ---
 

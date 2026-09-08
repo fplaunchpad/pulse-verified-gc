@@ -119,6 +119,34 @@ let alloc_from_block_oob (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
 /// read_word equalities instead of chaining through 3 write_words.
 /// ---------------------------------------------------------------------------
 
+#push-options "--z3rlimit 60 --fuel 1"
+/// Writes stay inside the block, so a disjoint address is untouched.
+let alloc_from_block_read_outside
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) (addr: hp_addr)
+  = hd_address_spec obj; hd_address_bounds obj;
+    reveal_opaque (`%alloc_from_block) alloc_from_block;
+    let hd = hd_address obj in
+    let bwz = U64.v (getWosize (read_word g hd)) in
+    let leftover = bwz - wz in
+    let ahn = U64.v hd + leftover * 8 in
+    if leftover < 0 then ()
+    else if ahn >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+    else begin
+      let ah : hp_addr = U64.uint_to_t ahn in
+      let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      if leftover >= 2 then begin
+        let rhdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
+        read_write_different g hd addr rhdr;
+        read_write_different (write_word g hd rhdr) ah addr ahdr
+      end else if leftover = 1 then begin
+        let frag = make_header 0UL blue_bits 0UL in
+        read_write_different g hd addr frag;
+        read_write_different (write_word g hd frag) ah addr ahdr
+      end else
+        read_write_different g hd addr ahdr
+    end
+#pop-options
+
 #push-options "--z3rlimit 25 --fuel 1"
 /// The remainder keeps hd; the object header is written above it.
 let alloc_split_normal_read_rem_hd (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)

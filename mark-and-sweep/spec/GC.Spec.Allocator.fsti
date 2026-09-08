@@ -394,6 +394,25 @@ let alloc_split_normal_result (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) 
 let alloc_split_normal_heap (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) : GTot heap =
   fst (alloc_split_normal_result g obj wz next)
 
+/// Allocation only ever writes inside the free block it was given: the header
+/// at `hd`, and (when the object is right-justified above a remainder or a
+/// fragment) the object header at `hd + leftover * 8`, which is still below
+/// `hd + (bwz + 1) * 8`.  So any address disjoint from the block is untouched.
+///
+/// Stated once, for every case at once, so callers never have to know which
+/// arm they are in.  That matters: at an `alloc_search` call site the context
+/// is large enough that even `bwz - wz == 1` does not discharge, whereas this
+/// lemma's own proof runs in a tiny context.
+val alloc_from_block_read_outside
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) (addr: hp_addr)
+  : Lemma (requires (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz >= wz /\
+                     (U64.v addr + 8 <= U64.v hd \/
+                      U64.v addr >= U64.v hd + (bwz + 1) * 8)))
+          (ensures (let (g', _) = alloc_from_block g obj wz next in
+                    read_word g' addr == read_word g addr))
+
 /// The remainder keeps `hd`; its header is shrunk to `leftover - 1`, blue.
 val alloc_split_normal_read_rem_hd (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires alloc_split_normal_pre g obj wz)

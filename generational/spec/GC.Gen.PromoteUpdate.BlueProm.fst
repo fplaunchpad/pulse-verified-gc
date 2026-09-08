@@ -502,11 +502,13 @@ private let chain_blue_proof_for_excl
     end;
     assert (Seq.mem excl (objects zero_addr major));
     // 3. dst_obj ∈ objects(major)
-    GC.Gen.AllocProps.alloc_search_obj_in_objects_pre_part1 major fp zero_addr fp
-      (if wosize = 0 then 1 else wosize) fuel;
-    GC.Gen.AllocProps.alloc_spec_obj_wosize_pre_part1 major fp wosize;
+    // dst_obj is an object of the OUTPUT heap, not the input one: with the
+    // allocation right-justified it is the piece split off from the free
+    // block, so the separation facts have to be taken in new_major.
+    GC.Gen.AllocProps.alloc_spec_obj_in_objects_part1 major fp wosize;
+    GC.Gen.AllocProps.alloc_spec_obj_wosize_part1 major fp wosize;
     // 4. Header of excl preserved → derive non-blue in major
-    copy_fields_other_hdr_precond major excl dst_obj wosize;
+    copy_fields_other_hdr_precond new_major excl dst_obj wosize;
     copy_fields_preserves_other minor new_major obj dst_obj 0 wosize (hd_address excl);
     color_of_header_eq excl res.major_out new_major;
     GC.Gen.AllocProps.alloc_spec_read_header_other_part1 major fp wosize excl;

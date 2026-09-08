@@ -608,64 +608,15 @@ let alloc_spec_obj_ne_excl (g: heap) (fp: U64.t) (requested_wz: nat) (excl: U64.
     alloc_search_obj_ne_excl g fp 0UL fp wz heap_words excl
 
 /// ---------------------------------------------------------------------------
-/// Pre-alloc wosize of obj_out >= requested_wz
-/// ---------------------------------------------------------------------------
+/// (removed) Pre-alloc wosize of obj_out
 ///
-/// The allocator returns obj_out = cur_fp only when block_wz >= wz.
-/// block_wz = wosize_of_object(cur_fp, g). So wosize_of_object(obj_out, g) >= wz.
-
-#push-options "--z3rlimit 12 --fuel 4 --ifuel 1"
-private let rec alloc_search_obj_wosize_pre_part1
-  (g: heap) (head_fp prev_fp cur_fp: U64.t) (wz: nat) (fuel: nat)
-  : Lemma
-    (requires AllocLemmas.fl_valid g cur_fp fuel /\ wz >= 1)
-    (ensures (let r = alloc_search g head_fp prev_fp cur_fp wz fuel in
-              r.obj_out <> 0UL ==>
-              (U64.v r.obj_out >= U64.v mword /\
-               U64.v r.obj_out < heap_size /\
-               U64.v r.obj_out % U64.v mword == 0 /\
-               U64.v (wosize_of_object (r.obj_out <: obj_addr) g) >= wz)))
-    (decreases fuel)
-  =
-  if fuel = 0 then ()
-  else if U64.v cur_fp < U64.v zero_addr + U64.v mword then ()
-  else if U64.v cur_fp >= heap_size then ()
-  else if U64.v cur_fp % U64.v mword <> 0 then ()
-  else begin
-    AllocLemmas.fl_valid_elim g cur_fp fuel;
-    let obj : obj_addr = cur_fp in
-    hd_address_spec obj;
-    let hd = hd_address obj in
-    let hdr = read_word g hd in
-    let block_wz = U64.v (getWosize hdr) in
-    wosize_of_object_spec obj g;
-    let next_fp =
-      if U64.v hd + 16 <= heap_size then read_word g obj
-      else 0UL
-    in
-    if block_wz >= wz then
-      // Found: obj_out = cur_fp, wosize_of_object(cur_fp, g) = block_wz >= wz
-      ()
-    else begin
-      if U64.v hd + 16 <= heap_size then
-        alloc_search_obj_wosize_pre_part1 g head_fp cur_fp next_fp wz (fuel - 1)
-      else ()
-    end
-  end
-#pop-options
-
-/// Top-level: pre-alloc wosize of allocated object >= requested
-let alloc_spec_obj_wosize_pre_part1 (g: heap) (fp: U64.t) (requested_wz: nat)
-  : Lemma (requires AllocLemmas.fl_valid g fp heap_words)
-          (ensures (let wz = (if requested_wz = 0 then 1 else requested_wz) in
-                    let r = alloc_spec g fp requested_wz in
-                    r.obj_out <> 0UL ==>
-                    (U64.v r.obj_out >= U64.v mword /\
-                     U64.v r.obj_out < heap_size /\
-                     U64.v r.obj_out % U64.v mword == 0 /\
-                     U64.v (wosize_of_object (r.obj_out <: obj_addr) g) >= wz)))
-  = let wz = if requested_wz = 0 then 1 else requested_wz in
-    alloc_search_obj_wosize_pre_part1 g fp 0UL fp wz heap_words
+/// `alloc_search_obj_wosize_pre_part1` and its wrapper asserted a wosize for
+/// `obj_out` in the INPUT heap.  That only made sense while obj_out was the
+/// free block's own address; with the allocation right-justified it is not an
+/// object of `g` at all, so the statement is meaningless rather than merely
+/// unproven.  Its one consumer (GC.Gen.PromoteUpdate.BlueProm) now works in
+/// the output heap instead.
+/// ---------------------------------------------------------------------------
 
 /// ---------------------------------------------------------------------------
 /// OOM lemma: when alloc_spec fails, heap and fp are unchanged
@@ -693,9 +644,26 @@ private let rec alloc_search_oom_unchanged
       if U64.v hd + 16 <= heap_size then read_word g obj
       else 0UL
     in
-    if block_wz >= wz then
-      // Found: obj_out = cur_fp ≠ 0UL, so the implication is vacuous
-      ()
+    if block_wz >= wz then begin
+      // Either the geometry guard fires -- and then nothing was written, so
+      // heap_out is g -- or an object was allocated, and obj_valid gives
+      // obj_out >= mword > 0, making the hypothesis vacuous.
+      let leftover = block_wz - wz in
+      let ahn = U64.v hd + leftover * 8 in
+      if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+      else begin
+        aligned_plus_mul8 (U64.v hd) leftover;
+        hd_address_spec obj;
+        hd_address_bounds obj;
+        assert (leftover * 8 < heap_size);
+        assert (U64.v (U64.uint_to_t (leftover * 8)) == leftover * 8);
+        assert (U64.v cur_fp + leftover * 8 == ahn + 8);
+        assert (U64.v cur_fp + leftover * 8 < heap_size);
+        // the allocated address is at least cur_fp, hence non-zero
+        assert (U64.v (U64.add cur_fp (U64.uint_to_t (leftover * 8)))
+                >= U64.v cur_fp)
+      end
+    end
     else
       alloc_search_oom_unchanged g head_fp cur_fp next_fp wz (fuel - 1)
   end

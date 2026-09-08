@@ -180,6 +180,41 @@ private let make_header_color_blue (wz: U64.t{U64.v wz < pow2 54})
 /// P2-pre: split_new_mem_in_old_or_rem_part1
 /// ---------------------------------------------------------------------------
 
+/// ---------------------------------------------------------------------------
+/// P2a0: alloc_small_fp_part1 — the free pointer passes through when the block
+///       is handed over whole
+/// ---------------------------------------------------------------------------
+///
+/// Covers `leftover < 2` uniformly.  The exact fit and the one-word leftover
+/// differ only in whether the header-only fragment is written above the object;
+/// in both the block leaves the free list and `next_fp` comes back unchanged.
+/// Most `< 2` arms below need nothing more than this from the unfolding.
+
+#restart-solver
+#push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
+private let alloc_small_fp_part1 (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    Seq.mem obj (objects zero_addr g) /\
+                    (let hdr = read_word g (hd_address obj) in
+                     let bwz = U64.v (getWosize hdr) in
+                     bwz >= wz /\ bwz - wz < 2))
+          (ensures snd (alloc_from_block g obj wz next_fp) == next_fp)
+  = let hd = hd_address obj in
+    let bwz = U64.v (getWosize (read_word g hd)) in
+    hd_address_spec obj;
+    hd_address_bounds obj;
+    wosize_of_object_spec obj g;
+    if bwz - wz = 1 then begin
+      // hd + (1 + wz) * 8 = hd + bwz * 8 < hd + 8 + bwz * 8 <= heap_size
+      assert (U64.v hd + 8 + bwz * 8 <= heap_size);
+      assert (U64.v hd + (1 + wz) * 8 < heap_size);
+      alloc_from_block_frag g obj wz next_fp
+    end
+    else
+      alloc_from_block_exact g obj wz next_fp
+#pop-options
+
+
 #restart-solver
 #push-options "--z3rlimit 50 --fuel 3 --ifuel 1"
 private let rec split_new_mem_in_old_or_rem_part1
@@ -193,12 +228,12 @@ private let rec split_new_mem_in_old_or_rem_part1
       (let hd = hd_address obj in
        let hdr = read_word g hd in
        U64.v (getWosize hdr) == block_wz /\
-       block_wz >= wz /\ block_wz - wz >= 2 /\
+       block_wz >= wz /\ block_wz - wz >= 1 /\
        (let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
         let rem_obj_nat = rem_hd_nat + 8 in
         let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
         rem_hd_nat < heap_size /\
-        rem_obj_nat < heap_size /\
+        rem_obj_nat <= heap_size /\
         next_hd_nat <= heap_size /\
         (forall (p: hp_addr). U64.v p < U64.v hd ==> read_word g3 p == read_word g p) /\
         getWosize (read_word g3 hd) == U64.uint_to_t wz /\
@@ -351,7 +386,7 @@ private let alloc_split_wf_part1_v2
                     Seq.mem obj (objects zero_addr g) /\
                     (let hdr = read_word g (hd_address obj) in
                      let block_wz = U64.v (getWosize hdr) in
-                     block_wz >= wz /\ block_wz - wz >= 2))
+                     block_wz >= wz /\ block_wz - wz >= 1))
           (ensures (let (g3, _) = alloc_from_block g obj wz next_fp in
                     well_formed_heap_part1 g3))
   = alloc_split_facts_part1 g obj wz next_fp;
@@ -362,7 +397,6 @@ private let alloc_split_wf_part1_v2
     let rem_obj_nat = rem_hd_nat + 8 in
     let rem_wz = block_wz - wz - 1 in
     let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-    let rem_obj_addr : obj_addr = U64.uint_to_t rem_obj_nat in
     let (g3, _) = alloc_from_block g obj wz next_fp in
     hd_address_spec obj;
     let aux (h: obj_addr) : Lemma
@@ -371,13 +405,17 @@ private let alloc_split_wf_part1_v2
                 U64.v (hd_address h) + 8 + U64.v w * 8 <= Seq.length g3))
     = wosize_of_object_spec h g3;
       hd_address_spec h;
-      if h = obj then begin
+      // Compared by value, not by `obj_addr` equality: at leftover = 1 the
+      // second block is the header-only fragment, whose object address is
+      // `rem_obj_nat` = `next_hd_nat`, which may be exactly `heap_size` and so
+      // cannot be given the `obj_addr` refinement up front.
+      if U64.v h = U64.v obj then begin
         // wosize in g3 = wz. hd + 8 + wz*8 <= hd + 8 + block_wz*8 <= heap_size
         assert (Seq.length g3 == heap_size);
         assert (U64.v (hd_address h) == U64.v hd);
         assert (U64.v (wosize_of_object h g3) == wz);
         assert (U64.v hd + 8 + wz * 8 <= heap_size)
-      end else if h = rem_obj_addr then begin
+      end else if U64.v h = rem_obj_nat then begin
         // wosize in g3 = rem_wz. rem_hd + 8 + rem_wz*8 = hd + (block_wz+1)*8 <= heap_size
         assert (Seq.length g3 == heap_size);
         assert (U64.v (hd_address h) == rem_hd_nat);
@@ -406,7 +444,9 @@ private let alloc_split_wf_part1_v2
           assert (U64.v (hd_address h) > U64.v hd + block_wz * 8 - 8);
           assert (U64.v (hd_address h) <> U64.v hd);
           assert (U64.v (hd_address h) <> rem_hd_nat);
-          assert (U64.v (hd_address h) <> rem_obj_nat);
+          // At leftover = 1, rem_obj_nat IS the next block's header, so this
+          // only holds -- and is only needed -- on a genuine split.
+          assert (block_wz - wz >= 2 ==> U64.v (hd_address h) <> rem_obj_nat);
           alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address h)
         end
       end
@@ -432,6 +472,11 @@ private let alloc_exact_preserves_wfh_part1
   = let hd = hd_address obj in
     let hdr = read_word g hd in
     let block_wz = U64.v (getWosize hdr) in
+    if block_wz - wz = 1 then
+      // One-word leftover: the header shrinks and the fragment appears, which
+      // is the split shape with a zero-word remainder.
+      alloc_split_wf_part1_v2 g obj wz next_fp
+    else begin
     let new_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
     alloc_from_block_exact g obj wz next_fp;
     hd_address_spec obj;
@@ -461,6 +506,7 @@ private let alloc_exact_preserves_wfh_part1
       end
     in
     FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+    end
 #pop-options
 
 /// ---------------------------------------------------------------------------
@@ -473,7 +519,7 @@ let alloc_from_block_preserves_wfh_part1
   (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
   = let hdr = read_word g (hd_address obj) in
     let block_wz = U64.v (getWosize hdr) in
-    if block_wz - wz >= 2 then
+    if block_wz - wz >= 1 then
       alloc_split_wf_part1_v2 g obj wz next_fp
     else
       alloc_exact_preserves_wfh_part1 g obj wz next_fp
@@ -579,14 +625,27 @@ private let rec alloc_search_preserves_wfh_part1
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           hd_address_spec prev;
-          if block_wz - wz >= 2 then begin
+          // Relaxed from `>= 2`: a one-word leftover writes the same two
+          // headers, both inside obj's block, so the same separation argument
+          // frames prev's header.
+          if block_wz - wz >= 1 then begin
             let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
             if U64.v prev < U64.v obj then begin
               objects_separated zero_addr g prev obj;
+              assert (U64.v (hd_address prev) < U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end else begin
               wosize_of_object_spec obj g;
               objects_separated zero_addr g obj prev;
+              assert (U64.v prev > U64.v obj + block_wz * 8);
+              assert (U64.v (hd_address prev) > U64.v hd + block_wz * 8);
+              assert (U64.v (hd_address prev) <> U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end
           end else begin
@@ -595,6 +654,8 @@ private let rec alloc_search_preserves_wfh_part1
               objects_separated zero_addr g prev obj
             else
               objects_separated zero_addr g obj prev;
+            // Exact fit only (the gate above now takes leftover >= 1), so the
+            // single-write unfolding still applies.
             let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
             alloc_from_block_exact g obj wz next_fp;
             read_write_different g hd (hd_address prev) alloc_hdr
@@ -720,6 +781,75 @@ private let alloc_split_fl_transfer_pre_part1
 #pop-options
 
 /// ---------------------------------------------------------------------------
+/// P2g2: alloc_frag_fl_transfer_pre_part1 — one-word leftover, fl_valid_transfer
+/// ---------------------------------------------------------------------------
+///
+/// The block leaves the free list, but `obj` stays a well-formed object: its
+/// header still sits at `hd`, now declaring `wz >= 1`, and the link word at
+/// `obj` is not written (the fragment header goes to hd + (1 + wz) * 8, which
+/// is at least hd + 16).  So every cell keeps a wosize >= 1 and every link
+/// reads back unchanged, exactly as in the exact-fit case.
+
+#restart-solver
+#push-options "--z3rlimit 100 --fuel 0 --ifuel 0"
+private let alloc_frag_fl_transfer_pre_part1
+  (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t) (a: obj_addr)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    Seq.mem obj (objects zero_addr g) /\
+                    (let hdr = read_word g (hd_address obj) in
+                     let block_wz = U64.v (getWosize hdr) in
+                     block_wz - wz == 1) /\
+                    wz >= 1 /\
+                    Seq.mem a (objects zero_addr g) /\
+                    U64.v a >= U64.v mword /\
+                    U64.v a < heap_size /\
+                    U64.v a % U64.v mword = 0)
+          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
+                    Seq.mem a (objects zero_addr g') /\
+                    (U64.v (wosize_of_object a g) >= 1 ==>
+                      U64.v (wosize_of_object a g') >= 1) /\
+                    (U64.v (wosize_of_object a g) >= 1 /\
+                     U64.v (hd_address a) + 16 <= heap_size ==>
+                      read_word g' a == read_word g a)))
+  = alloc_split_facts_part1 g obj wz next_fp;
+    alloc_from_block_objects_facts_part1 g obj wz next_fp;
+    let (g', _) = alloc_from_block g obj wz next_fp in
+    let hd = hd_address obj in
+    let hdr = read_word g hd in
+    let block_wz = U64.v (getWosize hdr) in
+    let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
+    hd_address_spec obj;
+    hd_address_bounds obj;
+    wosize_of_object_spec obj g;
+    getWosize_bound hdr;
+    assert (U64.v obj == U64.v hd + 8);
+    assert (rem_hd_nat >= U64.v hd + 16);
+    if U64.v (wosize_of_object a g) >= 1 then begin
+      hd_address_spec a;
+      wosize_of_object_spec a g;
+      wosize_of_object_bound a g;
+      if U64.v a = U64.v obj then begin
+        // The header at hd now says wz >= 1, and the link word at obj is
+        // neither of the two written addresses.
+        assert (U64.v obj <> U64.v hd);
+        assert (U64.v obj <> rem_hd_nat);
+        alloc_split_g3_agrees_part1 g obj wz next_fp (obj <: hp_addr);
+        wosize_of_object_spec obj g'
+      end else begin
+        if U64.v a < U64.v obj then
+          objects_separated zero_addr g a obj
+        else
+          objects_separated zero_addr g obj a;
+        // Both writes are inside obj's block, which is disjoint from a's.
+        alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address a);
+        alloc_split_g3_agrees_part1 g obj wz next_fp (a <: hp_addr);
+        wosize_of_object_spec a g;
+        wosize_of_object_spec a g'
+      end
+    end else ()
+#pop-options
+
+/// ---------------------------------------------------------------------------
 /// P2h: alloc_exact_fl_transfer_pre_part1 — exact-fit case fl_valid_transfer
 ///      under well_formed_heap_part1 only
 /// ---------------------------------------------------------------------------
@@ -733,6 +863,7 @@ private let alloc_exact_fl_transfer_pre_part1
                     (let hdr = read_word g (hd_address obj) in
                      let block_wz = U64.v (getWosize hdr) in
                      block_wz >= wz /\ block_wz - wz < 2) /\
+                    wz >= 1 /\
                     Seq.mem a (objects zero_addr g) /\
                     U64.v a >= U64.v mword /\
                     U64.v a < heap_size /\
@@ -747,6 +878,9 @@ private let alloc_exact_fl_transfer_pre_part1
   = let hd = hd_address obj in
     let hdr = read_word g hd in
     let block_wz = U64.v (getWosize hdr) in
+    if block_wz - wz = 1 then
+      alloc_frag_fl_transfer_pre_part1 g obj wz next_fp a
+    else begin
     let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
     alloc_from_block_exact g obj wz next_fp;
     let g' = write_word g hd alloc_hdr in
@@ -776,6 +910,7 @@ private let alloc_exact_fl_transfer_pre_part1
         wosize_of_object_spec a g'
       end
     end else ()
+    end
 #pop-options
 
 /// ---------------------------------------------------------------------------
@@ -1103,6 +1238,10 @@ private let rec alloc_search_preserves_fl_valid_part1
                  assert (U64.v next_fp < U64.v new_fp)
                end else begin
                  objects_separated zero_addr g obj (next_fp <: obj_addr);
+                 // objects_separated speaks of wosize_of_object; pin it to the
+                 // header read so the bound below stays a linear step.
+                 wosize_of_object_spec obj g;
+                 assert (U64.v (wosize_of_object obj g) == block_wz);
                  assert (U64.v next_fp > U64.v obj + block_wz * 8);
                  assert (U64.v new_fp < U64.v obj + block_wz * 8);
                  assert (U64.v next_fp > U64.v new_fp)
@@ -1114,7 +1253,7 @@ private let rec alloc_search_preserves_fl_valid_part1
           end else begin
             // ===== Exact-fit case: new_fp = next_fp =====
             alloc_exact_preserves_wfh_part1 g obj wz next_fp;
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             // Transfer fl_valid g next_fp big_fuel to g'
             let transfer_aux (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
@@ -1239,7 +1378,7 @@ private let rec alloc_search_preserves_fl_valid_part1
           end else begin
             // ----- Exact-fit sub-case -----
             alloc_exact_preserves_wfh_part1 g obj wz next_fp;
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             // Step 1: Transfer fl_valid from g to g' for head_fp
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
@@ -1429,7 +1568,7 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
           end else begin
             // ===== Exact-fit case: new_fp = next_fp =====
             alloc_exact_preserves_wfh_part1 g obj wz next_fp;
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -1572,7 +1711,7 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
           end else begin
             // ----- Exact-fit sub-case -----
             alloc_exact_preserves_wfh_part1 g obj wz next_fp;
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -1770,7 +1909,7 @@ private let rec alloc_search_obj_not_in_chain_part1
             chain_avoids_unfold_step g' new_fp cur_fp big_fuel
           end else begin
             // ----- Exact-fit: new_fp = next_fp -----
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -1879,7 +2018,7 @@ private let rec alloc_search_obj_not_in_chain_part1
             end
           end else begin
             // ----- Exact-fit sub-case (prev != 0) -----
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -2022,6 +2161,23 @@ private let alloc_from_block_read_other_body
         let ro : hp_addr = U64.uint_to_t ron in
         read_write_different g2 ro addr next_fp
       end
+    end else if leftover = 1 then begin
+      // One-word leftover: the object header at hd plus the header-only
+      // fragment at hd + (1 + wz) * 8 = obj + wz * 8, which the precondition
+      // already excludes from addr's range.
+      let fhn = U64.v hd + (1 + wz) * 8 in
+      let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      if fhn >= heap_size then begin
+        alloc_from_block_frag_oob g obj wz next_fp;
+        read_write_different g hd addr ahdr
+      end else begin
+        alloc_from_block_frag g obj wz next_fp;
+        let g1 = write_word g hd ahdr in
+        read_write_different g hd addr ahdr;
+        let fh : hp_addr = U64.uint_to_t fhn in
+        let fhdr = make_header 0UL blue_bits 0UL in
+        read_write_different g1 fh addr fhdr
+      end
     end else begin
       alloc_from_block_exact g obj wz next_fp;
       let ahdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
@@ -2097,12 +2253,14 @@ private let rec alloc_search_read_other
           assert (U64.v other > U64.v obj + block_wz * 8);
           assert (U64.v addr >= U64.v other);
           assert (U64.v other > U64.v obj + block_wz * 8);
-          if block_wz - wz >= 2 then begin
-            // Split case: block_wz >= wz + 2
+          // Relaxed from `>= 2`: at leftover = 1 the fragment header sits at
+          // obj + wz * 8, and `other > obj + (wz + 1) * 8` already puts `addr`
+          // a full word past it once both are 8-aligned.
+          if block_wz - wz >= 1 then begin
             assert (U64.v addr >= U64.v obj + (wz + 2) * 8);
             alloc_from_block_read_other_body g obj wz next_fp addr
           end else begin
-            // Exact case: only header written. addr >= other > obj > hd + 8
+            // Exact fit: only the header is written, and addr >= other > obj.
             alloc_from_block_exact g obj wz next_fp;
             let bwz_u = U64.uint_to_t (U64.v (getWosize (read_word g hd))) in
             let ahdr = make_header bwz_u white_bits 0UL in
@@ -2291,7 +2449,7 @@ private let rec alloc_search_preserves_chain_avoids_other
             assert (chain_avoids g' new_fp excl big_fuel = true)
           end else begin
             // ----- Exact-fit: new_fp = next_fp -----
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -2409,7 +2567,7 @@ private let rec alloc_search_preserves_chain_avoids_other
             end
           end else begin
             // ----- Exact-fit sub-case (prev != 0) -----
-            alloc_from_block_exact g obj wz next_fp;
+            alloc_small_fp_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -2555,23 +2713,25 @@ private let alloc_from_block_preserves_wfh_part4
     let (g', _) = alloc_from_block g obj wz next_fp in
     hd_address_spec obj;
     hd_address_bounds obj;
-    if block_wz - wz >= 2 then begin
-      // Split case
+    // Relaxed from `>= 2`: a one-word leftover writes the same two headers,
+    // and both carry tag 0, so neither block is infix.
+    if block_wz - wz >= 1 then begin
       alloc_split_facts_part1 g obj wz next_fp;
       let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
       let rem_obj_nat = rem_hd_nat + 8 in
-      let rem_obj_addr : obj_addr = U64.uint_to_t rem_obj_nat in
       let aux (h: obj_addr) : Lemma
         (requires Seq.mem h (objects zero_addr g'))
         (ensures ~(is_infix h g'))
       = tag_of_object_spec h g';
         is_infix_spec h g';
         hd_address_spec h;
-        if h = obj then begin
+        // By value: at leftover = 1 the second block's object address may be
+        // exactly heap_size, so it cannot carry the obj_addr refinement.
+        if U64.v h = U64.v obj then begin
           // Header = make_header wz white_bits 0UL → tag = 0
           make_header_getTag (U64.uint_to_t wz) white_bits 0UL;
           infix_tag_val ()
-        end else if h = rem_obj_addr then begin
+        end else if U64.v h = rem_obj_nat then begin
           // Header = make_header rem_wz blue_bits 0UL → tag = 0
           let rem_wz = block_wz - wz - 1 in
           make_header_getTag (U64.uint_to_t rem_wz) blue_bits 0UL;
@@ -2602,7 +2762,7 @@ private let alloc_from_block_preserves_wfh_part4
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
     end else begin
-      // Exact fit case: g' = write_word g hd (make_header block_wz white_bits 0UL)
+      // Exact fit: g' = write_word g hd (make_header block_wz white_bits 0UL)
       alloc_from_block_exact g obj wz next_fp;
       let new_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
       make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
@@ -2727,14 +2887,27 @@ private let rec alloc_search_preserves_wfh_part4
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           hd_address_spec prev;
-          if block_wz - wz >= 2 then begin
+          // Relaxed from `>= 2`: a one-word leftover writes the same two
+          // headers, both inside obj's block, so the same separation argument
+          // frames prev's header.
+          if block_wz - wz >= 1 then begin
             let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
             if U64.v prev < U64.v obj then begin
               objects_separated zero_addr g prev obj;
+              assert (U64.v (hd_address prev) < U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end else begin
               wosize_of_object_spec obj g;
               objects_separated zero_addr g obj prev;
+              assert (U64.v prev > U64.v obj + block_wz * 8);
+              assert (U64.v (hd_address prev) > U64.v hd + block_wz * 8);
+              assert (U64.v (hd_address prev) <> U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end
           end else begin
@@ -2743,6 +2916,8 @@ private let rec alloc_search_preserves_wfh_part4
               objects_separated zero_addr g prev obj
             else
               objects_separated zero_addr g obj prev;
+            // Exact fit only (the gate above now takes leftover >= 1), so the
+            // single-write unfolding still applies.
             let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
             alloc_from_block_exact g obj wz next_fp;
             read_write_different g hd (hd_address prev) alloc_hdr
@@ -2806,7 +2981,9 @@ private let alloc_from_block_new_objects_blue_split
                     Seq.mem obj (objects zero_addr g) /\
                     (let hdr = read_word g (hd_address obj) in
                      let block_wz = U64.v (getWosize hdr) in
-                     block_wz >= wz /\ block_wz - wz >= 2) /\
+                     // Relaxed from `>= 2`: the one-word leftover's fragment
+                     // header is `make_header 0 blue`, blue like the remainder.
+                     block_wz >= wz /\ block_wz - wz >= 1) /\
                     (let (g', _) = alloc_from_block g obj wz next_fp in
                      Seq.mem h (objects zero_addr g') /\
                      ~(Seq.mem h (objects zero_addr g))))
@@ -2856,7 +3033,7 @@ private let alloc_from_block_no_new_objects_exact
                     Seq.mem obj (objects zero_addr g) /\
                     (let hdr = read_word g (hd_address obj) in
                      let block_wz = U64.v (getWosize hdr) in
-                     block_wz >= wz /\ block_wz - wz < 2) /\
+                     block_wz >= wz /\ block_wz - wz == 0) /\
                     (let (g', _) = alloc_from_block g obj wz next_fp in
                      Seq.mem h (objects zero_addr g')))
           (ensures Seq.mem h (objects zero_addr g))
@@ -2889,7 +3066,7 @@ private let alloc_from_block_new_objects_blue
                     is_blue h g' = true))
   = let hdr = read_word g (hd_address obj) in
     let block_wz = U64.v (getWosize hdr) in
-    if block_wz - wz >= 2 then
+    if block_wz - wz >= 1 then
       alloc_from_block_new_objects_blue_split g obj wz next_fp h
     else
       alloc_from_block_no_new_objects_exact g obj wz next_fp h  // absurd
@@ -3000,14 +3177,27 @@ private let rec alloc_search_new_objects_blue_part1
           wosize_of_object_bound prev g;
           hd_address_spec prev;
           // Show prev_fp header unchanged by alloc_from_block
-          if block_wz - wz >= 2 then begin
+          // Relaxed from `>= 2`: a one-word leftover writes the same two
+          // headers, both inside obj's block, so the same separation argument
+          // frames prev's header.
+          if block_wz - wz >= 1 then begin
             let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
             if U64.v prev < U64.v obj then begin
               objects_separated zero_addr g prev obj;
+              assert (U64.v (hd_address prev) < U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end else begin
               wosize_of_object_spec obj g;
               objects_separated zero_addr g obj prev;
+              assert (U64.v prev > U64.v obj + block_wz * 8);
+              assert (U64.v (hd_address prev) > U64.v hd + block_wz * 8);
+              assert (U64.v (hd_address prev) <> U64.v hd);
+              assert (U64.v (hd_address prev) <> rem_hd_nat);
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end
           end else begin
@@ -3015,6 +3205,8 @@ private let rec alloc_search_new_objects_blue_part1
               objects_separated zero_addr g prev obj
             else
               objects_separated zero_addr g obj prev;
+            // Exact fit only (the gate above now takes leftover >= 1), so the
+            // single-write unfolding still applies.
             alloc_from_block_exact g obj wz next_fp;
             let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
             read_write_different g hd (hd_address prev) alloc_hdr
@@ -3045,7 +3237,10 @@ private let rec alloc_search_new_objects_blue_part1
             //   - hd(x) is in [hd(obj)+wz*8+8, hd(obj)+block_wz*8)
             //   - prev is outside [hd(obj), obj+block_wz*8)
             // So prev ≠ hd(x).
-            if block_wz - wz >= 2 then begin
+            // Relaxed from `>= 2`: the fragment is the new object at a
+            // one-word leftover, and it sits at the same address the remainder
+            // would, so the same separation argument applies.
+            if block_wz - wz >= 1 then begin
               alloc_split_facts_part1 g obj wz next_fp;
               let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
               let rem_obj_nat = rem_hd_nat + 8 in
@@ -3122,12 +3317,13 @@ let alloc_from_block_objects_backward_part1
     FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
     objects_addresses_gt_start zero_addr g obj;
     split_new_mem_in_old_or_rem_part1 zero_addr g g3 obj wz block_wz h;
-    // h ∉ objects(g), so h must be rem_obj
+    // h ∉ objects(g), so h must be the block created above the object
     assert (U64.v h == rem_obj_nat);
-    // rem_fp = rem_obj from alloc_split_facts_part1
-    assert (rem_fp == U64.uint_to_t rem_obj_nat);
-    // Therefore h = rem_fp = snd(alloc_from_block ...)
-    assert (U64.v h == U64.v rem_fp)
+    // On a split that block is also the new free pointer.
+    if block_wz - wz >= 2 then begin
+      assert (rem_fp == U64.uint_to_t rem_obj_nat);
+      assert (U64.v h == U64.v rem_fp)
+    end else ()
 #pop-options
 
 
@@ -3192,14 +3388,14 @@ private let alloc_from_block_preserves_no_black_part1
     hd_address_spec obj;
     getWosize_bound hdr;
     wosize_of_object_spec obj g;
-    if block_wz - wz >= 2 then begin
-      // Split case
+    // Relaxed from `>= 2`: at leftover = 1 the second block is the header-only
+    // fragment, blue like the remainder, so neither is black.
+    if block_wz - wz >= 1 then begin
       alloc_split_facts_part1 g obj wz next_fp;
       let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
       let rem_obj_nat = rem_hd_nat + 8 in
       let rem_wz = block_wz - wz - 1 in
       let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-      let rem_obj_addr : obj_addr = U64.uint_to_t rem_obj_nat in
       // Frame: reads before hd_address(obj) are preserved
       let aux_before (p: hp_addr) : Lemma
         (requires U64.v p < U64.v hd)
@@ -3218,10 +3414,12 @@ private let alloc_from_block_preserves_no_black_part1
       = objects_addresses_gt_start zero_addr g obj;
         split_new_mem_in_old_or_rem_part1 zero_addr g g' obj wz block_wz h;
         if U64.v h = rem_obj_nat then begin
-          // New remainder object: blue header → not black
-          hd_address_spec rem_obj_addr;
-          color_of_object_spec rem_obj_addr g';
-          is_black_iff rem_obj_addr g'
+          // The block created above the object: blue header, so not black.
+          // Phrased over `h` rather than a freshly built obj_addr, since at
+          // leftover = 1 that address can be exactly heap_size.
+          hd_address_of_succ rem_hd h;
+          color_of_object_spec h g';
+          is_black_iff h g'
         end else begin
           assert (Seq.mem h (objects zero_addr g));
           if h = obj then begin
@@ -3331,7 +3529,10 @@ private let rec alloc_search_preserves_no_black_part1
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           wfh_part1_obj_bound g prev;
-          if block_wz - wz >= 2 then begin
+          // Relaxed from `>= 2`: a one-word leftover writes the same two
+          // headers, both inside obj's block, so the same separation argument
+          // frames prev's header.
+          if block_wz - wz >= 1 then begin
             let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
             let rem_obj_nat = rem_hd_nat + 8 in
             if U64.v prev < U64.v obj then begin
@@ -3343,7 +3544,10 @@ private let rec alloc_search_preserves_no_black_part1
               assert (U64.v (hd_address prev) > U64.v obj + block_wz * 8 - 8);
               assert (U64.v (hd_address prev) <> U64.v hd);
               assert (U64.v (hd_address prev) <> rem_hd_nat);
-              assert (U64.v (hd_address prev) <> rem_obj_nat);
+              // At leftover = 1, rem_obj_nat IS the next block's header, so
+              // this only holds -- and is only needed -- on a real split.
+              assert (block_wz - wz >= 2 ==>
+                        U64.v (hd_address prev) <> rem_obj_nat);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end
           end else begin
@@ -3351,6 +3555,8 @@ private let rec alloc_search_preserves_no_black_part1
               objects_separated zero_addr g prev obj
             else
               objects_separated zero_addr g obj prev;
+            // Exact fit only (the gate above now takes leftover >= 1), so the
+            // single-write unfolding still applies.
             let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
             alloc_from_block_exact g obj wz next_fp;
             read_write_different g hd (hd_address prev) alloc_hdr

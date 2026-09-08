@@ -327,17 +327,25 @@ val alloc_spec_new_objects_blue_part1 :
 /// **Theorem**: Backward inclusion for alloc_from_block (split case).
 /// If h is in objects of the output heap but NOT in objects of the input heap,
 /// then h must be the remainder address returned by alloc_from_block.
+/// The only object allocation can create is the one whose header it writes
+/// `1 + wz` words above `hd`: the remainder on a split, the header-only
+/// fragment at a one-word leftover.  Stated as that address rather than as
+/// `snd (alloc_from_block ...)`, which coincides with it only on a split --
+/// at a one-word leftover the block leaves the free list and `snd` is
+/// `next_fp`.
 val alloc_from_block_objects_backward_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) -> (h: obj_addr) ->
   Lemma (requires well_formed_heap_part1 g /\
                   Seq.mem obj (objects zero_addr g) /\
                   (let hdr = read_word g (hd_address obj) in
                    let bwz = U64.v (getWosize hdr) in
-                   bwz >= wz /\ wz >= 1 /\ bwz - wz >= 2) /\
+                   bwz >= wz /\ wz >= 1 /\ bwz - wz >= 1) /\
                   (let (g', _) = alloc_from_block g obj wz next_fp in
                    Seq.mem h (objects zero_addr g') /\
                    ~(Seq.mem h (objects zero_addr g))))
-        (ensures h == snd (alloc_from_block g obj wz next_fp))
+        (ensures U64.v h == U64.v (hd_address obj) + (1 + wz) * 8 + 8 /\
+                 (let bwz = U64.v (getWosize (read_word g (hd_address obj))) in
+                  bwz - wz >= 2 ==> h == snd (alloc_from_block g obj wz next_fp)))
 
 /// **Theorem**: alloc_spec preserves no_black_objects under well_formed_heap_part1.
 val alloc_spec_preserves_no_black_part1 : (g: heap) -> (fp: U64.t) -> (requested_wz: nat) ->

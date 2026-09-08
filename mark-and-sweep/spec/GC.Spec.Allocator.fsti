@@ -325,6 +325,17 @@ val alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
                     let g1 = write_word g hd ahdr in
                     alloc_from_block g obj wz next == (g1, next)))
 
+/// Whenever the block is handed over whole -- exact fit or one-word leftover,
+/// and in either of the fragment's bounds cases -- the free pointer passes
+/// straight through.  Most callers of the old `alloc_from_block_exact` needed
+/// only this from it, and this form does not care which of the two shapes was
+/// written.
+val alloc_from_block_small_fp (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma (requires (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz >= wz /\ bwz - wz < 2))
+          (ensures snd (alloc_from_block g obj wz next) == next)
+
 /// Split, normal: all bounds pass
 val alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires (let hd = hd_address obj in

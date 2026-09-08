@@ -91,6 +91,14 @@ let split_no_overflow (hd: hp_addr) (wz: U64.t)
     assert_norm (pow2 57 + pow2 57 == pow2 58);
     assert_norm (pow2 58 < pow2 64)
 
+/// `hd + (wz + 1) * 8` is word-aligned.  Proved here rather than at the use
+/// site: `(wz + 1) * 8 % 8 == 0` is nonlinear in `wz`, and inside the Pulse
+/// loop's context Z3 no longer finds it.
+let frag_offset_aligned (hd: hp_addr) (wz: U64.t)
+  : Lemma (ensures (U64.v hd + (U64.v wz + 1) * U64.v mword) % U64.v mword == 0)
+  = FStar.Math.Lemmas.multiple_modulo_lemma (U64.v wz + 1) 8;
+    FStar.Math.Lemmas.lemma_mod_add_distr (U64.v hd) ((U64.v wz + 1) * 8) 8
+
 /// wosize bounds from heap arithmetic
 let wosize_from_heap_lemma (wz: U64.t)
   : Lemma (requires U64.v wz <= SpecBase.heap_words - 1 /\ heap_size <= pow2 57)
@@ -326,23 +334,77 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               }
             }
           } else {
-            // === EXACT FIT CASE ===
-            // Call spec lemma BEFORE writes
-            SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+            // === EXACT FIT, OR ONE-WORD LEFTOVER ===
+            // The block leaves the free list either way; the header declares
+            // EXACTLY wz, and when one word is left over it becomes an empty
+            // block (header only, wosize 0, blue) just above the object --
+            // stock OCaml's nf_allocate_block case 1.  Handing the whole block
+            // over would give the object a field it does not own, which
+            // Array.length reports and Hashtbl's power-of-two mask indexes.
+            if U64.eq leftover 1UL {
+              wosize_bound_lemma wz block_wz;
+              split_offset_fits wz;
+              split_no_overflow hd_addr wz;
+              frag_offset_aligned hd_addr wz;
+              let frag_hd_off = U64.add hd_addr (U64.mul (U64.add wz 1UL) mword);
+              if U64.gte frag_hd_off heap_size_u64 {
+                // The fragment header would leave the heap.  Unreachable for a
+                // well-formed block -- it sits at hd + block_wz * 8, and
+                // hd + 8 + block_wz * 8 <= heap_size -- but the loop invariant
+                // does not carry well-formedness of the current cell.
+                SA.alloc_from_block_frag_oob 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
 
-            let alloc_hdr = makeHeader block_wz white 0UL;
-            write_word heap hd_addr alloc_hdr;
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
+              } else {
+                assert (pure (U64.v frag_hd_off < heap_size));
+                assert (pure (U64.v frag_hd_off % 8 == 0));
+                SA.alloc_from_block_frag 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
+                let frag_hdr = makeHeader 0UL blue 0UL;
+                write_word heap frag_hd_off frag_hdr;
 
-            if U64.eq vp 0UL {
-              SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              head_fp := next;
-              result_obj := vcur;
-              go := false
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
+              }
             } else {
-              SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              write_word heap (vp <: hp_addr) next;
-              result_obj := vcur;
-              go := false
+              // leftover = 0, so block_wz = wz and this is the old header.
+              SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+              let alloc_hdr = makeHeader block_wz white 0UL;
+              write_word heap hd_addr alloc_hdr;
+
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
             }
           }
         } else {
@@ -544,22 +606,77 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               }
             }
           } else {
-            // === EXACT FIT CASE ===
-            SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+            // === EXACT FIT, OR ONE-WORD LEFTOVER ===
+            // The block leaves the free list either way; the header declares
+            // EXACTLY wz, and when one word is left over it becomes an empty
+            // block (header only, wosize 0, blue) just above the object --
+            // stock OCaml's nf_allocate_block case 1.  Handing the whole block
+            // over would give the object a field it does not own, which
+            // Array.length reports and Hashtbl's power-of-two mask indexes.
+            if U64.eq leftover 1UL {
+              wosize_bound_lemma wz block_wz;
+              split_offset_fits wz;
+              split_no_overflow hd_addr wz;
+              frag_offset_aligned hd_addr wz;
+              let frag_hd_off = U64.add hd_addr (U64.mul (U64.add wz 1UL) mword);
+              if U64.gte frag_hd_off heap_size_u64 {
+                // The fragment header would leave the heap.  Unreachable for a
+                // well-formed block -- it sits at hd + block_wz * 8, and
+                // hd + 8 + block_wz * 8 <= heap_size -- but the loop invariant
+                // does not carry well-formedness of the current cell.
+                SA.alloc_from_block_frag_oob 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
 
-            let alloc_hdr = makeHeader block_wz white 0UL;
-            write_word heap hd_addr alloc_hdr;
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
+              } else {
+                assert (pure (U64.v frag_hd_off < heap_size));
+                assert (pure (U64.v frag_hd_off % 8 == 0));
+                SA.alloc_from_block_frag 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
+                let frag_hdr = makeHeader 0UL blue 0UL;
+                write_word heap frag_hd_off frag_hdr;
 
-            if U64.eq vp 0UL {
-              SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              head_fp := next;
-              result_obj := vcur;
-              go := false
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
+              }
             } else {
-              SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              write_word heap (vp <: hp_addr) next;
-              result_obj := vcur;
-              go := false
+              // leftover = 0, so block_wz = wz and this is the old header.
+              SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+              let alloc_hdr = makeHeader block_wz white 0UL;
+              write_word heap hd_addr alloc_hdr;
+
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := next;
+                result_obj := vcur;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) next;
+                result_obj := vcur;
+                go := false
+              }
             }
           }
         } else {

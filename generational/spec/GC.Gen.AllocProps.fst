@@ -681,73 +681,64 @@ let alloc_spec_oom_unchanged (g: heap) (fp: U64.t) (requested_wz: nat)
 /// Allocator properties for blue_fields_closed proofs
 /// ---------------------------------------------------------------------------
 
-/// After alloc_from_block, the allocated object has color White.
-/// alloc_from_block writes a new header with color White.
-#push-options "--z3rlimit 12 --fuel 1 --ifuel 0"
+/// After alloc_from_block, the ALLOCATED object has colour White.
+///
+/// Stated about the allocated header at hd + leftover * 8, not about `obj`:
+/// with the object right-justified, the block at `obj` is the remainder, which
+/// is blue.  The old form -- `color_of_object obj g' == White` -- is therefore
+/// false for any split.
+#restart-solver
+#push-options "--z3rlimit 100 --fuel 1 --ifuel 0"
 let alloc_from_block_obj_not_blue (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
   : Lemma (requires well_formed_heap_part1 g /\
                     Seq.mem obj (objects zero_addr g) /\
-                    U64.v (getWosize (read_word g (hd_address obj))) >= wz /\
-                    wz >= 1)
-          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
-                    color_of_object obj g' == White /\
-                    is_blue obj g' = false))
+                    (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz >= wz /\ wz >= 1 /\
+                     U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
+          (ensures (let hd = hd_address obj in
+                    let bwz = U64.v (getWosize (read_word g hd)) in
+                    let ahn = U64.v hd + (bwz - wz) * 8 in
+                    let (g', _) = alloc_from_block g obj wz next_fp in
+                    ahn % U64.v mword == 0 /\ ahn + 8 < heap_size /\
+                    (let ao : obj_addr = f_address (mk_hp_addr ahn) in
+                     color_of_object ao g' == White /\ is_blue ao g' = false)))
   = let hd = hd_address obj in
     hd_address_spec obj;
     hd_address_bounds obj;
     let hdr = read_word g hd in
     let bwz = U64.v (getWosize hdr) in
-    wfh_part1_obj_bound g obj;
-    let (g', _) = alloc_from_block g obj wz next_fp in
     let leftover = bwz - wz in
-    if leftover < 2 then begin
+    wfh_part1_obj_bound g obj;
+    aligned_plus_mul8 (U64.v hd) leftover;
+    let ahn = U64.v hd + leftover * 8 in
+    let ah : hp_addr = mk_hp_addr ahn in
+    f_address_spec ah;
+    let ao : obj_addr = f_address ah in
+    hd_address_spec ao;
+    assert (U64.v (hd_address ao) == ahn);
+    let (g', _) = alloc_from_block g obj wz next_fp in
+    let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+    AllocLemmas.make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
+    getColor_raw alloc_hdr;
+    if leftover = 0 then begin
+      // ah = hd and ao = obj: a single write, and it is the allocated header
       GC.Spec.Allocator.alloc_from_block_exact g obj wz next_fp;
-      let alloc_hdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
       read_write_same g hd alloc_hdr;
-      AllocLemmas.make_header_getColor (U64.uint_to_t bwz) white_bits 0UL;
-      getColor_raw alloc_hdr
+      assert (g' == write_word g hd alloc_hdr);
+      assert (read_word g' (hd_address ao) == alloc_hdr);
+      color_of_object_spec ao g';
+      is_blue_iff ao g'
     end else begin
-      let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-      if rem_hd_nat >= heap_size then begin
-        GC.Spec.Allocator.alloc_from_block_split_rem_hd_oob g obj wz next_fp;
-        let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-        read_write_same g hd alloc_hdr;
-        AllocLemmas.make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
-        getColor_raw alloc_hdr
-      end else begin
-        let rem_obj_nat = rem_hd_nat + 8 in
-        if rem_obj_nat >= heap_size then begin
-          GC.Spec.Allocator.alloc_from_block_split_rem_obj_oob g obj wz next_fp;
-          let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-          let g1 = write_word g hd alloc_hdr in
-          read_write_same g hd alloc_hdr;
-          let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-          let rem_hdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
-          read_write_different g1 rem_hd hd rem_hdr;
-          AllocLemmas.make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
-          getColor_raw alloc_hdr
-        end else begin
-          GC.Spec.Allocator.alloc_from_block_split_normal g obj wz next_fp;
-          let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-          let g1 = write_word g hd alloc_hdr in
-          read_write_same g hd alloc_hdr;
-          aligned_plus_mul8 (U64.v hd) (1 + wz);
-          let rem_hd : hp_addr = mk_hp_addr rem_hd_nat in
-          let rem_hdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
-          read_write_different g1 rem_hd hd rem_hdr;
-          aligned_plus_mul8 rem_hd_nat 1;
-          let rem_field : hp_addr = mk_hp_addr rem_obj_nat in
-          FStar.Math.Lemmas.pow2_lt_compat 64 57;
-          let g2 = write_word g1 rem_hd rem_hdr in
-          read_write_different g2 rem_field hd next_fp;
-          AllocLemmas.make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
-          getColor_raw alloc_hdr
-        end
-      end
-    end;
-    // Bridge: getColor (read_word g' hd) == White, so is_blue obj g' = false
-    color_of_object_spec obj g';
-    is_blue_iff obj g'
+      GC.Spec.Allocator.alloc_from_block_split_normal g obj wz next_fp;
+      let rem_hdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
+      let g1 = write_word g hd rem_hdr in
+      read_write_same g1 ah alloc_hdr;
+      assert (g' == write_word g1 ah alloc_hdr);
+      assert (read_word g' (hd_address ao) == alloc_hdr);
+      color_of_object_spec ao g';
+      is_blue_iff ao g'
+    end
 #pop-options
 
 /// Writing to an address different from hd_address obj preserves color_of_object.

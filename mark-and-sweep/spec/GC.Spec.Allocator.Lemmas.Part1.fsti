@@ -154,6 +154,29 @@ val alloc_from_block_preserves_objects_part1 :
 /// **Theorem**: In the split case (block_wz - wz >= 2), the remainder fp
 /// returned by alloc_from_block is a valid pointer AND is in objects of
 /// the output heap. Requires only well_formed_heap_part1.
+/// **Theorem**: the header-only fragment created at a one-word leftover is an
+/// object of the output heap.
+///
+/// Needs room for its (empty) object address: `hd + (bwz + 1) * 8 < heap_size`.
+/// When that fails the fragment header is the heap's last word and `objects`
+/// stops before it -- correctly, since a header with no room for a field is
+/// not a block.
+val alloc_from_block_frag_in_objects_part1 :
+  (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  (let hd = hd_address obj in
+                   let bwz = U64.v (getWosize (read_word g hd)) in
+                   bwz >= wz /\ bwz - wz == 1 /\
+                   U64.v hd + (bwz + 1) * 8 < heap_size))
+        (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
+                  let hd = hd_address obj in
+                  let fhn = U64.v hd + (1 + wz) * 8 in
+                  fhn < heap_size /\ fhn % 8 == 0 /\
+                  (let fh : hp_addr = U64.uint_to_t fhn in
+                   U64.v (f_address fh) < heap_size /\
+                   Seq.mem (f_address fh) (objects zero_addr g'))))
+
 val alloc_from_block_rem_in_objects_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
   Lemma (requires well_formed_heap_part1 g /\

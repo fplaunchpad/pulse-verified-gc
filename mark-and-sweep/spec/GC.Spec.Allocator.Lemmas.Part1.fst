@@ -550,6 +550,35 @@ let alloc_from_block_preserves_objects_part1
 
 #restart-solver
 #push-options "--z3rlimit 25 --fuel 1 --ifuel 0"
+let alloc_from_block_frag_in_objects_part1
+  (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
+  = alloc_split_facts_part1 g obj wz next_fp;
+    let hd = hd_address obj in
+    let hdr = read_word g hd in
+    let block_wz = U64.v (getWosize hdr) in
+    let fhn = U64.v hd + (1 + wz) * 8 in
+    let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
+    assert (fhn + 8 == next_hd_nat);
+    let fh : hp_addr = U64.uint_to_t fhn in
+    let g3 = fst (alloc_from_block g obj wz next_fp) in
+    hd_address_spec obj;
+    f_address_spec fh;
+    let frag_obj : obj_addr = f_address fh in
+    // The fragment has wosize 0, so objects(fh, g3) is `frag_obj` followed by
+    // whatever starts at next_hd_nat = fh + 8.
+    if next_hd_nat >= heap_size then
+      mem_cons_lemma frag_obj frag_obj (Seq.empty #obj_addr)
+    else begin
+      let next_hd_hp : hp_addr = U64.uint_to_t next_hd_nat in
+      mem_cons_lemma frag_obj frag_obj (objects next_hd_hp g3)
+    end;
+    mem_cons_lemma frag_obj obj (objects fh g3);
+    alloc_split_old_in_new_part1 g obj wz next_fp obj;
+    f_address_spec hd;
+    objects_addresses_gt_start zero_addr g obj;
+    assert (U64.v zero_addr <= U64.v hd);
+    objects_later_in_earlier zero_addr g3 hd frag_obj
+
 let alloc_from_block_rem_in_objects_part1
   (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
   = alloc_split_facts_part1 g obj wz next_fp;

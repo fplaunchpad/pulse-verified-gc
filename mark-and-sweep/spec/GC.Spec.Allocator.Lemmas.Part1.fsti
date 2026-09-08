@@ -122,6 +122,31 @@ val alloc_from_block_preserves_objects_part1 :
 /// **Theorem**: In the split case (block_wz - wz >= 2), the remainder fp
 /// returned by alloc_from_block is a valid pointer AND is in objects of
 /// the output heap. Requires only well_formed_heap_part1.
+/// The ALLOCATED block is an object of the output heap.
+///
+/// Under right-justification the allocated piece is the newly created block --
+/// the remainder keeps `obj` and stays an old object -- so this is the
+/// counterpart of `alloc_from_block_rem_in_objects_part1` under the old
+/// low-end layout, where those roles were the other way round.  Holds for any
+/// leftover >= 1, since a split and a one-word leftover build the same tiling.
+val alloc_from_block_alloc_in_objects_part1 :
+  (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  (let hd = hd_address obj in
+                   let bwz = U64.v (getWosize (read_word g hd)) in
+                   bwz >= wz /\ bwz - wz >= 1 /\
+                   // the OBJECT address must be in bounds for f_address; this
+                   // is exactly what alloc_search's guard establishes
+                   U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
+        (ensures (let hd = hd_address obj in
+                  let bwz = U64.v (getWosize (read_word g hd)) in
+                  let ahn = U64.v hd + (bwz - wz) * 8 in
+                  let (g', _) = alloc_from_block g obj wz next_fp in
+                  ahn % U64.v mword == 0 /\ ahn + 8 < heap_size /\
+                  Seq.mem (f_address (U64.uint_to_t ahn <: hp_addr))
+                          (objects zero_addr g')))
+
 val alloc_from_block_rem_in_objects_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
   Lemma (requires well_formed_heap_part1 g /\

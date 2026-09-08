@@ -123,7 +123,7 @@ let alloc_from_block_read_outside
     let leftover = bwz - wz in
     let ahn = U64.v hd + leftover * 8 in
     if leftover < 0 then ()
-    else if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+    else if ahn >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
     else begin
       let ah : hp_addr = U64.uint_to_t ahn in
       let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in

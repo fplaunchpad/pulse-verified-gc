@@ -111,12 +111,10 @@ let alloc_from_block (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64
       (g, next_fp)
     else
     let alloc_hd_nat = U64.v hd + leftover * 8 in
-    if alloc_hd_nat + 8 >= heap_size || alloc_hd_nat >= pow2 64 ||
+    if alloc_hd_nat >= heap_size || alloc_hd_nat >= pow2 64 ||
        alloc_hd_nat % 8 <> 0 then
       // Defensive: unreachable for a well-formed block, since
       // hd + (block_wz + 1) * 8 <= heap_size and leftover <= block_wz.
-      // The bound is on the OBJECT address alloc_hd_nat + 8, not just the
-      // header, so that `alloc_search` can report it as an hp_addr.
       (g, next_fp)
     else
       let alloc_hd : hp_addr = U64.uint_to_t alloc_hd_nat in
@@ -174,8 +172,11 @@ let rec alloc_search (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
         // it starts `leftover` words above the block's own object address.
         let leftover = block_wz - requested_wz in
         let alloc_hd_nat = U64.v hd + leftover * 8 in
-        // Mirror alloc_from_block's guard exactly: on the defensive arm it
-        // allocates nothing, so we must not report an object either.
+        // Strictly stronger than alloc_from_block's own guard: we need the
+        // OBJECT address in bounds, not just its header, since obj_out carries
+        // an hp_addr refinement.  Bailing here means alloc_from_block is only
+        // ever called when its own guard also passes, so the two agree and its
+        // defensive arm stays unreachable from the search.
         if alloc_hd_nat + 8 >= heap_size || alloc_hd_nat >= pow2 64 ||
            alloc_hd_nat % 8 <> 0 then
           { heap_out = g; fp_out = head_fp; obj_out = 0UL }
@@ -344,7 +345,7 @@ val alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64
   : Lemma (requires (let hd = hd_address obj in
                      let bwz = U64.v (getWosize (read_word g hd)) in
                      bwz - wz >= 1 /\
-                     U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
+                     U64.v hd + (bwz - wz) * 8 < heap_size))
           (ensures (let hd = hd_address obj in
                     let bwz = U64.v (getWosize (read_word g hd)) in
                     let leftover = bwz - wz in
@@ -366,7 +367,7 @@ val alloc_from_block_oob (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires (let hd = hd_address obj in
                      let bwz = U64.v (getWosize (read_word g hd)) in
                      bwz >= wz /\
-                     U64.v hd + (bwz - wz) * 8 + 8 >= heap_size))
+                     U64.v hd + (bwz - wz) * 8 >= heap_size))
           (ensures alloc_from_block g obj wz next == (g, next))
 
 #pop-options
@@ -384,7 +385,7 @@ let alloc_split_normal_pre (g: heap) (obj: obj_addr) (wz: nat) =
   let hd = hd_address obj in
   let bwz = U64.v (getWosize (read_word g hd)) in
   bwz - wz >= 2 /\
-  U64.v hd + (bwz - wz) * 8 + 8 < heap_size
+  U64.v hd + (bwz - wz) * 8 < heap_size
 
 /// Result heap and fp for the normal split case
 let alloc_split_normal_result (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t) : GTot (heap & U64.t) =

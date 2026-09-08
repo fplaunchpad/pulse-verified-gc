@@ -82,7 +82,7 @@ let spec_next_fp_eq (g: heap) (obj: obj_addr)
 /// alloc_from_block unfolding lemmas (for Pulse proof)
 /// ---------------------------------------------------------------------------
 
-/// Exact fit: leftover < 2
+/// Exact fit: leftover = 0
 #push-options "--z3rlimit 25"
 let alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   = hd_address_spec obj; hd_address_bounds obj;
@@ -109,6 +109,18 @@ let alloc_from_block_split_rem_obj_oob (g: heap) (obj: obj_addr) (wz: nat) (next
   = hd_address_spec obj; hd_address_bounds obj;
     reveal_opaque (`%alloc_from_block) alloc_from_block
 #pop-options
+
+/// One-word leftover: the header-only fragment
+#push-options "--z3rlimit 25"
+let alloc_from_block_frag (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  = hd_address_spec obj; hd_address_bounds obj;
+    reveal_opaque (`%alloc_from_block) alloc_from_block
+
+let alloc_from_block_frag_oob (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  = hd_address_spec obj; hd_address_bounds obj;
+    reveal_opaque (`%alloc_from_block) alloc_from_block
+#pop-options
+
 
 /// ---------------------------------------------------------------------------
 /// Read-level bridge lemmas for alloc_from_block (split, normal case)

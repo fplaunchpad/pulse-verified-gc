@@ -119,8 +119,34 @@ let alloc_from_block (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64
           let g3 = write_word g2 rem_field next_fp in
           (g3, U64.uint_to_t rem_obj_nat)
     end
+    else if leftover = 1 then begin
+      // One word too many.  The spare word cannot carry a free-list link, so
+      // -- exactly as stock OCaml's `nf_allocate_block` does (runtime/freelist.c,
+      // "the remaining word cannot be linked: turn it into an empty block
+      // (header only)") -- it becomes a header-only block, blue and unlinked,
+      // sitting just above the allocated object.  `fl_cell` requires wosize >= 1,
+      // so it is correctly not a cell; the next fused sweep absorbs it into an
+      // adjacent run.
+      //
+      // The point of this arm is the header: it declares EXACTLY requested_wz,
+      // not block_wz.  Handing over the whole block would give the object a
+      // field it does not own, which `Array.length` reports and `Hashtbl`'s
+      // power-of-two mask then indexes.
+      let alloc_hdr = make_header (U64.uint_to_t requested_wz) white_bits 0UL in
+      let g1 = write_word g hd alloc_hdr in
+      let frag_hd_nat = U64.v hd + (1 + requested_wz) * 8 in
+      if frag_hd_nat >= heap_size || frag_hd_nat >= pow2 64 ||
+         frag_hd_nat % 8 <> 0 then
+        // Defensive: unreachable for a well-formed block, since
+        // frag_hd_nat = hd + block_wz * 8 < hd + (block_wz + 1) * 8 <= heap_size.
+        (g1, next_fp)
+      else
+        let frag_hd : hp_addr = U64.uint_to_t frag_hd_nat in
+        let frag_hdr = make_header 0UL blue_bits 0UL in
+        (write_word g1 frag_hd frag_hdr, next_fp)
+    end
     else begin
-      // Exact fit (or leftover = 1, use whole block)
+      // Exact fit (block_wz == requested_wz), or the defensive too-small case.
       let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
       let g1 = write_word g hd alloc_hdr in
       (g1, next_fp)
@@ -286,11 +312,12 @@ val spec_next_fp_eq (g: heap) (obj: obj_addr)
 
 #push-options "--z3rlimit 25"
 
-/// Exact fit: leftover < 2
+/// Exact fit: leftover = 0.  (Was `bwz - wz < 2`; the one-word leftover now
+/// has its own shape and its own lemma, `alloc_from_block_frag`.)
 val alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires (let hdr = read_word g (hd_address obj) in
                      let bwz = U64.v (getWosize hdr) in
-                     bwz >= wz /\ bwz - wz < 2))
+                     bwz >= wz /\ bwz - wz == 0))
           (ensures (let hd = hd_address obj in
                     let hdr = read_word g hd in
                     let bwz = U64.v (getWosize hdr) in
@@ -316,8 +343,12 @@ val alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64
                     let rw = bwz - wz - 1 in
                     let rhdr = make_header (U64.uint_to_t rw) blue_bits 0UL in
                     let g2 = write_word g1 rh rhdr in
-                    let ron = rhn + 8 in
-                    let ro : hp_addr = U64.uint_to_t ron in
+                    // Derived from `rh`, not from `rhn`: `rh`'s own hp_addr
+                    // refinement already carries the alignment, so the
+                    // "+ 8 is still a multiple of 8" step stays linear.  Going
+                    // via `rhn` makes it depend on `(1 + wz) * 8 % 8 == 0`,
+                    // which is nonlinear in `wz` and no longer converges.
+                    let ro : hp_addr = U64.uint_to_t (U64.v rh + 8) in
                     let g3 = write_word g2 ro next in
                     alloc_from_block g obj wz next == (g3, ro)))
 
@@ -353,6 +384,39 @@ val alloc_from_block_split_rem_obj_oob (g: heap) (obj: obj_addr) (wz: nat) (next
                     let g2 = write_word g1 rh rhdr in
                     let ron = rhn + 8 in
                     alloc_from_block g obj wz next == (g2, U64.uint_to_t ron)))
+
+/// One-word leftover, normal: the header-only fragment fits.
+///
+/// Two words are written and both stay inside the block the allocator was
+/// given: the object header at `hd`, now declaring exactly `wz`, and the empty
+/// block's header one word past the end of the object's body.  Nothing else
+/// moves -- in particular the link word at `obj` is untouched, so `obj` remains
+/// a well-formed object of wosize `wz >= 1` and the block leaves the free list
+/// through the ordinary prev/next rewiring, exactly as an exact fit does.
+val alloc_from_block_frag (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma (requires (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz - wz == 1 /\
+                     U64.v hd + (1 + wz) * 8 < heap_size))
+          (ensures (let hd = hd_address obj in
+                    let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+                    let g1 = write_word g hd ahdr in
+                    let fhn = U64.v hd + (1 + wz) * 8 in
+                    let fh : hp_addr = U64.uint_to_t fhn in
+                    let fhdr = make_header 0UL blue_bits 0UL in
+                    alloc_from_block g obj wz next == (write_word g1 fh fhdr, next)))
+
+/// One-word leftover whose fragment header would fall outside the heap.
+/// Unreachable for a well-formed block (hd + (bwz + 1) * 8 <= heap_size and
+/// the fragment header sits at hd + bwz * 8), but the definition guards it.
+val alloc_from_block_frag_oob (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma (requires (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz - wz == 1 /\
+                     U64.v hd + (1 + wz) * 8 >= heap_size))
+          (ensures (let hd = hd_address obj in
+                    let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+                    alloc_from_block g obj wz next == (write_word g hd ahdr, next)))
 
 #pop-options
 

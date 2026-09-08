@@ -118,25 +118,28 @@ let alloc_spec_obj_valid (g: heap) (fp: U64.t) (requested_wz: nat)
 
 module SA = GC.Spec.Allocator
 
-/// Helper: after alloc_from_block, the header at obj has wz <= wosize <= wz + 1.
-/// Every branch below pins the wosize exactly (to [bwz] on an exact fit, to [wz]
-/// on a split), so both bounds fall out of the same case analysis.
+/// Helper: after alloc_from_block, the header at obj declares EXACTLY wz.
+///
+/// This used to conclude `wz <= wosize <= wz + 1`.  The upper slack was the
+/// one-word-leftover case handing over the whole block, which gives the object
+/// a field it does not own -- read back by `Array.length`, and indexed by
+/// `Hashtbl`'s power-of-two mask.  That case now leaves the spare word behind
+/// as a header-only block, so all three branches pin the wosize to `wz`.
 #push-options "--z3rlimit 12 --fuel 1 --ifuel 1"
 let alloc_from_block_wosize_lemma
   (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
   : Lemma (requires (let hdr = read_word g (hd_address obj) in
                      U64.v (getWosize hdr) >= wz))
           (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
-                    U64.v (wosize_of_object obj g') >= wz /\
-                    U64.v (wosize_of_object obj g') <= wz + 1))
+                    U64.v (wosize_of_object obj g') == wz))
   =
   let hd = hd_address obj in
   let hdr = read_word g hd in
   let bwz = U64.v (getWosize hdr) in
   hd_address_spec obj;
   hd_address_bounds obj;
-  if bwz - wz < 2 then begin
-    // Exact fit case
+  if bwz - wz = 0 then begin
+    // Exact fit: the header already says bwz, and bwz = wz.
     SA.alloc_from_block_exact g obj wz next_fp;
     let ahdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
     let g1 = write_word g hd ahdr in
@@ -144,6 +147,32 @@ let alloc_from_block_wosize_lemma
     wosize_of_object_spec obj g1;
     read_write_same g hd ahdr;
     AllocLemmas.make_header_getWosize (U64.uint_to_t bwz) white_bits 0UL
+  end
+  else if bwz - wz = 1 then begin
+    // One-word leftover: header says wz, and the spare word becomes a
+    // header-only block just above the object's body.
+    let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+    let g1 = write_word g hd ahdr in
+    let fhn = (aligned_plus_mul8 (U64.v hd) (1 + wz); U64.v hd + (1 + wz) * 8) in
+    if fhn >= heap_size then begin
+      SA.alloc_from_block_frag_oob g obj wz next_fp;
+      assert (alloc_from_block g obj wz next_fp == (g1, next_fp));
+      wosize_of_object_spec obj g1;
+      read_write_same g hd ahdr;
+      AllocLemmas.make_header_getWosize (U64.uint_to_t wz) white_bits 0UL
+    end
+    else begin
+      SA.alloc_from_block_frag g obj wz next_fp;
+      let fh : hp_addr = mk_hp_addr fhn in
+      let fhdr = make_header 0UL blue_bits 0UL in
+      let g2 = write_word g1 fh fhdr in
+      assert (alloc_from_block g obj wz next_fp == (g2, next_fp));
+      assert (U64.v fh > U64.v hd);
+      wosize_of_object_spec obj g2;
+      read_write_different g1 fh hd fhdr;
+      read_write_same g hd ahdr;
+      AllocLemmas.make_header_getWosize (U64.uint_to_t wz) white_bits 0UL
+    end
   end
   else begin
     // Split case: all variants write ahdr = make_header wz white_bits 0UL at hd

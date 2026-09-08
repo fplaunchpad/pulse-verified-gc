@@ -1027,57 +1027,11 @@ private let alloc_from_block_read_header_other
       // and all writes are in [hd_obj, obj + (bwz+1)*8) which is ≤ hd_excl
       assert (U64.v hd_obj + 8 <= U64.v hd_excl)
     end;
-    // Now case split on exact vs split
-    let leftover = bwz - wz in
-    if leftover < 2 then begin
-      SA.alloc_from_block_exact g obj wz next_fp;
-      let ahdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
-      read_write_different g hd_obj hd_excl ahdr
-    end else begin
-      let rhn = U64.v hd_obj + (1 + wz) * 8 in
-      if rhn >= heap_size then begin
-        SA.alloc_from_block_split_rem_hd_oob g obj wz next_fp;
-        let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-        read_write_different g hd_obj hd_excl ahdr
-      end else if rhn + 8 >= heap_size then begin
-        SA.alloc_from_block_split_rem_obj_oob g obj wz next_fp;
-        let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-        let g1 = write_word g hd_obj ahdr in
-        read_write_different g hd_obj hd_excl ahdr;
-        let rh : hp_addr = U64.uint_to_t rhn in
-        let rw = bwz - wz - 1 in
-        let rhdr = make_header (U64.uint_to_t rw) blue_bits 0UL in
-        // rh = obj + wz*8 which is between hd_obj and excl (or before hd_excl)
-        if U64.v excl < U64.v obj then
-          assert (U64.v hd_excl + 8 <= U64.v hd_obj)
-        else
-          assert (U64.v rh < U64.v hd_excl);  // rh = hd_obj + (1+wz)*8 < hd_excl
-        read_write_different g1 rh hd_excl rhdr
-      end else begin
-        SA.alloc_from_block_split_normal g obj wz next_fp;
-        let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-        let g1 = write_word g hd_obj ahdr in
-        read_write_different g hd_obj hd_excl ahdr;
-        aligned_plus_mul8 (U64.v hd_obj) (1 + wz);
-        let rh : hp_addr = mk_hp_addr rhn in
-        let rw = bwz - wz - 1 in
-        let rhdr = make_header (U64.uint_to_t rw) blue_bits 0UL in
-        let g2 = write_word g1 rh rhdr in
-        if U64.v excl < U64.v obj then
-          assert (U64.v hd_excl + 8 <= U64.v rh)  // hd_excl < hd_obj < rh
-        else
-          assert (U64.v rh + 8 <= U64.v hd_excl);  // rh+8 = obj+(wz+1)*8 <= obj+bwz*8 <= hd_excl
-        read_write_different g1 rh hd_excl rhdr;
-        let ron = rhn + 8 in
-        aligned_plus_mul8 rhn 1;
-        let ro : hp_addr = mk_hp_addr ron in
-        if U64.v excl < U64.v obj then
-          assert (U64.v hd_excl + 8 <= U64.v ro)
-        else
-          assert (U64.v ro + 8 <= U64.v hd_excl);  // ro+8 = obj+(wz+2)*8 <= obj+bwz*8 <= hd_excl (since bwz >= wz+2)
-        read_write_different g2 ro hd_excl next_fp
-      end
-    end
+    // Every write lands inside obj's block, and excl's header is outside it,
+    // so the framing lemma settles all arms at once.
+    assert (U64.v hd_excl + 8 <= U64.v hd_obj \/
+            U64.v hd_excl >= U64.v hd_obj + (bwz + 1) * 8);
+    alloc_from_block_read_outside g obj wz next_fp hd_excl
 #pop-options
 
 /// Inductive: alloc_search preserves the header of excl when excl ≠ obj_out.
@@ -1090,6 +1044,12 @@ private let rec alloc_search_read_header_other
                     wz >= 1 /\
                     Seq.mem excl (objects zero_addr g) /\
                     (excl <: U64.t) <> (alloc_search g head_fp prev_fp cur_fp wz fuel).obj_out /\
+                    // excl must differ from every CELL, not just from obj_out.
+                    // Under the old layout obj_out was cur_fp, so excl <> obj_out
+                    // already gave that; right-justification separates the two,
+                    // and if excl were the cell its header would be rewritten
+                    // as the remainder's.
+                    AllocLemmas.chain_avoids g cur_fp excl fuel = true /\
                     (prev_fp <> 0UL ==>
                       (U64.v prev_fp >= U64.v mword /\
                        U64.v prev_fp < heap_size /\
@@ -1119,11 +1079,13 @@ private let rec alloc_search_read_header_other
         else 0UL
       in
       if block_wz >= wz then begin
-        // Found suitable block: cur_fp = obj_out, excl ≠ cur_fp
-        let r = alloc_search g head_fp prev_fp cur_fp wz fuel in
-        assert (r.obj_out == cur_fp);
-        assert ((excl <: U64.t) <> cur_fp);
-        // alloc_from_block preserves hd_address excl
+        // Found a block.  obj_out is no longer cur_fp, but this lemma only
+        // reads excl's header, which alloc_from_block leaves alone either way.
+        let leftover = block_wz - wz in
+        let ahn = U64.v hd + leftover * 8 in
+        if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+        else begin
+        AllocLemmas.chain_avoids_head_ne g cur_fp excl fuel;
         alloc_from_block_read_header_other g obj wz next_fp excl;
         let (g', new_fp) = alloc_from_block g obj wz next_fp in
         // Handle prev_fp write
@@ -1155,12 +1117,14 @@ private let rec alloc_search_read_header_other
             end
           end
         end else ()
+        end
       end else begin
         // Block too small, continue
         if U64.v hd + 16 <= heap_size then begin
           AllocLemmas.fl_valid_elim g cur_fp fuel;
           AllocLemmas.fl_chain_terminates_elim g cur_fp fuel
         end else ();
+        AllocLemmas.chain_avoids_tail g cur_fp excl fuel;
         alloc_search_read_header_other g head_fp cur_fp next_fp wz (fuel - 1) excl
       end
     end
@@ -1173,7 +1137,10 @@ let alloc_spec_read_header_other_part1 (g: heap) (fp: U64.t) (requested_wz: nat)
                     AllocLemmas.fl_valid g fp heap_words /\
                     AllocLemmas.fl_chain_terminates g fp heap_words /\
                     Seq.mem excl (objects zero_addr g) /\
-                    (excl <: U64.t) <> (alloc_spec g fp requested_wz).obj_out)
+                    (excl <: U64.t) <> (alloc_spec g fp requested_wz).obj_out /\
+                    // see alloc_search_read_header_other: excl must avoid every
+                    // free-list cell, not merely obj_out
+                    AllocLemmas.chain_avoids g fp excl heap_words = true)
           (ensures (let r = alloc_spec g fp requested_wz in
                     r.obj_out <> 0UL ==>
                     read_word r.heap_out (hd_address excl) ==

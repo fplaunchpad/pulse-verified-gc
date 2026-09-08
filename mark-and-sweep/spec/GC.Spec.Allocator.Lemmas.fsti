@@ -283,6 +283,45 @@ val alloc_spec_preserves_wfh_part4 : (g: heap) -> (fp: U64.t) -> (requested_wz: 
 /// ---------------------------------------------------------------------------
 /// Allocation framing: field reads for non-allocated objects
 /// ---------------------------------------------------------------------------
+/// **Theorem**: writing inside an object's body leaves the enumeration alone.
+val write_body_preserves_objects_local :
+  (start: hp_addr) -> (g: heap) -> (obj: obj_addr) -> (addr: hp_addr) -> (v: U64.t) ->
+  Lemma (requires
+      Seq.mem obj (objects start g) /\
+      U64.v addr >= U64.v obj /\
+      U64.v addr < U64.v obj + (U64.v (wosize_of_object obj g) * 8) /\
+      U64.v addr % 8 = 0)
+    (ensures objects start (write_word g addr v) == objects start g)
+
+/// **Theorem**: old objects survive alloc_from_block (forward inclusion).
+val alloc_from_block_objects_facts_part1 :
+  (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  (let hdr = read_word g (hd_address obj) in
+                   U64.v (getWosize hdr) >= wz))
+        (ensures (let (g', rem_fp) = alloc_from_block g obj wz next_fp in
+                  (forall (h: obj_addr). Seq.mem h (objects zero_addr g) ==> Seq.mem h (objects zero_addr g'))))
+
+/// **Theorem**: the ALLOCATED block is an object of the output heap.  Under
+/// right-justification it is the newly created piece of a split, the remainder
+/// having kept `obj`.
+val alloc_from_block_alloc_in_objects_part1 :
+  (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  (let hd = hd_address obj in
+                   let bwz = U64.v (getWosize (read_word g hd)) in
+                   bwz >= wz /\ bwz - wz >= 1 /\
+                   U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
+        (ensures (let hd = hd_address obj in
+                  let bwz = U64.v (getWosize (read_word g hd)) in
+                  let ahn = U64.v hd + (bwz - wz) * 8 in
+                  let (g', _) = alloc_from_block g obj wz next_fp in
+                  ahn % U64.v mword == 0 /\ ahn + 8 < heap_size /\
+                  Seq.mem (f_address (U64.uint_to_t ahn <: hp_addr))
+                          (objects zero_addr g')))
+
 /// **Theorem**: In the split case (block_wz - wz >= 2), the remainder fp
 /// returned by alloc_from_block is a valid pointer AND is in objects of
 /// the output heap. Requires only well_formed_heap_part1.

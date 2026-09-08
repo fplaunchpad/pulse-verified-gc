@@ -102,7 +102,11 @@ private let rec alloc_search_preserves_objects_part1
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           hd_address_spec prev;
-          if block_wz - wz >= 2 then begin
+          // Relaxed from `>= 2`: a one-word leftover writes the same two
+          // headers, both inside obj's block, so the same separation argument
+          // frames prev's header.  Only the exact fit (leftover = 0) needs the
+          // single-write lemma below.
+          if block_wz - wz >= 1 then begin
             let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
             if U64.v prev < U64.v obj then begin
               objects_separated zero_addr g prev obj;
@@ -114,7 +118,9 @@ private let rec alloc_search_preserves_objects_part1
               assert (U64.v (hd_address prev) > U64.v hd + block_wz * 8);
               assert (U64.v (hd_address prev) <> U64.v hd);
               assert (U64.v (hd_address prev) <> rem_hd_nat);
-              assert (U64.v (hd_address prev) <> rem_hd_nat + 8);
+              // At leftover = 1, rem_hd_nat + 8 IS the next block's header,
+              // so this only holds -- and is only needed -- on a real split.
+              assert (block_wz - wz >= 2 ==> U64.v (hd_address prev) <> rem_hd_nat + 8);
               alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
             end
           end else begin

@@ -641,11 +641,31 @@ let alloc_from_block_obj_not_blue (g: heap) (obj: obj_addr) (wz: nat) (next_fp: 
     wfh_part1_obj_bound g obj;
     let (g', _) = alloc_from_block g obj wz next_fp in
     let leftover = bwz - wz in
-    if leftover < 2 then begin
+    if leftover = 0 then begin
       GC.Spec.Allocator.alloc_from_block_exact g obj wz next_fp;
       let alloc_hdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
       read_write_same g hd alloc_hdr;
       AllocLemmas.make_header_getColor (U64.uint_to_t bwz) white_bits 0UL;
+      getColor_raw alloc_hdr
+    end else if leftover = 1 then begin
+      // One-word leftover: two writes, the object header at hd (now
+      // declaring exactly wz) and the header-only fragment at
+      // hd + (1 + wz) * 8 = hd + bwz * 8, which is in bounds because
+      // well-formedness gives hd + 8 + bwz * 8 <= heap_size.
+      let frag_hd_nat = U64.v hd + (1 + wz) * 8 in
+      wosize_of_object_spec obj g;
+      assert (1 + wz == bwz);
+      assert (U64.v obj + bwz * 8 <= heap_size);
+      assert (frag_hd_nat + 8 <= heap_size);
+      GC.Spec.Allocator.alloc_from_block_frag g obj wz next_fp;
+      let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      let g1 = write_word g hd alloc_hdr in
+      read_write_same g hd alloc_hdr;
+      aligned_plus_mul8 (U64.v hd) (1 + wz);
+      let frag_hd : hp_addr = mk_hp_addr frag_hd_nat in
+      let frag_hdr = make_header 0UL blue_bits 0UL in
+      read_write_different g1 frag_hd hd frag_hdr;
+      AllocLemmas.make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
       getColor_raw alloc_hdr
     end else begin
       let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
@@ -729,10 +749,28 @@ let alloc_from_block_read_frame (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U6
     let bwz = U64.v (getWosize hdr) in
     wfh_part1_obj_bound g obj;
     let leftover = bwz - wz in
-    if leftover < 2 then begin
+    if leftover = 0 then begin
       GC.Spec.Allocator.alloc_from_block_exact g obj wz next_fp;
       let alloc_hdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
       read_write_different g hd addr alloc_hdr
+    end else if leftover = 1 then begin
+      // One-word leftover: two writes, the object header at hd (now
+      // declaring exactly wz) and the header-only fragment at
+      // hd + (1 + wz) * 8 = hd + bwz * 8, which is in bounds because
+      // well-formedness gives hd + 8 + bwz * 8 <= heap_size.
+      let frag_hd_nat = U64.v hd + (1 + wz) * 8 in
+      wosize_of_object_spec obj g;
+      assert (1 + wz == bwz);
+      assert (U64.v obj + bwz * 8 <= heap_size);
+      assert (frag_hd_nat + 8 <= heap_size);
+      GC.Spec.Allocator.alloc_from_block_frag g obj wz next_fp;
+      let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      let g1 = write_word g hd alloc_hdr in
+      read_write_different g hd addr alloc_hdr;
+      aligned_plus_mul8 (U64.v hd) (1 + wz);
+      let frag_hd : hp_addr = mk_hp_addr frag_hd_nat in
+      let frag_hdr = make_header 0UL blue_bits 0UL in
+      read_write_different g1 frag_hd addr frag_hdr
     end else begin
       let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
       if rem_hd_nat >= heap_size then begin
@@ -802,15 +840,19 @@ private let rec write_header_same_wosize_preserves_objects_aux
     end
 #pop-options
 
-/// In exact-fit case (bwz - wz < 2), objects list is unchanged.
+/// In the exact-fit case (bwz == wz), the objects list is unchanged.
 /// alloc_from_block only writes the header (same wosize), preserving object list structure.
 /// Proof: header write with same wosize -> objects recursion takes identical steps.
+///
+/// Narrowed from `bwz - wz < 2`.  At a one-word leftover the header's wosize
+/// shrinks and the header-only fragment appears above the object, so `objects`
+/// genuinely grows; callers must take that arm separately.
 #push-options "--z3rlimit 12 --fuel 0 --ifuel 0"
 let alloc_from_block_exact_objects_eq_part1 (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
   : Lemma (requires well_formed_heap_part1 g /\
                     Seq.mem obj (objects zero_addr g) /\
                     (let bwz = U64.v (getWosize (read_word g (hd_address obj))) in
-                     bwz >= wz /\ bwz - wz < 2) /\
+                     bwz >= wz /\ bwz - wz == 0) /\
                     wz >= 1)
           (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
                     objects zero_addr g' == objects zero_addr g))
@@ -994,10 +1036,34 @@ private let alloc_from_block_read_header_other
     end;
     // Now case split on exact vs split
     let leftover = bwz - wz in
-    if leftover < 2 then begin
+    if leftover = 0 then begin
       SA.alloc_from_block_exact g obj wz next_fp;
       let ahdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
       read_write_different g hd_obj hd_excl ahdr
+    end else if leftover = 1 then begin
+      // One-word leftover: two writes, the object header at hd (now
+      // declaring exactly wz) and the header-only fragment at
+      // hd + (1 + wz) * 8 = hd + bwz * 8, which is in bounds because
+      // well-formedness gives hd + 8 + bwz * 8 <= heap_size.
+      let fhn = U64.v hd_obj + (1 + wz) * 8 in
+      wfh_part1_obj_bound g obj;
+      assert (1 + wz == bwz);
+      assert (U64.v obj + bwz * 8 <= heap_size);
+      assert (fhn + 8 <= heap_size);
+      SA.alloc_from_block_frag g obj wz next_fp;
+      let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      let g1 = write_word g hd_obj ahdr in
+      read_write_different g hd_obj hd_excl ahdr;
+      aligned_plus_mul8 (U64.v hd_obj) (1 + wz);
+      let fh : hp_addr = mk_hp_addr fhn in
+      let fhdr = make_header 0UL blue_bits 0UL in
+      // fh = hd_obj + bwz * 8 lies strictly inside obj's block, which is
+      // disjoint from excl's.
+      if U64.v excl < U64.v obj then
+        assert (U64.v hd_excl + 8 <= U64.v hd_obj)
+      else
+        assert (U64.v fh + 8 <= U64.v hd_excl);
+      read_write_different g1 fh hd_excl fhdr
     end else begin
       let rhn = U64.v hd_obj + (1 + wz) * 8 in
       if rhn >= heap_size then begin

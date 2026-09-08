@@ -581,3 +581,47 @@ goal. The repo's own idiom for this is to extract the arm into a private helper 
 context is small — which is what `alloc_exact_preserves_wfh_part1` and friends already do in
 `Lemmas.Part2.fst`. That is the next step, and it is the shape the remaining four repairs
 will most likely need too.
+
+---
+
+## 12. Current frontier
+
+Green: `GC.Spec.Allocator.{fsti,fst}` (24.4 s), `GC.Spec.Allocator.Lemmas.Core.fst` (3.3 s),
+`GC.Spec.Allocator.Lemmas.Part1.{fsti,fst}` (22.3 s).
+
+Remaining, with what each actually needs:
+
+| module | errors | nature |
+|---|---|---|
+| `GC.Spec.Allocator.Lemmas.Part2.fst` | 3 (`:378,384,395`) | real; the exact-fit arms |
+| `GC.Gen.AllocProps.fst` | 3 (all at `:61-77`) | real; `alloc_search`'s `obj_out` moved |
+| `GC.Impl.Allocator.fst` | 1 (`:253`) | **rename only** — `alloc_from_block_split_rem_hd_oob` no longer exists; but the Pulse `fn` also needs its body updated for the new geometry, since it carries a spec-*equality* postcondition |
+
+### The two levers that did the work
+
+1. **`alloc_from_block_read_outside`** — a single framing lemma ("allocation writes only
+   inside the block it was given"), proved in a tiny context. Use this instead of
+   case-splitting at a call site whenever the goal is really "my address was untouched".
+   It is what unblocked `Lemmas.Core`, where the trivial `bwz - wz == 1` would not
+   discharge.
+2. **Merging the `leftover = 1` and `leftover >= 2` branches** — they write the same heap,
+   so every `objects` / framing / density lemma covers both at once and only free-list
+   reasoning distinguishes them. This let the whole Part1 chain relax from `>= 2` to `>= 1`
+   instead of growing a parallel set of one-word lemmas.
+
+Only `alloc_from_block_rem_in_objects_part1` genuinely needs `>= 2`: it states that the
+replacement cell is a block in this heap, and at `leftover = 1` the replacement is
+`next_fp`.
+
+### Rules of thumb learned
+
+- A **fast** failure (< 5 s) is a name/type error; a **slow** one (30-400 s) is a proof
+  obligation. `--retry 3` inflates failing runs 3x, so read the time before the message.
+- Raising `--z3rlimit` on a non-converging query only burns proportionally longer. Extract a
+  helper lemma instead.
+- `EAGER_QI_CHECKED` (`Makefile:264`) lists the modules needing
+  `--z3smtopt '(set-option :smt.qi.eager_threshold 100)'`: among the ones in play,
+  `GC.Spec.Allocator.fst`, `Lemmas.Part2.fst` and `GC.Impl.Allocator.fst` need it;
+  `Lemmas.Core.fst`, `Lemmas.Part1.fst` and `GC.Gen.AllocProps.fst` do not.
+- An inline `if` inside a tuple needs parentheses, and branches of differing refinement
+  need a common type (`(obj <: U64.t)`).

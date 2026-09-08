@@ -897,7 +897,8 @@ let rec alloc_search_obj_white
              AllocLemmas.fl_chain_terminates g cur_fp fuel /\
              wz >= 1 /\
              (prev_fp <> 0UL ==>
-               (U64.v prev_fp >= U64.v mword /\
+               (prev_fp <> cur_fp /\
+                U64.v prev_fp >= U64.v mword /\
                 U64.v prev_fp < heap_size /\
                 U64.v prev_fp % U64.v mword = 0 /\
                 Seq.mem prev_fp (objects zero_addr g) /\
@@ -926,28 +927,45 @@ let rec alloc_search_obj_white
       AllocLemmas.fl_valid_elim g cur_fp fuel;
       AllocLemmas.fl_valid_gives_mem g cur_fp fuel;
       if bwz >= wz then begin
-        // Found a block: alloc_from_block writes White header
-        alloc_from_block_obj_not_blue g obj wz next_fp;
-        let (g', new_rem_fp) = alloc_from_block g obj wz next_fp in
-        // alloc_from_block gives color_of_object obj g' == White
-        if prev_fp <> 0UL && U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-           U64.v prev_fp % U64.v mword = 0 then begin
-          // Result heap = write_word g' prev_fp new_rem_fp
-          // Need: prev_fp is separated from hd_address obj
-          // Both prev_fp and obj are in objects zero_addr g, both have wosize >= 1
-          AllocLemmas.fl_valid_gives_wosize g cur_fp fuel;
-          // wosize_of_object_as_wosize is definitionally equal to wosize_of_object
-          assert (U64.v (wosize_of_object_as_wosize obj g) >= 1);
-          if U64.v prev_fp < U64.v obj then begin
-            assert (U64.v (wosize_of_object_as_wosize prev_fp g) >= 1);
-            objects_separated zero_addr g prev_fp obj;
-            assert (U64.v prev_fp + 8 <= U64.v (hd_address obj))
-          end else begin
-            objects_separated zero_addr g obj prev_fp;
-            assert (U64.v (hd_address obj) + 8 <= U64.v prev_fp)
-          end;
-          write_preserves_color g' obj (prev_fp <: hp_addr) new_rem_fp
-        end else ()
+        let leftover = bwz - wz in
+        let ahn = U64.v hd + leftover * 8 in
+        if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+        else begin
+          aligned_plus_mul8 (U64.v hd) leftover;
+          // the White header is written at the right-justified address
+          alloc_from_block_obj_not_blue g obj wz next_fp;
+          let (g', new_rem_fp) = alloc_from_block g obj wz next_fp in
+          let ah : hp_addr = mk_hp_addr ahn in
+          f_address_spec ah;
+          let ao : obj_addr = f_address ah in
+          hd_address_spec ao;
+          // bridge to obj_out = cur_fp + leftover * 8
+          assert (leftover * 8 < heap_size);
+          assert (U64.v (U64.uint_to_t (leftover * 8)) == leftover * 8);
+          assert (U64.v cur_fp + leftover * 8 == ahn + 8);
+          assert (U64.v (U64.add cur_fp (U64.uint_to_t (leftover * 8)))
+                  == U64.v (f_address ah));
+          if prev_fp <> 0UL && U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+             U64.v prev_fp % U64.v mword = 0 then begin
+            AllocLemmas.fl_valid_gives_wosize g cur_fp fuel;
+            assert (U64.v (wosize_of_object_as_wosize obj g) >= 1);
+            // prev is outside the whole block, hence away from ah too
+            if U64.v prev_fp < U64.v obj then begin
+              assert (U64.v (wosize_of_object_as_wosize prev_fp g) >= 1);
+              objects_separated zero_addr g prev_fp obj;
+              assert (U64.v prev_fp + 8 <= U64.v hd)
+            end else begin
+              objects_separated zero_addr g obj prev_fp;
+              wosize_of_object_spec obj g;
+              // objects_separated speaks in wosize_of_object_as_wosize
+              assert (U64.v (wosize_of_object_as_wosize obj g) == bwz);
+              assert (U64.v prev_fp > U64.v obj + bwz * 8);
+              assert (U64.v hd + (bwz + 1) * 8 <= U64.v prev_fp)
+            end;
+            assert (ahn + 8 <= U64.v hd + (bwz + 1) * 8);
+            write_preserves_color g' ao (prev_fp <: hp_addr) new_rem_fp
+          end else ()
+        end
       end else begin
         if U64.v hd + 16 <= heap_size then begin
           AllocLemmas.fl_chain_terminates_elim g cur_fp fuel;

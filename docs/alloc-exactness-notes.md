@@ -159,9 +159,10 @@ What is *missing* is a citable lemma, not a proof. Plan step 5.
 Initially recommended **white**, following stock literally. That is wrong for this codebase.
 Make the fragment **blue**.
 
-`flush_blue` (`GC.Spec.Coalesce.fst:75-88`) *already* produces exactly this shape — it
+`flush_blue` (`GC.Spec.Coalesce.fst:75-88`) already *specifies* exactly this shape — it
 writes `makeHeader wz_u64 Blue 0UL` unconditionally and the `if wz >= 1` guard then skips
-the link write, returning `(g1, fp)`:
+the link write, returning `(g1, fp)` (note `fp` unchanged: the block is not even made the
+list head):
 
 ```fstar
         let hdr = makeHeader wz_u64 Blue 0UL in
@@ -173,8 +174,21 @@ the link write, returning `(g1, fp)`:
           (g1, fp)          // wz = 0: blue header, never linked
 ```
 
-So blue wosize-0 unlinked blocks are already part of this collector's vocabulary; a white
-one would be a novel shape.
+It is deliberate, not incidental: `flush_blue_impl_wz0`
+(`GC.Impl.Coalesce.Lemmas.fsti:93`) is a named bridge lemma for exactly this case, one of
+three siblings alongside `_wz1`, concluding `flush_blue g fb 1 fp == (g1, fp)`.
+
+**But the branch is currently unreachable — do not overstate this.** `fused_aux`
+accumulates `rw + ws + 1`, so `run_words = 1` requires exactly one accumulated block with
+`ws = 0`, and nothing today creates an *enumerated* wosize-0 block: grepping
+`makeHeader 0UL` / `make_header 0UL` across the tree returns only that bridge lemma and the
+new allocator code. So the shape is specified, with proof scaffolding and a documented
+rationale, but dead. Our change makes an anticipated branch live rather than inventing a new
+shape — which is worth something, but less than "already produced".
+
+(0UL headers *do* already exist in the heap, as interior words of large blocks —
+`SweepInv.fst:62` calls them "phantom wosize-0 objects not in the global enumeration". They
+are never walked as blocks because they are not in `objects zero_addr g`.)
 
 | | **blue** | white (stock's literal choice) |
 |---|---|---|
@@ -185,11 +199,31 @@ one would be a novel shape.
 | `no_pointer_to_blue` (`Mark.fsti:233`) | vacuous — nothing points at a fragment | vacuous |
 | shape already produced here | yes (`flush_blue`) | novel |
 
-The decisive constraint is `alloc_spec_new_objects_blue_part1`
-(`GC.Spec.Allocator.Lemmas.fsti:314`): *every* object created by allocation is blue.
+The decisive constraint — and the leg the choice actually rests on, since the `flush_blue`
+argument above is about specification rather than behaviour — is
+`alloc_spec_new_objects_blue_part1` (`GC.Spec.Allocator.Lemmas.fsti:314`): *every* object
+created by allocation is blue.
 A white fragment falsifies it, taking down its three consumers
 (`GC.Gen.CheneyPreservation.fst:484`, `GC.Gen.PromoteUpdate.BlueProm.fst:495`,
 `GC.Gen.CheneyPreservation.NonBlueOrigin.fst:273`).
+
+**A third argument for blue: it keeps `sweep_object`'s latent bug latent.** `sweep_object`
+(`GC.Spec.Sweep.fsti:39-50`) dispatches `is_infix` -> `is_white` -> `is_black` -> fall-through,
+and colours are mutually exclusive. A **blue** fragment is none of the first three, so it
+lands in the final `else (g, fp)`: untouched, `fp` unchanged. It never reaches the white
+branch where the `ws = 0` hazard lives.
+
+A **white** fragment would hit that branch exactly: the link write is skipped
+(`if U64.v ws > 0` fails) yet the block is still returned as the new `fp`, so the entire
+existing free list is dropped and `fl_next` on the new head reads `hd + 8`, which for a
+wosize-0 block is the *next block's header*. White would therefore turn an unreachable
+defect into a live one **inside the spec's own model** -- not vacuity, but a genuinely wrong
+free list.
+
+So blue costs only vacuity of the (unconsumed) sweep-exactness theorems, via `fl_complete`
+(every blue object is a cell -- the unlinked fragment is a direct counterexample) and
+`linkable_heap` (violated whatever the colour). `fl_sound` survives either way, since it
+quantifies over cells and the fragment is not one.
 
 Why stock differs: its sweeper dispatches on colour
 (`major_gc.c:883` `case Caml_white: caml_fl_merge_block(...)`), so white is *how* stock

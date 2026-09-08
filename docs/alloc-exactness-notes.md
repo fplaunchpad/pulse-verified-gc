@@ -625,3 +625,77 @@ replacement cell is a block in this heap, and at `leftover = 1` the replacement 
   `Lemmas.Core.fst`, `Lemmas.Part1.fst` and `GC.Gen.AllocProps.fst` do not.
 - An inline `if` inside a tuple needs parentheses, and branches of differing refinement
   need a common type (`(obj <: U64.t)`).
+
+---
+
+## The pivot: right-justification abandoned for the low-end layout
+
+Everything above describes the right-justified design (object at the high end of the free
+block, remainder keeping `hd`), which was the plan's preference because it matches stock
+OCaml's `nf_allocate_block` and leaves the free list bit-identical on a split. It is
+preserved on branch `alloc-exactness-rightjust`, where the spec, `Lemmas.Core`,
+`Lemmas.Part1`, `GC.Gen.AllocProps` and the Pulse implementation all verify.
+
+**It was abandoned because of one case: `leftover = 1`.**
+
+Right-justified, the remainder keeps `hd`, so at `leftover = 1` the remainder *is* the
+empty block and `obj` -- its object address -- has wosize **0** in the output heap.
+`fl_valid` (`Lemmas.Common.fst:15`) requires wosize >= 1 of every cell, so `obj` becomes
+the one object for which the free-list transfer lemmas are false. And it sits in the
+**middle** of the chain, between `prev` and `next`.
+
+Every consumer in `GC.Spec.Allocator.Lemmas.Part2` rewires the list as
+
+```
+fl_valid_transfer      g  g'  head_fp        (* needs obj to still be a cell *)
+fl_valid_field_write_part1 g' prev new_fp head_fp
+```
+
+and the first line is exactly what breaks: `fl_valid g' head_fp` is false when a cell on
+that chain has dropped to wosize 0. Recovering it means doing the prev-link rewrite on `g`
+*before* the block writes and then transferring, which needs
+
+- a `write_word` commutation lemma (`write_word` is byte-level `Seq.upd`, so this is a
+  sequence-extensionality proof), and
+- `chain_avoids` of the *rewired* chain,
+
+for six recursive lemmas, twice each (prev = 0 and prev <> 0), in a 3,381-line file that
+costs ~300 s per iteration and has measured >90 min Z3 hangs. `fl_valid_transfer_excl`
+(added to `Lemmas.Chain`, verified, also on that branch) covers the `prev = 0` half; the
+`prev <> 0` half is the expensive one.
+
+The plan named this exit in advance:
+
+> "If step 2.1 shows the address-arithmetic churn is worse than the ~118 sites suggest,
+> the fallback is patch 17's own shape (fragment *after* the object, block detached),
+> which is already tested and needs no address change."
+
+### What the low-end layout does instead
+
+| | header at `hd` | rest of the block | free list |
+|---|---|---|---|
+| `leftover = 0` | wosize `wz`, white | — | block detached |
+| `leftover = 1` | wosize `wz`, white | **wosize 0, blue, unlinked** at `hd + (wz+1)*8` | block detached |
+| `leftover >= 2` | wosize `wz`, white | remainder at `hd + (wz+1)*8`, linked | remainder replaces the block |
+
+`leftover >= 2` and `leftover = 0` are **byte-identical to what the collector already
+does** -- at `leftover = 0` the old header `make_header bwz` and the new `make_header wz`
+are the same value, since `bwz = wz`. So the entire change is the middle row.
+
+Crucially, at `leftover = 1` the object keeps `hd` and keeps wosize `wz >= 1`, and the
+link word at `obj` is not written. `obj` therefore stays a well-formed object and leaves
+the free list through the ordinary prev/next rewiring -- **exactly as an exact fit does**,
+so every existing exact-fit arm in Part2 continues to apply. The only new obligations are
+that `objects` gains the fragment and that `obj`'s wosize drops from `bwz` to `wz`.
+
+Costs, honestly:
+
+- The empty word sits *above* the object rather than below it, so we diverge from stock's
+  geometry while matching its *handling* (an empty header-only block, reclaimed by the
+  next sweep). Nothing observable differs: `fused_aux` accumulates a non-black block into
+  the pending run whatever its wosize or colour.
+- The free list is still relinked on a split, so `fl_descending` and
+  `alloc_spec_preserves_fl_valid_part1` keep the work right-justification would have
+  removed.
+- It is what `0001-alloc-exact-wosize.patch` hand-applies to the extracted C today, so the
+  post-change snapshot diff should collapse to the patch itself.

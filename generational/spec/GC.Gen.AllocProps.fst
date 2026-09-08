@@ -532,7 +532,15 @@ let rec alloc_search_obj_ne_excl
     (requires well_formed_heap_part1 g /\
               AllocLemmas.fl_valid g cur_fp fuel /\
               AllocLemmas.chain_avoids g cur_fp excl fuel = true /\
-              wz >= 1)
+              wz >= 1 /\
+              // `excl` is an existing object.  Needed now that the allocation
+              // is right-justified: obj_out sits strictly inside the free
+              // block rather than at its head, so distinctness comes from
+              // object separation, not from chain_avoids_head_ne alone.
+              (U64.v excl >= U64.v mword /\
+               U64.v excl < heap_size /\
+               U64.v excl % U64.v mword = 0 /\
+               Seq.mem (excl <: obj_addr) (objects zero_addr g)))
     (ensures (let r = alloc_search g head_fp prev_fp cur_fp wz fuel in
               r.obj_out <> 0UL ==> r.obj_out <> excl))
     (decreases fuel)
@@ -557,9 +565,21 @@ let rec alloc_search_obj_ne_excl
     in
     // chain_avoids_head_ne: cur_fp ≠ excl
     AllocLemmas.chain_avoids_head_ne g cur_fp excl fuel;
-    if block_wz >= wz then
-      // Found: obj_out = cur_fp, and cur_fp ≠ excl from chain_avoids_head_ne
-      ()
+    AllocLemmas.fl_valid_gives_mem g cur_fp fuel;
+    if block_wz >= wz then begin
+      // obj_out is cur_fp + leftover * 8, inside the block.  excl is an
+      // object: below cur_fp it is below obj_out too; above cur_fp,
+      // separation puts it past the whole block; equal is excluded by
+      // chain_avoids_head_ne.
+      let excl_obj : obj_addr = excl in
+      wosize_of_object_spec obj g;
+      if U64.v excl < U64.v obj then
+        objects_separated zero_addr g excl_obj obj
+      else if U64.v excl > U64.v obj then begin
+        objects_separated zero_addr g obj excl_obj;
+        assert (U64.v excl > U64.v obj + block_wz * 8)
+      end else ()
+    end
     else begin
       // Advance: need chain_avoids g next_fp excl (fuel-1)
       if U64.v hd + 16 <= heap_size then begin
@@ -575,7 +595,13 @@ let rec alloc_search_obj_ne_excl
 let alloc_spec_obj_ne_excl (g: heap) (fp: U64.t) (requested_wz: nat) (excl: U64.t)
   : Lemma (requires well_formed_heap_part1 g /\
                     AllocLemmas.fl_valid g fp heap_words /\
-                    AllocLemmas.chain_avoids g fp excl heap_words = true)
+                    AllocLemmas.chain_avoids g fp excl heap_words = true /\
+                    // see alloc_search_obj_ne_excl: with the allocation
+                    // right-justified, distinctness rests on object separation
+                    (U64.v excl >= U64.v mword /\
+                     U64.v excl < heap_size /\
+                     U64.v excl % U64.v mword = 0 /\
+                     Seq.mem (excl <: obj_addr) (objects zero_addr g)))
           (ensures (let r = alloc_spec g fp requested_wz in
                     r.obj_out <> 0UL ==> r.obj_out <> excl))
   = let wz = if requested_wz = 0 then 1 else requested_wz in

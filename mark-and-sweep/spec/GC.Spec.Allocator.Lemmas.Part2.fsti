@@ -21,6 +21,9 @@ val alloc_from_block_preserves_wfh_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
   Lemma (requires well_formed_heap_part1 g /\
                   Seq.mem obj (objects zero_addr g) /\
+                  // needed so the right-justified object address lands
+                  // strictly inside the heap
+                  wz >= 1 /\
                   (let hdr = read_word g (hd_address obj) in
                    U64.v (getWosize hdr) >= wz))
         (ensures (let (g', _) = alloc_from_block g obj wz next_fp in

@@ -21,41 +21,44 @@ val alloc_split_facts_part1 :
                   Seq.mem obj (objects zero_addr g) /\
                   (let hdr = read_word g (hd_address obj) in
                    let block_wz = U64.v (getWosize hdr) in
-                   block_wz >= wz /\ block_wz - wz >= 1))
+                   block_wz >= wz /\ block_wz - wz >= 2))
         (ensures (let hd = hd_address obj in
                   let hdr = read_word g hd in
                   let block_wz = U64.v (getWosize hdr) in
-                  let leftover = block_wz - wz in
-                  // Right-justified: remainder keeps hd, object header sits
-                  // `leftover` words above it.
-                  let ahn = U64.v hd + leftover * 8 in
+                  let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
+                  let rem_obj_nat = rem_hd_nat + 8 in
                   let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-                  let rem_wz = leftover - 1 in
-                  ahn >= 8 /\
-                  ahn < heap_size /\
+                  let rem_wz = block_wz - wz - 1 in
+                  rem_hd_nat >= 8 /\
+                  rem_obj_nat >= 16 /\
+                  rem_hd_nat < heap_size /\
+                  rem_obj_nat < heap_size /\
                   next_hd_nat <= heap_size /\
                   next_hd_nat % 8 == 0 /\
-                  ahn % 8 == 0 /\
-                  ahn < pow2 64 /\
+                  rem_hd_nat % 8 == 0 /\
+                  rem_obj_nat % 8 == 0 /\
+                  rem_hd_nat < pow2 64 /\
+                  rem_obj_nat < pow2 64 /\
                   next_hd_nat < pow2 64 /\
                   wz < pow2 54 /\
                   rem_wz < pow2 54 /\
                   getWosize (make_header (U64.uint_to_t wz) white_bits 0UL) == U64.uint_to_t wz /\
                   getWosize (make_header (U64.uint_to_t rem_wz) blue_bits 0UL) == U64.uint_to_t rem_wz /\
-                  (let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-                   let g1 = write_word g hd rem_hdr in
-                   let ah : hp_addr = U64.uint_to_t ahn in
-                   let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-                   let g2 = write_word g1 ah alloc_hdr in
-                   alloc_from_block g obj wz next_fp ==
-                     (g2, (if leftover >= 2 then (obj <: U64.t) else next_fp)) /\
-                   Seq.length g2 == Seq.length g /\
-                   read_word g2 hd == rem_hdr /\
-                   read_word g2 ah == alloc_hdr /\
-                   getWosize (read_word g2 hd) == U64.uint_to_t rem_wz /\
-                   getWosize (read_word g2 ah) == U64.uint_to_t wz /\
+                  (let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+                   let g1 = write_word g hd alloc_hdr in
+                   let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
+                   let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
+                   let g2 = write_word g1 rem_hd rem_hdr in
+                   let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
+                   let g3 = write_word g2 rem_obj next_fp in
+                   alloc_from_block g obj wz next_fp == (g3, rem_obj) /\
+                   Seq.length g3 == Seq.length g /\
+                   read_word g3 hd == alloc_hdr /\
+                   read_word g3 rem_hd == rem_hdr /\
+                   getWosize (read_word g3 hd) == U64.uint_to_t wz /\
+                   getWosize (read_word g3 rem_hd) == U64.uint_to_t rem_wz /\
                    (next_hd_nat < heap_size ==>
-                     objects (U64.uint_to_t next_hd_nat) g2 ==
+                     objects (U64.uint_to_t next_hd_nat) g3 ==
                      objects (U64.uint_to_t next_hd_nat) g))))
 
 /// Helper: g3 agrees with g at non-write positions under part1
@@ -66,12 +69,12 @@ val alloc_split_g3_agrees_part1 :
                   (let hd = hd_address obj in
                    let hdr = read_word g hd in
                    let block_wz = U64.v (getWosize hdr) in
-                   block_wz >= wz /\ block_wz - wz >= 1 /\
-                   // Right-justified: only two words are written, the
-                   // remainder header at hd and the object header above it.
-                   (let ahn = U64.v hd + (block_wz - wz) * 8 in
+                   block_wz >= wz /\ block_wz - wz >= 2 /\
+                   (let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
+                    let rem_obj_nat = rem_hd_nat + 8 in
                     U64.v p <> U64.v hd /\
-                    U64.v p <> ahn)))
+                    U64.v p <> rem_hd_nat /\
+                    U64.v p <> rem_obj_nat)))
         (ensures (let (g3, _) = alloc_from_block g obj wz next_fp in
                   read_word g3 p == read_word g p))
 
@@ -82,7 +85,7 @@ val alloc_split_old_in_new_part1 :
                   Seq.mem obj (objects zero_addr g) /\
                   (let hdr = read_word g (hd_address obj) in
                    let block_wz = U64.v (getWosize hdr) in
-                   block_wz >= wz /\ block_wz - wz >= 1) /\
+                   block_wz >= wz /\ block_wz - wz >= 2) /\
                   Seq.mem h (objects zero_addr g))
         (ensures (let (g3, _) = alloc_from_block g obj wz next_fp in
                   Seq.mem h (objects zero_addr g3)))
@@ -122,39 +125,12 @@ val alloc_from_block_preserves_objects_part1 :
 /// **Theorem**: In the split case (block_wz - wz >= 2), the remainder fp
 /// returned by alloc_from_block is a valid pointer AND is in objects of
 /// the output heap. Requires only well_formed_heap_part1.
-/// The ALLOCATED block is an object of the output heap.
-///
-/// Under right-justification the allocated piece is the newly created block --
-/// the remainder keeps `obj` and stays an old object -- so this is the
-/// counterpart of `alloc_from_block_rem_in_objects_part1` under the old
-/// low-end layout, where those roles were the other way round.  Holds for any
-/// leftover >= 1, since a split and a one-word leftover build the same tiling.
-val alloc_from_block_alloc_in_objects_part1 :
-  (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
-  Lemma (requires well_formed_heap_part1 g /\
-                  Seq.mem obj (objects zero_addr g) /\
-                  (let hd = hd_address obj in
-                   let bwz = U64.v (getWosize (read_word g hd)) in
-                   bwz >= wz /\ bwz - wz >= 1 /\
-                   // the OBJECT address must be in bounds for f_address; this
-                   // is exactly what alloc_search's guard establishes
-                   U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
-        (ensures (let hd = hd_address obj in
-                  let bwz = U64.v (getWosize (read_word g hd)) in
-                  let ahn = U64.v hd + (bwz - wz) * 8 in
-                  let (g', _) = alloc_from_block g obj wz next_fp in
-                  ahn % U64.v mword == 0 /\ ahn + 8 < heap_size /\
-                  Seq.mem (f_address (U64.uint_to_t ahn <: hp_addr))
-                          (objects zero_addr g')))
-
 val alloc_from_block_rem_in_objects_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->
   Lemma (requires well_formed_heap_part1 g /\
                   Seq.mem obj (objects zero_addr g) /\
                   (let hdr = read_word g (hd_address obj) in
                    let bwz = U64.v (getWosize hdr) in
-                   // Only the true split keeps a cell: at leftover = 1 the
-                   // replacement is `next_fp`, not a block in this heap.
                    bwz >= wz /\ bwz - wz >= 2))
         (ensures (let (g', rem_fp) = alloc_from_block g obj wz next_fp in
                   is_pointer_field rem_fp /\

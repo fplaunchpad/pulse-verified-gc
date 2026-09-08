@@ -119,22 +119,13 @@ private let rec alloc_search_preserves_objects_part1
             end
           end else begin
             assert (prev <> obj);
-            hd_address_spec prev; hd_address_bounds prev;
-            wosize_of_object_spec obj g;
-            if U64.v prev < U64.v obj then begin
-              objects_separated zero_addr g prev obj;
-              assert (U64.v (hd_address prev) < U64.v hd);
-              // both 8-aligned, so strict inequality gives a full word of gap
-              assert (U64.v (hd_address prev) + 8 <= U64.v hd)
-            end else begin
+            if U64.v prev < U64.v obj then
+              objects_separated zero_addr g prev obj
+            else
               objects_separated zero_addr g obj prev;
-              assert (U64.v (hd_address prev) > U64.v hd + block_wz * 8);
-              assert (U64.v (hd_address prev) >= U64.v hd + (block_wz + 1) * 8)
-            end;
-            // prev lies outside the allocated block, so nothing the allocator
-            // writes can touch its header -- true in every arm, so there is no
-            // need to know whether leftover is 0 or 1 here.
-            alloc_from_block_read_outside g obj wz next_fp (hd_address prev)
+            let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
+            alloc_from_block_exact g obj wz next_fp;
+            read_write_different g hd (hd_address prev) alloc_hdr
           end;
           wosize_of_object_spec prev g';
           assert (wosize_of_object prev g' == wosize_of_object prev g);

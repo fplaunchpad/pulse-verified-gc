@@ -89,13 +89,6 @@ let alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
     reveal_opaque (`%alloc_from_block) alloc_from_block
 #pop-options
 
-/// One spare word: empty block at hd, object right-justified above it
-#push-options "--z3rlimit 25"
-let alloc_from_block_frag (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  = hd_address_spec obj; hd_address_bounds obj;
-    reveal_opaque (`%alloc_from_block) alloc_from_block
-#pop-options
-
 /// Split, normal: all bounds pass
 #push-options "--z3rlimit 25 --fuel 1"
 let alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)

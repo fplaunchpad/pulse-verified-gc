@@ -120,22 +120,21 @@ let alloc_from_block (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64
       let alloc_hd : hp_addr = U64.uint_to_t alloc_hd_nat in
       // requested_wz <= block_wz < pow2 54, so the header is well-typed.
       let alloc_hdr = make_header (U64.uint_to_t requested_wz) white_bits 0UL in
-      if leftover >= 2 then
-        // Split: remainder keeps hd and its link at hd + 8, so the free list
-        // is unchanged and `obj` remains the cell.
+      if leftover >= 1 then
+        // A split and a one-word leftover write the SAME two words: the
+        // remainder header at hd, of wosize `leftover - 1` -- which at
+        // leftover = 1 is exactly the empty block, header only -- and the
+        // object header right-justified above it.  They differ only in what
+        // replaces `obj` in the free list: a split leaves the cell in place at
+        // `obj`, keeping the link already at hd + 8, whereas a one-word
+        // leftover has no body word to hold a link, so `fl_cell` (which
+        // demands wosize >= 1) correctly excludes it and the whole block
+        // leaves the list.  The next fused sweep absorbs it into an adjacent
+        // run.
         let rem_hdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
         let g1 = write_word g hd rem_hdr in
         let g2 = write_word g1 alloc_hd alloc_hdr in
-        (g2, obj)
-      else if leftover = 1 then
-        // One spare word: an empty block, header only.  It is blue but is
-        // deliberately NOT linked -- it has no body word to hold a link, so
-        // `fl_cell` (which demands wosize >= 1) correctly excludes it.  The
-        // next fused sweep absorbs it into an adjacent run.
-        let frag_hdr = make_header 0UL blue_bits 0UL in
-        let g1 = write_word g hd frag_hdr in
-        let g2 = write_word g1 alloc_hd alloc_hdr in
-        (g2, next_fp)
+        (g2, (if leftover >= 2 then (obj <: U64.t) else next_fp))
       else
         // Exact fit: alloc_hd = hd.  Detach the block.
         let g1 = write_word g hd alloc_hdr in
@@ -322,29 +321,14 @@ val alloc_from_block_exact (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
                     let g1 = write_word g hd ahdr in
                     alloc_from_block g obj wz next == (g1, next)))
 
-/// Leftover of exactly one word (leftover = 1): the spare word cannot carry a
-/// free-list link, so it becomes an empty block (header only, wosize 0, blue)
-/// at `hd`, and the object is right-justified immediately above it -- its
-/// header lands at `hd + 8`, which is `obj` itself.  The whole block leaves
-/// the free list, so the replacement is `next`.
-val alloc_from_block_frag (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
-  : Lemma (requires (let hdr = read_word g (hd_address obj) in
-                     let bwz = U64.v (getWosize hdr) in
-                     bwz - wz == 1))
-          (ensures (let hd = hd_address obj in
-                    let frag = make_header 0UL blue_bits 0UL in
-                    let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-                    let g1 = write_word g hd frag in
-                    let g2 = write_word g1 (obj <: hp_addr) ahdr in
-                    alloc_from_block g obj wz next == (g2, next)))
-
-/// Split (leftover >= 2): the object is right-justified, so the remainder
-/// keeps `hd` -- its address and its link word at hd + 8 are untouched, and
-/// the free list is therefore unchanged.
+/// Any leftover (>= 1): the object is right-justified, so the remainder keeps
+/// `hd`.  At leftover >= 2 its address and its link at hd + 8 are untouched and
+/// the free list is unchanged; at leftover = 1 the remainder is the empty block
+/// and the whole block leaves the list.  The two cases write the same heap.
 val alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
   : Lemma (requires (let hd = hd_address obj in
                      let bwz = U64.v (getWosize (read_word g hd)) in
-                     bwz - wz >= 2 /\
+                     bwz - wz >= 1 /\
                      U64.v hd + (bwz - wz) * 8 < heap_size))
           (ensures (let hd = hd_address obj in
                     let bwz = U64.v (getWosize (read_word g hd)) in
@@ -355,7 +339,8 @@ val alloc_from_block_split_normal (g: heap) (obj: obj_addr) (wz: nat) (next: U64
                     let ah : hp_addr = U64.uint_to_t ahn in
                     let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
                     let g2 = write_word g1 ah ahdr in
-                    alloc_from_block g obj wz next == (g2, obj)))
+                    alloc_from_block g obj wz next ==
+                      (g2, (if leftover >= 2 then (obj <: U64.t) else next))))
 
 /// The right-justified object header would fall outside the heap.  Unreachable
 /// for a well-formed block (hd + (bwz + 1) * 8 <= heap_size and leftover <= bwz),

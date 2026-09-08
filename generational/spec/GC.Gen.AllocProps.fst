@@ -46,7 +46,7 @@ private let aligned_plus_mul8 (base: nat{base % U64.v mword == 0}) (k: nat)
 ///
 /// Proof strategy: unfold alloc_spec into alloc_search and observe that
 /// obj_out is set to cur_fp which already passed all guard checks.
-#push-options "--z3rlimit 12 --fuel 4 --ifuel 1"
+#push-options "--z3rlimit 60 --fuel 4 --ifuel 1"
 let rec alloc_search_obj_valid
   (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
   (cur_fp: U64.t) (wz: nat) (fuel: nat)
@@ -71,7 +71,25 @@ let rec alloc_search_obj_valid
       if U64.v hd + 16 <= heap_size then read_word g obj
       else 0UL
     in
-    if block_wz >= wz then ()
+    if block_wz >= wz then begin
+      // obj_out is now the right-justified object address, cur_fp + leftover*8,
+      // and alloc_search guards it: out of bounds means obj_out = 0UL, which
+      // makes the implication vacuous.  In bounds, obj_out = ahn + 8 and the
+      // guard supplies exactly the three refinement facts.
+      let leftover = block_wz - wz in
+      let ahn = U64.v hd + leftover * 8 in
+      if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+      else begin
+        aligned_plus_mul8 (U64.v hd) leftover;
+        hd_address_spec obj;
+        // cur_fp = hd + 8, so the reported object is ahn + 8, which the guard
+        // has just bounded; that also keeps the U64.add below pow2 64.
+        assert (leftover * 8 < heap_size);
+        assert (U64.v (U64.uint_to_t (leftover * 8)) == leftover * 8);
+        assert (U64.v cur_fp + leftover * 8 == ahn + 8);
+        assert (ahn + 8 < heap_size)
+      end
+    end
     else
       alloc_search_obj_valid g head_fp cur_fp next_fp wz (fuel - 1)
   end

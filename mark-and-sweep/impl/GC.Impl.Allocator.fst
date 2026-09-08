@@ -91,6 +91,24 @@ let split_no_overflow (hd: hp_addr) (wz: U64.t)
     assert_norm (pow2 57 + pow2 57 == pow2 58);
     assert_norm (pow2 58 < pow2 64)
 
+/// Arithmetic for right-justified allocation: the object header sits at
+/// `hd + leftover * 8`.  Establishes that it is word-aligned and that neither
+/// it nor the object address one word above it overflows 64 bits.
+let rightjust_no_overflow (hd: hp_addr) (leftover: U64.t)
+  : Lemma (requires U64.v leftover <= pow2 54 - 1)
+          (ensures (let off = U64.v leftover * U64.v mword in
+                    off <= pow2 57 /\
+                    off < pow2 64 /\
+                    U64.v hd + off < pow2 64 /\
+                    U64.v hd + off + U64.v mword < pow2 64 /\
+                    (U64.v hd + off) % U64.v mword == 0))
+  = assert_norm (pow2 54 * 8 == pow2 57);
+    assert_norm (pow2 57 + pow2 57 == pow2 58);
+    assert_norm (pow2 58 + pow2 58 == pow2 59);
+    assert_norm (pow2 59 < pow2 64);
+    FStar.Math.Lemmas.multiple_modulo_lemma (U64.v leftover) 8;
+    FStar.Math.Lemmas.lemma_mod_add_distr (U64.v hd) (U64.v leftover * 8) 8
+
 /// wosize bounds from heap arithmetic
 let wosize_from_heap_lemma (wz: U64.t)
   : Lemma (requires U64.v wz <= SpecBase.heap_words - 1 /\ heap_size <= pow2 57)
@@ -231,118 +249,74 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
         SA.spec_next_fp_eq 's (vcur <: obj_addr);
 
         if U64.gte block_wz wz {
-          // Found a suitable block — perform allocation
+          // Found a suitable block.  The object is RIGHT-JUSTIFIED inside it,
+          // as stock OCaml's nf_allocate_block does: its header sits
+          // `leftover` words above `hd`, so the remainder keeps `hd`, keeps
+          // its address, and keeps the link word already stored at hd + 8.
+          // The allocated header therefore declares EXACTLY `wz`.
           let leftover = U64.sub block_wz wz;
           let vh = !head_fp;
           let vp = !prev_fp;
+          wosize_bound_lemma wz block_wz;
+          rightjust_no_overflow hd_addr leftover;
 
-          if U64.gte leftover 2UL {
-            // === SPLIT CASE ===
-            wosize_bound_lemma wz block_wz;
-            split_offset_fits wz;
-            split_no_overflow hd_addr wz;
+          let alloc_hd_off = U64.add hd_addr (U64.mul leftover mword);
+          let alloc_obj = U64.add alloc_hd_off mword;
 
-            // Compute remainder address
-            let wz_plus_1 = U64.add wz 1UL;
-            let offset = U64.mul wz_plus_1 mword;
-            let rem_hd_off = U64.add hd_addr offset;
+          if U64.gte alloc_obj heap_size_u64 {
+            // The right-justified object would leave the heap.  Unreachable
+            // for a well-formed block once wz >= 1, but the spec guards it.
+            SA.alloc_search_found_oob 's vh vp vcur (U64.v wz) (U64.v vfuel);
+            go := false
+          } else {
+            assert (pure (U64.v alloc_hd_off < heap_size));
+            assert (pure (U64.v alloc_hd_off % 8 == 0));
 
-            // Runtime bounds check matching spec's alloc_from_block
-            if U64.gte rem_hd_off heap_size_u64 {
-              // rem_hd out of bounds — spec returns (g1, next)
-              SA.alloc_from_block_split_rem_hd_oob 's (vcur <: obj_addr) (U64.v wz) next;
+            if U64.gte leftover 1UL {
+              // Split, or a one-word leftover: both write the same two words,
+              // the remainder header at hd (wosize leftover - 1, which at
+              // leftover = 1 is the empty block, header only) and the object
+              // header right-justified above it.  They differ only in what
+              // replaces `obj` in the free list.
+              SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
 
-              // Write alloc header (white, tag=0)
+              let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+              write_word heap hd_addr rem_hdr;
+              let alloc_hdr = makeHeader wz white 0UL;
+              write_word heap alloc_hd_off alloc_hdr;
+
+              let new_fp = (if U64.gte leftover 2UL then vcur else next);
+
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := new_fp;
+                result_obj := alloc_obj;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) new_fp;
+                result_obj := alloc_obj;
+                go := false
+              }
+            } else {
+              // === EXACT FIT === leftover = 0, so alloc_hd_off = hd_addr and
+              // alloc_obj = vcur; the block is detached from the free list.
+              SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+
               let alloc_hdr = makeHeader wz white 0UL;
               write_word heap hd_addr alloc_hdr;
 
               if U64.eq vp 0UL {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 head_fp := next;
-                result_obj := vcur;
+                result_obj := alloc_obj;
                 go := false
               } else {
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) next;
-                result_obj := vcur;
+                result_obj := alloc_obj;
                 go := false
               }
-            } else {
-              // rem_hd valid
-              assert (pure (U64.v rem_hd_off < heap_size));
-              assert (pure (U64.v rem_hd_off % 8 == 0));
-              let rem_obj = U64.add rem_hd_off mword;
-
-              if U64.gte rem_obj heap_size_u64 {
-                // rem_obj out of bounds
-                // Call spec lemma BEFORE writes
-                SA.alloc_from_block_split_rem_obj_oob 's (vcur <: obj_addr) (U64.v wz) next;
-
-                // Perform writes matching spec
-                let alloc_hdr = makeHeader wz white 0UL;
-                write_word heap hd_addr alloc_hdr;
-                let rem_wz_u = U64.sub leftover 1UL;
-                let rem_hdr = makeHeader rem_wz_u blue 0UL;
-                write_word heap rem_hd_off rem_hdr;
-
-                if U64.eq vp 0UL {
-                  SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  head_fp := rem_obj;
-                  result_obj := vcur;
-                  go := false
-                } else {
-                  SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  write_word heap (vp <: hp_addr) rem_obj;
-                  result_obj := vcur;
-                  go := false
-                }
-              } else {
-                // Normal split
-                assert (pure (U64.v rem_obj < heap_size));
-                assert (pure (U64.v rem_obj % 8 == 0));
-
-                // Call spec lemma BEFORE writes
-                SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
-
-                // Perform writes matching spec
-                let alloc_hdr = makeHeader wz white 0UL;
-                write_word heap hd_addr alloc_hdr;
-                let rem_wz_u = U64.sub leftover 1UL;
-                let rem_hdr = makeHeader rem_wz_u blue 0UL;
-                write_word heap rem_hd_off rem_hdr;
-                write_word heap rem_obj next;
-
-                if U64.eq vp 0UL {
-                  SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  head_fp := rem_obj;
-                  result_obj := vcur;
-                  go := false
-                } else {
-                  SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  write_word heap (vp <: hp_addr) rem_obj;
-                  result_obj := vcur;
-                  go := false
-                }
-              }
-            }
-          } else {
-            // === EXACT FIT CASE ===
-            // Call spec lemma BEFORE writes
-            SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
-
-            let alloc_hdr = makeHeader block_wz white 0UL;
-            write_word heap hd_addr alloc_hdr;
-
-            if U64.eq vp 0UL {
-              SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              head_fp := next;
-              result_obj := vcur;
-              go := false
-            } else {
-              SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              write_word heap (vp <: hp_addr) next;
-              result_obj := vcur;
-              go := false
             }
           }
         } else {
@@ -456,22 +430,59 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
         SA.spec_next_fp_eq 's (vcur <: obj_addr);
 
         if U64.gte block_wz wz {
+          // Found a suitable block.  The object is RIGHT-JUSTIFIED inside it,
+          // as stock OCaml's nf_allocate_block does: its header sits
+          // `leftover` words above `hd`, so the remainder keeps `hd`, keeps
+          // its address, and keeps the link word already stored at hd + 8.
+          // The allocated header therefore declares EXACTLY `wz`.
           let leftover = U64.sub block_wz wz;
           let vh = !head_fp;
           let vp = !prev_fp;
+          wosize_bound_lemma wz block_wz;
+          rightjust_no_overflow hd_addr leftover;
 
-          if U64.gte leftover 2UL {
-            // === SPLIT CASE ===
-            wosize_bound_lemma wz block_wz;
-            split_offset_fits wz;
-            split_no_overflow hd_addr wz;
+          let alloc_hd_off = U64.add hd_addr (U64.mul leftover mword);
+          let alloc_obj = U64.add alloc_hd_off mword;
 
-            let wz_plus_1 = U64.add wz 1UL;
-            let offset = U64.mul wz_plus_1 mword;
-            let rem_hd_off = U64.add hd_addr offset;
+          if U64.gte alloc_obj heap_size_u64 {
+            // The right-justified object would leave the heap.  Unreachable
+            // for a well-formed block once wz >= 1, but the spec guards it.
+            SA.alloc_search_found_oob 's vh vp vcur (U64.v wz) (U64.v vfuel);
+            go := false
+          } else {
+            assert (pure (U64.v alloc_hd_off < heap_size));
+            assert (pure (U64.v alloc_hd_off % 8 == 0));
 
-            if U64.gte rem_hd_off heap_size_u64 {
-              SA.alloc_from_block_split_rem_hd_oob 's (vcur <: obj_addr) (U64.v wz) next;
+            if U64.gte leftover 1UL {
+              // Split, or a one-word leftover: both write the same two words,
+              // the remainder header at hd (wosize leftover - 1, which at
+              // leftover = 1 is the empty block, header only) and the object
+              // header right-justified above it.  They differ only in what
+              // replaces `obj` in the free list.
+              SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
+
+              let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+              write_word heap hd_addr rem_hdr;
+              let alloc_hdr = makeHeader wz white 0UL;
+              write_word heap alloc_hd_off alloc_hdr;
+
+              let new_fp = (if U64.gte leftover 2UL then vcur else next);
+
+              if U64.eq vp 0UL {
+                SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                head_fp := new_fp;
+                result_obj := alloc_obj;
+                go := false
+              } else {
+                SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                write_word heap (vp <: hp_addr) new_fp;
+                result_obj := alloc_obj;
+                go := false
+              }
+            } else {
+              // === EXACT FIT === leftover = 0, so alloc_hd_off = hd_addr and
+              // alloc_obj = vcur; the block is detached from the free list.
+              SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
 
               let alloc_hdr = makeHeader wz white 0UL;
               write_word heap hd_addr alloc_hdr;
@@ -479,87 +490,14 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               if U64.eq vp 0UL {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 head_fp := next;
-                result_obj := vcur;
+                result_obj := alloc_obj;
                 go := false
               } else {
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) next;
-                result_obj := vcur;
+                result_obj := alloc_obj;
                 go := false
               }
-            } else {
-              assert (pure (U64.v offset == U64.v wz_plus_1 * 8));
-              assert (pure (U64.v rem_hd_off == U64.v hd_addr + U64.v wz_plus_1 * 8));
-              SpecBase.aligned_plus_mul8 (U64.v hd_addr) (U64.v wz_plus_1);
-              assert (pure (U64.v rem_hd_off < heap_size));
-              assert (pure (U64.v rem_hd_off % 8 == 0));
-              let rem_obj = U64.add rem_hd_off mword;
-
-              if U64.gte rem_obj heap_size_u64 {
-                SA.alloc_from_block_split_rem_obj_oob 's (vcur <: obj_addr) (U64.v wz) next;
-
-                let alloc_hdr = makeHeader wz white 0UL;
-                write_word heap hd_addr alloc_hdr;
-                let rem_wz_u = U64.sub leftover 1UL;
-                let rem_hdr = makeHeader rem_wz_u blue 0UL;
-                write_word heap rem_hd_off rem_hdr;
-
-                if U64.eq vp 0UL {
-                  SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  head_fp := rem_obj;
-                  result_obj := vcur;
-                  go := false
-                } else {
-                  SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  write_word heap (vp <: hp_addr) rem_obj;
-                  result_obj := vcur;
-                  go := false
-                }
-              } else {
-                assert (pure (U64.v rem_obj == U64.v rem_hd_off + 8));
-                SpecBase.aligned_plus_mul8 (U64.v rem_hd_off) 1;
-                assert (pure (U64.v rem_obj < heap_size));
-                assert (pure (U64.v rem_obj % 8 == 0));
-
-                SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
-
-                let alloc_hdr = makeHeader wz white 0UL;
-                write_word heap hd_addr alloc_hdr;
-                let rem_wz_u = U64.sub leftover 1UL;
-                let rem_hdr = makeHeader rem_wz_u blue 0UL;
-                write_word heap rem_hd_off rem_hdr;
-                write_word heap rem_obj next;
-
-                if U64.eq vp 0UL {
-                  SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  head_fp := rem_obj;
-                  result_obj := vcur;
-                  go := false
-                } else {
-                  SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-                  write_word heap (vp <: hp_addr) rem_obj;
-                  result_obj := vcur;
-                  go := false
-                }
-              }
-            }
-          } else {
-            // === EXACT FIT CASE ===
-            SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
-
-            let alloc_hdr = makeHeader block_wz white 0UL;
-            write_word heap hd_addr alloc_hdr;
-
-            if U64.eq vp 0UL {
-              SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              head_fp := next;
-              result_obj := vcur;
-              go := false
-            } else {
-              SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
-              write_word heap (vp <: hp_addr) next;
-              result_obj := vcur;
-              go := false
             }
           }
         } else {

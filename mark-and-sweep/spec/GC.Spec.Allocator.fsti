@@ -315,6 +315,25 @@ val alloc_search_found_prev (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                     alloc_search g head prev cur wz fuel ==
                     { heap_out = g2; fp_out = head; obj_out = alloc_obj }))
 
+/// The block fits, but the right-justified object header (or the word after
+/// it) would fall outside the heap, so the search bails with OOM and leaves
+/// the heap untouched.  Unreachable for a well-formed block once `wz >= 1`,
+/// since then `hd + (bwz - wz + 1) * 8 <= hd + bwz * 8 < heap_size`; the
+/// implementation still needs the arm because the loop invariant does not
+/// carry well-formedness of the current cell.
+val alloc_search_found_oob (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: nat)
+  : Lemma (requires fuel > 0 /\
+                    U64.v cur >= U64.v zero_addr + U64.v mword /\
+                    U64.v cur < heap_size /\
+                    U64.v cur % U64.v mword = 0 /\
+                    (let hd = hd_address (cur <: obj_addr) in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz >= wz /\
+                     (let ahn = U64.v hd + (bwz - wz) * 8 in
+                      ahn + 8 >= heap_size \/ ahn >= pow2 64 \/ ahn % 8 <> 0)))
+          (ensures alloc_search g head prev cur wz fuel ==
+                   { heap_out = g; fp_out = head; obj_out = 0UL })
+
 /// For a valid obj_addr, spec_next_fp always reads the field (condition is always true)
 val spec_next_fp_eq (g: heap) (obj: obj_addr)
   : Lemma (spec_next_fp g obj == read_word g obj)

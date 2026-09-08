@@ -64,6 +64,10 @@ let alloc_search_found_head (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
 let alloc_search_found_prev (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: nat)
   = ()
 
+/// The block fits but the right-justified object would be out of bounds
+let alloc_search_found_oob (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: nat)
+  = ()
+
 /// Helper: for multiples of d, a < b implies a + d <= b
 let multiple_gap_lemma (a b: nat) (d: pos)
   : Lemma (requires a % d == 0 /\ b % d == 0 /\ a < b)

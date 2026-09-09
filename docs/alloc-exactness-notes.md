@@ -639,21 +639,37 @@ preserved on branch `alloc-exactness-rightjust`, where the spec, `Lemmas.Core`,
 **It was abandoned because of one case: `leftover = 1`.**
 
 Right-justified, the remainder keeps `hd`, so at `leftover = 1` the remainder *is* the
-empty block and `obj` -- its object address -- has wosize **0** in the output heap.
-`fl_valid` (`Lemmas.Common.fst:15`) requires wosize >= 1 of every cell, so `obj` becomes
-the one object for which the free-list transfer lemmas are false. And it sits in the
-**middle** of the chain, between `prev` and `next`.
+empty block and `obj` -- its object address -- has wosize **0**.  `fl_valid`
+(`Lemmas.Common.fst:15`) requires wosize >= 1 of every cell, so `obj` becomes the one
+object for which the free-list transfer lemmas are false.
+
+Note carefully *where* that bites, because it is not the obvious place.  The allocated
+block **is** removed from the free list -- but only by the second of two writes.
+`alloc_search` builds its output in stages:
+
+```
+g   input heap                          head -> ... -> prev -> obj -> next
+g'  = fst (alloc_from_block ...)        block writes only; prev STILL points at obj
+g2  = write_word g' prev new_fp         prev rewired; obj is off the list
+```
+
+`g2` is fine.  `g'` is not: prev's link still names `obj`, and `obj`'s wosize is already
+0, so `fl_valid g' head_fp` is false.  That intermediate heap is exactly what the proofs
+need next.
 
 Every consumer in `GC.Spec.Allocator.Lemmas.Part2` rewires the list as
 
 ```
-fl_valid_transfer      g  g'  head_fp        (* needs obj to still be a cell *)
-fl_valid_field_write_part1 g' prev new_fp head_fp
+fl_valid_transfer      g  g'  head_fp        (* 1. carry fl_valid into g'      *)
+fl_valid_field_write_part1 g' prev new_fp head_fp   (* 2. rewire, yielding g2  *)
 ```
 
-and the first line is exactly what breaks: `fl_valid g' head_fp` is false when a cell on
-that chain has dropped to wosize 0. Recovering it means doing the prev-link rewrite on `g`
-*before* the block writes and then transferring, which needs
+and step 2's own precondition is literally `fl_valid g' fp fuel` -- well-formedness of
+the OLD chain, the one still running through `obj`, in the INTERMEDIATE heap.  Step 1
+exists to supply it, and step 1 is what breaks.
+
+Recovering it means doing the prev-link rewrite on `g` *before* the block writes and then
+transferring, which needs
 
 - a `write_word` commutation lemma (`write_word` is byte-level `Seq.upd`, so this is a
   sequence-extensionality proof), and

@@ -762,11 +762,40 @@ Every module needed some subset of these.  Worth reaching for first next time:
   the `apply-snapshot-patches` / `verify-snapshot-patches` targets and the CI
   step all live there, not on `main`.  This branch carries the fix; retiring
   the patch is the follow-up on `native`.
-- **The dead padding machinery** (`zero_promote_padding` and its nine lemmas,
-  three private helpers, the Pulse `zero_padding_step`, and the
-  `fwd_target_extra_fields_state` chain with its five consumers) is now
-  vacuous: `promote_object_extra_field_not_pointer`'s
-  `field_idx >= wz /\ field_idx < wosize` precondition is unsatisfiable.  It
-  should come out in its own commit so a verification failure is localisable.
+- **The dead padding machinery, hygiene half only.**  Step 4 split in two once
+  it was measured.
+
+  *Done:* the Pulse `zero_padding_step` no longer reads the header back.  It
+  was the only part with runtime cost -- a header read, a `getWosize` and a
+  never-true comparison in each of the seven inlined copies of `promote_one`
+  in the generated C.  The caller now supplies
+  `wosize_of_object dst == wosize` (from the tightened
+  `alloc_spec_obj_wosize_part1`, plus `copy_fields_preserves_other` at
+  `hd_address dst` to carry it across the copy) and the step collapses to
+  `zero_promote_padding_noop`.  `GC_Gen_Impl.c`: -70 lines, +14, the latter
+  being KaRaMeL dropping a now-unneeded `hdr_addr0` shadow rename.
+
+  *Not done, deliberately:* removing `zero_promote_padding` from
+  `promote_object`'s **definition**.  Measured cost is **178 references across
+  eleven files** -- 49 in `Promote.fst`, 32 in `PromoteUpdate.BlueProm.fst`,
+  30 in `Promote.fsti`, 26 in `CheneyPreservation.fst`, 13 each in
+  `CheneyPreservation.Forwarding.fst` and `Cheney.Dense.fst`, the rest
+  scattered.  Changing the definition moves every proof that unfolds it, for
+  no behavioural gain: the term is already the identity at every call site.
+  The same goes for `promote_object_extra_field_not_pointer` (3 refs, now
+  vacuous -- its `field_idx >= wz /\ field_idx < wosize` precondition is
+  unsatisfiable) and the `fwd_target_extra_fields_state` chain (35 refs, all
+  inside `CheneyPreservation.Fields.fst`).  Worth doing for hygiene; worth
+  doing with that number in hand.
 - **`sweep_object`'s wosize-0 mishandling** (see above) is still latent and
   still unreachable.
+
+### A verification-harness trap
+
+`tools/try-module.sh` takes arbitrary extra flags, and it is tempting to pass
+`--z3smtopt '(set-option :smt.qi.eager_threshold 100)'` everywhere because the
+allocator modules need it.  Do not.  `GC.Gen.Impl.Promote.fst` is **not** in
+the Makefile's `EAGER_QI_CHECKED` list, and passing the flag made it fail
+reproducibly on `FStar.UInt.size 251 64` -- trivially true, 200 lines away from
+any edit.  The flag itself caused it.  Check `EAGER_QI_CHECKED` (`Makefile:264`)
+before adding it, or the failure you chase will not be yours.

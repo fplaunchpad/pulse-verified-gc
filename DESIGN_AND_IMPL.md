@@ -489,7 +489,9 @@ the free-list link is stored in the first field of the free block:
 /// 1. Walk the free list starting from fp
 /// 2. For each blue (free) block, check if wosize >= requested
 /// 3. If leftover >= 2: split -- create remainder block
-/// 4. If leftover < 2: use entire block (no split)
+/// 4. If leftover == 1: allocate exactly wz; the spare word becomes an
+///    empty block (header only, wosize 0, blue, unlinked)
+/// 5. If leftover == 0: exact fit, use the whole block
 /// 5. Recolor allocated block's header to White, tag 0
 /// 6. Return (updated heap, new free pointer, allocated obj_addr)
 ```
@@ -542,7 +544,8 @@ The allocator proof establishes the facts one expects from a systems allocator:
 - the returned object is fresh with respect to the allocated-object view;
 - the free list remains valid and terminating;
 - split blocks are formed with valid headers and links;
-- exact-fit and leftover-one cases consume the whole block safely;
+- the exact fit consumes the whole block, and a one-word leftover is left
+  behind as an empty block rather than folded into the object;
 - the heap shape facts needed by marking, sweeping, and promotion are preserved.
 
 The initializer is also specified:
@@ -973,36 +976,54 @@ let promote_object (minor: minor_state) (major: heap) (obj: U64.t)
     { major_out = final_major; fp_out = new_fp; new_addr = new_addr }
 ```
 
-The padding step is a subtle OCaml allocator detail. If the major allocator
-returns a block one word larger than requested, that leftover word cannot form a
-standalone free block. The promoted object consumes the whole block, and the
-extra field is zeroed so the proof can show it is not a stale pointer.
+The padding step is vestigial. It dates from when the allocator could return a
+block one word larger than requested; it no longer can, so
+`zero_promote_padding` has nothing to zero and
+`promote_object_extra_field_not_pointer` is vacuous.
 
-Why can the allocator return a larger block? The major allocator is first-fit
-over blue free-list blocks. When it finds a free block with `block_wz >=
-requested_wz`, it computes `leftover = block_wz - requested_wz`. If `leftover >=
-2`, it can split: one word becomes the remainder's header and at least one word
-remains for the remainder's link field. If `leftover = 0`, the fit is exact. If
-`leftover = 1`, however, splitting would create a "free block" with only enough
-space for a header and no body word to hold the next free-list pointer. The
-allocator therefore consumes the whole block and writes the allocated header
-with `block_wz`, not `requested_wz`:
+The major allocator is first-fit over blue free-list blocks. When it finds a
+free block with `block_wz >= requested_wz` it computes
+`leftover = block_wz - requested_wz`. If `leftover >= 2` it splits: one word
+becomes the remainder's header and at least one remains for the remainder's
+link field. If `leftover = 0` the fit is exact. If `leftover = 1`, the spare
+word cannot become a linked free block -- there is room for a header but no
+body word to hold the next free-list pointer -- so it becomes a *header-only*
+block instead: wosize 0, blue, never linked. This is stock OCaml's
+`nf_allocate_block` case 1 (`runtime/freelist.c`), "the remaining word cannot
+be linked: turn it into an empty block (header only)".
 
 ```fstar
 if leftover >= 2 then
-  // split: allocated header uses requested_wz,
-  // remainder gets its own header and first-field free-list link
+  // split: allocated header uses requested_wz, remainder gets its own
+  // header and first-field free-list link
   ...
+else if leftover = 1 then
+  // allocated header uses requested_wz; the spare word becomes an empty
+  // block just above the object, which the next fused sweep absorbs
+  let g1 = write_word g hd (make_header (U64.uint_to_t requested_wz) white_bits 0UL) in
+  write_word g1 (hd + (1 + requested_wz) * 8) (make_header 0UL blue_bits 0UL)
 else
-  // exact fit or leftover = 1: use whole block
-  let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-  write_word g hd alloc_hdr
+  // exact fit: block_wz IS requested_wz
+  write_word g hd (make_header (U64.uint_to_t block_wz) white_bits 0UL)
 ```
 
-Promotion copies only the minor object's original `wosize` payload. If the
-allocator consumed a `requested_wz + 1` block, the promoted major object has one
-extra field. `zero_promote_padding` zeros exactly that padding field, preserving
-the no-scan and non-pointer-field invariants.
+So the allocated block declares **exactly** `requested_wz` in all three cases --
+`GC.Gen.AllocProps.alloc_from_block_wosize_lemma` states `wosize == wz`, not the
+old `wz <= wosize <= wz + 1`.
+
+The exactness is not an internal nicety. `Array.length` reads `Wosize_val`
+straight from the header (`runtime/array.c`), and its bounds check uses the same
+inflated value, so over-declaring defeats its own safety net. `Hashtbl` then
+indexes with `land (Array.length h.data - 1)`, valid only for power-of-two
+lengths; a `2^n` bucket array declared as `2^n + 1` yields index `2^n`, reading
+a word the object does not own. That was a reproducible SIGSEGV in the
+`ast-invariants` testsuite entry.
+
+The empty block is blue rather than stock's white because
+`alloc_spec_new_objects_blue_part1` states that every object allocation creates
+is blue, and three consumers rely on it. Stock needs white only because its
+sweeper dispatches on colour; `fused_aux` dispatches on `is_black` versus
+everything else and reclaims either identically.
 
 ### Cheney BFS
 

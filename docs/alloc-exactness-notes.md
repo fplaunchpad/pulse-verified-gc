@@ -699,3 +699,74 @@ Costs, honestly:
   removed.
 - It is what `0001-alloc-exact-wosize.patch` hand-applies to the extracted C today, so the
   post-change snapshot diff should collapse to the patch itself.
+
+---
+
+## Result
+
+`gmake -j$(nproc)` green, `gmake -C spot -j$(nproc)` green, 0 admits.  The
+extracted snapshot's diff against the pre-change one is exactly the new
+`leftover == 1` arm in `allocate` and `allocate_part1` (plus KaRaMeL's recorded
+invocation path).
+
+End-to-end, back-to-back on the same machine with the same test source and the
+same environment:
+
+```
+$ MIN_EXPANSION_WORDSIZE=8388608 ./test.opt <ocaml-tree-root>
+pre-fix  snapshot: exit 139  (SIGSEGV, core dumped)
+post-fix snapshot: exit 0    (no output)
+```
+
+The control was produced by `git checkout <snapshot-commit>~1 --
+generational/snapshot/`, rebuilding `libvergc_gen{,_native}.a` and
+`world.opt`, and rebuilding `test.opt` against the resulting toolchain -- so
+the only variable is the allocator arm.
+
+### Where the work actually went
+
+| module | outcome |
+|---|---|
+| `GC.Spec.Allocator.{fsti,fst}` | one new arm + two unfolding lemmas; 347s (baseline ~370s) |
+| `GC.Spec.Allocator.Lemmas.Part1` | five lemmas relaxed `>= 2` to `>= 1`; new `alloc_from_block_frag_in_objects_part1`; 27s |
+| `GC.Spec.Allocator.Lemmas.Core` | one gate relaxed; 6s |
+| `GC.Spec.Allocator.Lemmas.Part2` | nine recursive proofs; 421s -- the bulk of the effort |
+| `GC.Gen.AllocProps` | three lemmas gain a fragment arm; wosize tightened to `== wz`; 17s |
+| `GC.Gen.Cheney.Dense` | new `alloc_from_block_frag_dense`; 27s |
+| `GC.Gen.PromoteUpdate.BlueAlloc` | two vacuity arms + two `small_fp` swaps; 52s |
+| `GC.Impl.Allocator` | one new arm per `fn`, with a bounds sub-arm; 75s |
+
+### The three recurring adjustments
+
+Every module needed some subset of these.  Worth reaching for first next time:
+
+1. **Compare candidate objects by value, not by building an `obj_addr`.** At
+   `leftover = 1` the fragment's object address is `hd + (bwz + 1) * 8`, which
+   can be exactly `heap_size`.  `objects` handles that correctly -- it stops at
+   a header with no room for a field -- but `U64.uint_to_t rem_obj_nat <: obj_addr`
+   does not typecheck.  `if U64.v h = rem_obj_nat then ...` does.
+2. **Guard every `<> rem_obj_nat` separation assert with `leftover >= 2`.** At
+   `leftover = 1` that address IS the next block's header, so the claim is
+   false; and since the framing lemma's third exclusion is guarded the same
+   way, it is also unnecessary.
+3. **Pin `wosize_of_object obj g` to the header read before using
+   `objects_separated`'s bound.** The two forms differ by a nonlinear step
+   (`(1 + wz) * 8` versus `bwz * 8`) that Z3 4.15.3 stopped finding once the
+   new arm was in scope.  The same cause broke `alloc_from_block_split_normal`'s
+   `hp_addr` refinement, fixed by deriving the second address from the first's
+   type rather than from the raw nat.
+
+### Still open
+
+- **Patch 17 retirement** is a `native`-branch change: `generational/patches/`,
+  the `apply-snapshot-patches` / `verify-snapshot-patches` targets and the CI
+  step all live there, not on `main`.  This branch carries the fix; retiring
+  the patch is the follow-up on `native`.
+- **The dead padding machinery** (`zero_promote_padding` and its nine lemmas,
+  three private helpers, the Pulse `zero_padding_step`, and the
+  `fwd_target_extra_fields_state` chain with its five consumers) is now
+  vacuous: `promote_object_extra_field_not_pointer`'s
+  `field_idx >= wz /\ field_idx < wosize` precondition is unsatisfiable.  It
+  should come out in its own commit so a verification failure is localisable.
+- **`sweep_object`'s wosize-0 mishandling** (see above) is still latent and
+  still unreachable.

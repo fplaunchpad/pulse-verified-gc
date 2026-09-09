@@ -677,8 +677,10 @@ transferring, which needs
 
 for six recursive lemmas, twice each (prev = 0 and prev <> 0), in a 3,381-line file that
 costs ~300 s per iteration and has measured >90 min Z3 hangs. `fl_valid_transfer_excl`
-(added to `Lemmas.Chain`, verified, also on that branch) covers the `prev = 0` half; the
-`prev <> 0` half is the expensive one.
+(added to `Lemmas.Chain`, Chain.fst verified at 13.4s) covers the `prev = 0` half; the
+`prev <> 0` half is the expensive one.  That lemma and the partially-converted Part2 are
+committed on `alloc-exactness-rightjust` as `44089d9` -- they were briefly only in a git
+stash, which is not a place to leave verified work.
 
 The plan named this exit in advance:
 

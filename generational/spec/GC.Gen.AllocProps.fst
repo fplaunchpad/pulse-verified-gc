@@ -378,8 +378,10 @@ private let rec alloc_search_obj_wosize_part1
                U64.v r.obj_out < heap_size /\
                U64.v r.obj_out % U64.v mword == 0 /\
                (let obj_out : obj_addr = r.obj_out in
-                U64.v (wosize_of_object obj_out r.heap_out) >= wz /\
-                U64.v (wosize_of_object obj_out r.heap_out) <= wz + 1))))
+                // Exact, not a range: the allocated block declares precisely
+                // what was asked for.  Was `>= wz /\ <= wz + 1`; the upper
+                // slack was the one-word leftover being folded into the object.
+                U64.v (wosize_of_object obj_out r.heap_out) == wz))))
     (decreases fuel)
   =
   if fuel = 0 then ()
@@ -431,7 +433,7 @@ let alloc_spec_obj_wosize_part1 (g: heap) (fp: U64.t) (requested_wz: nat)
                     (U64.v r.obj_out >= U64.v mword /\
                      U64.v r.obj_out < heap_size /\
                      U64.v r.obj_out % U64.v mword == 0 /\
-                     U64.v (wosize_of_object (r.obj_out <: obj_addr) r.heap_out) >= 
+                     U64.v (wosize_of_object (r.obj_out <: obj_addr) r.heap_out) ==
                        (if requested_wz = 0 then 1 else requested_wz))))
   = let wz = if requested_wz = 0 then 1 else requested_wz in
     alloc_search_obj_wosize_part1 g fp 0UL fp wz heap_words

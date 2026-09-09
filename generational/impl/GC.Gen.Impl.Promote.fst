@@ -179,8 +179,21 @@ fn copy_fields_loop (minor: minor_heap_t) (major: heap_t)
 }
 #pop-options
 
-/// Zero the padding field if the allocator gave extra space (leftover=1 case).
-/// After this, the ghost state matches zero_promote_padding.
+/// `zero_promote_padding` is the identity, and this step proves it.
+///
+/// It used to read the promoted block's header back and, if the allocator had
+/// rounded it up by a word, zero the phantom field.  The allocator no longer
+/// rounds up -- `alloc_spec_obj_wosize_part1` now says the block declares
+/// EXACTLY the requested wosize -- so the caller can supply that equality and
+/// the whole step collapses to a ghost lemma.  Nothing is read and nothing is
+/// written, so it extracts to nothing: the header read, `getWosize` and
+/// comparison disappear from all seven inlined copies of `promote_one` in the
+/// generated C.
+///
+/// The spec's `zero_promote_padding` call inside `promote_object` is left
+/// alone deliberately.  Removing it would change `promote_object`'s definition
+/// and move ~180 proof sites across eleven modules for no behavioural gain,
+/// since the term is already the identity here.
 #push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
 inline_for_extraction
 fn zero_padding_step (major: heap_t) (dst_obj: U64.t) (wosize: U64.t)
@@ -191,27 +204,14 @@ fn zero_padding_step (major: heap_t) (dst_obj: U64.t) (wosize: U64.t)
                  U64.v wosize > 0 /\
                  SF.well_formed_heap_part1 'ms /\
                  Seq.mem ((dst_obj <: obj_addr)) (SF.objects zero_addr 'ms) /\
-                 U64.v dst_obj + U64.v wosize * 8 <= heap_size)
+                 U64.v dst_obj + U64.v wosize * 8 <= heap_size /\
+                 // The allocator is size-exact, so there is no padding.
+                 U64.v (SpecObj.wosize_of_object (dst_obj <: obj_addr) 'ms)
+                   == U64.v wosize)
   ensures exists* ms'. is_heap major ms' **
     pure (ms' == PromoteSpec.zero_promote_padding 'ms (dst_obj <: U64.t) (U64.v wosize))
 {
-  let hdr_addr = U64.sub dst_obj 8UL;
-  SpecHeap.hd_address_spec (dst_obj <: obj_addr);
-  let hdr = read_word major hdr_addr;
-  let actual_wz = SpecObj.getWosize hdr;
-  SpecObj.wosize_of_object_spec (dst_obj <: obj_addr) 'ms;
-  if U64.gt actual_wz wosize {
-    // actual_wz > wosize means pad_addr + 8 <= heap_size by wfh_part1 bounds
-    SF.wfh_part1_obj_bound 'ms (dst_obj <: obj_addr);
-    assert (pure (U64.v actual_wz > U64.v wosize));
-    assert (pure (U64.v dst_obj + U64.v actual_wz * 8 <= heap_size));
-    assert (pure (U64.v dst_obj + U64.v wosize * 8 + 8 <= heap_size));
-    let pad_addr = U64.add dst_obj (U64.mul wosize 8UL);
-    write_word major pad_addr 0UL;
-    PromoteSpec.zero_promote_padding_write 'ms (dst_obj <: obj_addr) (U64.v wosize)
-  } else {
-    PromoteSpec.zero_promote_padding_noop 'ms (dst_obj <: obj_addr) (U64.v wosize)
-  }
+  PromoteSpec.zero_promote_padding_noop 'ms (dst_obj <: obj_addr) (U64.v wosize)
 }
 #pop-options
 
@@ -303,7 +303,20 @@ fn promote_one (minor: minor_heap_t) (major: heap_t) (fp_ref: R.ref U64.t)
       WBL.copy_fields_preserves_objects_aux {data='md; bump='mb}
         (GC.Spec.Allocator.alloc_spec 'ms fp (U64.v wosize)).heap_out
         obj (new_obj <: obj_addr) 0 (U64.v wosize);
-      // --- Zero padding field if allocator gave extra space (leftover=1 case) ---
+      // --- The allocator is size-exact, so there is no padding to zero ---
+      // wosize_of_object new_obj is `wosize` right after allocation, and
+      // copy_fields writes only body slots at new_obj + k * 8 for k < wosize,
+      // all of which are strictly above the header at new_obj - 8.
+      SpecHeap.hd_address_spec (new_obj <: obj_addr);
+      assert (pure (U64.v (SpecHeap.hd_address (new_obj <: obj_addr)) + 8
+                      == U64.v new_obj));
+      WBL.copy_fields_preserves_other {data='md; bump='mb}
+        (GC.Spec.Allocator.alloc_spec 'ms fp (U64.v wosize)).heap_out
+        obj (new_obj <: obj_addr) 0 (U64.v wosize)
+        (SpecHeap.hd_address (new_obj <: obj_addr));
+      SpecObj.wosize_of_object_spec (new_obj <: obj_addr)
+        (GC.Spec.Allocator.alloc_spec 'ms fp (U64.v wosize)).heap_out;
+      SpecObj.wosize_of_object_spec (new_obj <: obj_addr) ms_c;
       zero_padding_step major new_obj wosize;
       with ms_p. _;
       // --- Retag: copy the tag from minor header to the promoted major header ---

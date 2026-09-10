@@ -1127,38 +1127,53 @@ private let rec alloc_search_read_header_other
         let ahn = U64.v hd + leftover * 8 in
         if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
         else begin
-        AllocLemmas.chain_avoids_head_ne g cur_fp excl fuel;
-        alloc_from_block_read_header_other g obj wz next_fp excl;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
-        // Handle prev_fp write
-        if prev_fp = 0UL then ()
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-                U64.v prev_fp % U64.v mword = 0 then begin
-          // prev_fp ∈ objects, excl ∈ objects. Write at prev_fp, read at hd(excl).
+          AllocLemmas.chain_avoids_head_ne g cur_fp excl fuel;
+          // Reordered: prev's link is rewritten on `g` first, and the block
+          // writes run on the result, so the frame is taken in two steps.
+          let new_fp = alloc_replacement_fp g obj wz next_fp in
+          alloc_replacement_fp_eq g obj wz next_fp;
+          let base =
+            if prev_fp = 0UL then g
+            else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                    U64.v prev_fp % U64.v mword = 0 && U64.v prev_fp <> U64.v hd
+            then write_word g (prev_fp <: hp_addr) new_fp
+            else g
+          in
           hd_address_spec excl;
-          // prev_fp is the obj_addr, hd_excl = excl - 8
-          // If prev_fp = excl: write at excl, read at excl-8. read_write_different: excl-8+8 = excl ≤ excl ✓
-          // If prev_fp ≠ excl: objects_separated gives separation
-          if (prev_fp <: U64.t) = (excl <: U64.t) then begin
-            // Write at prev_fp = excl, read at excl - 8
-            assert (U64.v (hd_address excl) + 8 <= U64.v prev_fp);
-            read_write_different g' (prev_fp <: hp_addr) (hd_address excl) new_fp
-          end else begin
-            wosize_of_object_spec excl g;
-            wosize_of_object_spec (prev_fp <: obj_addr) g;
-            if U64.v prev_fp < U64.v excl then begin
-              objects_separated zero_addr g (prev_fp <: obj_addr) excl;
-              // prev_fp + wz(prev_fp)*8 < excl. wz >= 1 so prev_fp + 8 < excl.
-              // 8-aligned: excl >= prev_fp + 16, so hd_excl = excl - 8 >= prev_fp + 8
-              assert (U64.v prev_fp + 8 <= U64.v (hd_address excl));
-              read_write_different g' (prev_fp <: hp_addr) (hd_address excl) new_fp
-            end else begin
-              // prev_fp > excl, so hd_address excl + 8 = excl < prev_fp
-              assert (U64.v (hd_address excl) + 8 <= U64.v prev_fp);
-              read_write_different g' (prev_fp <: hp_addr) (hd_address excl) new_fp
-            end
-          end
-        end else ()
+          wosize_of_object_spec obj g;
+          (if prev_fp = 0UL then ()
+           else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                   U64.v prev_fp % U64.v mword = 0 && U64.v prev_fp <> U64.v hd then begin
+             let prev_obj : obj_addr = prev_fp in
+             hd_address_spec prev_obj;
+             hd_address_bounds prev_obj;
+             wosize_of_object_spec prev_obj g;
+             wosize_of_object_bound prev_obj g;
+             AllocLemmas.write_body_preserves_wfh_part1
+               g prev_obj (prev_obj <: hp_addr) new_fp;
+             AllocLemmas.write_body_preserves_objects_local
+               zero_addr g prev_obj (prev_obj <: hp_addr) new_fp;
+             // 1. the link write misses excl's header
+             (if (prev_fp <: U64.t) = (excl <: U64.t) then
+                assert (U64.v (hd_address excl) + 8 <= U64.v prev_fp)
+              else begin
+                wosize_of_object_spec excl g;
+                if U64.v prev_fp < U64.v excl then begin
+                  objects_separated zero_addr g prev_obj excl;
+                  assert (U64.v prev_fp + 8 <= U64.v (hd_address excl))
+                end else
+                  assert (U64.v (hd_address excl) + 8 <= U64.v prev_fp)
+              end);
+             read_write_different g (prev_obj <: hp_addr) (hd_address excl) new_fp;
+             // 2. and it leaves obj's own header alone -- `prev <> hd` here is
+             //    a path condition, which is exactly why `alloc_search` guards
+             //    on it rather than trusting the free list to be well formed
+             read_write_different g (prev_obj <: hp_addr) hd new_fp
+           end else ());
+          assert (read_word base (hd_address excl) == read_word g (hd_address excl));
+          assert (read_word base hd == hdr);
+          assert (Seq.mem (excl <: U64.t) (objects zero_addr base));
+          alloc_from_block_read_header_other base obj wz next_fp excl
         end
       end else begin
         // Block too small, continue

@@ -500,6 +500,53 @@ let rec write_body_preserves_objects_local
 #pop-options
 
 /// ---------------------------------------------------------------------------
+/// P1e3: write within object body preserves wfh_part1
+/// ---------------------------------------------------------------------------
+
+#restart-solver
+#push-options "--z3rlimit 12 --fuel 0 --ifuel 0"
+let write_body_preserves_wfh_part1
+  (g: heap) (obj: obj_addr) (addr: hp_addr) (v: U64.t)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    Seq.mem obj (objects zero_addr g) /\
+                    U64.v addr >= U64.v obj /\
+                    U64.v addr < U64.v obj + (U64.v (wosize_of_object obj g) * 8) /\
+                    U64.v addr % 8 = 0)
+          (ensures well_formed_heap_part1 (write_word g addr v))
+  = // write_body doesn't change headers (addr >= obj > hd_address(obj))
+    // so objects walk is unchanged, and all bounds remain valid
+    write_body_preserves_objects_local zero_addr g obj addr v;
+    let g' = write_word g addr v in
+    assert (objects zero_addr g' == objects zero_addr g);
+    let aux (h: obj_addr) : Lemma
+      (requires Seq.mem h (objects zero_addr g'))
+      (ensures (let w = wosize_of_object h g' in
+                U64.v (hd_address h) + 8 + U64.v w * 8 <= Seq.length g'))
+    = hd_address_spec h;
+      hd_address_spec obj;
+      wosize_of_object_spec h g;
+      wosize_of_object_spec h g';
+      // addr >= obj = hd_address(obj) + 8, so addr > hd_address(obj)
+      // For any h: hd_address(h) ≠ addr because:
+      //   if h = obj: hd_address(obj) < obj <= addr
+      //   if h ≠ obj: by objects_separated, hd_address(h) is either < hd_address(obj) or > obj + wosize*8 - 8 > addr
+      if h = obj then
+        // hd_address(obj) < obj <= addr
+        read_write_different g addr (hd_address h) v
+      else begin
+        if U64.v h < U64.v obj then begin
+          objects_separated zero_addr g h obj;
+          read_write_different g addr (hd_address h) v
+        end else begin
+          objects_separated zero_addr g obj h;
+          read_write_different g addr (hd_address h) v
+        end
+      end
+    in
+    FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+#pop-options
+
+/// ---------------------------------------------------------------------------
 /// alloc_from_block_preserves_objects_part1
 /// ---------------------------------------------------------------------------
 

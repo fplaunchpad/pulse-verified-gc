@@ -108,6 +108,18 @@ val write_body_preserves_objects_local :
     (ensures objects start (write_word g addr v) == objects start g)
     (decreases (Seq.length g - U64.v start))
 
+/// Writing within an object body preserves well_formed_heap_part1: the write
+/// lands strictly above `hd_address obj`, so no header moves and the objects
+/// enumeration -- hence every size bound -- is unchanged.
+val write_body_preserves_wfh_part1 :
+  (g: heap) -> (obj: obj_addr) -> (addr: hp_addr) -> (v: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  U64.v addr >= U64.v obj /\
+                  U64.v addr < U64.v obj + (U64.v (wosize_of_object obj g) * 8) /\
+                  U64.v addr % 8 = 0)
+        (ensures well_formed_heap_part1 (write_word g addr v))
+
 /// **Theorem**: alloc_from_block preserves object membership under just
 /// well_formed_heap_part1. (Public wrapper for internal part1 proof.)
 val alloc_from_block_preserves_objects_part1 :

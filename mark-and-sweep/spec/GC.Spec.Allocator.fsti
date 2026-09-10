@@ -140,6 +140,37 @@ let alloc_from_block (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64
         let g1 = write_word g hd alloc_hdr in
         (g1, next_fp)
 
+/// The value that replaces `obj` in the free list, as a TRANSPARENT function.
+///
+/// This mirrors `snd (alloc_from_block ...)` exactly, but without the
+/// `opaque_to_smt` attribute, so Z3 can evaluate it directly.  That matters
+/// because `alloc_search` needs the replacement pointer in order to build the
+/// heap it then passes BACK to `alloc_from_block`:
+///
+///     let gw = write_word g prev (alloc_replacement_fp g obj wz next_fp) in
+///     let g2 = fst (alloc_from_block gw obj wz next_fp) in
+///
+/// Written with `snd (alloc_from_block g ...)` instead, that definition
+/// contains two applications of an opaque function, one nested in the other's
+/// argument, and every downstream query has to carry and relate both.  Using
+/// the transparent mirror leaves exactly one.
+let alloc_replacement_fp (g: heap) (obj: obj_addr) (requested_wz: nat) (next_fp: U64.t)
+  : GTot U64.t
+  = let hd = hd_address obj in
+    let block_wz = U64.v (getWosize (read_word g hd)) in
+    let leftover = block_wz - requested_wz in
+    if leftover < 2 then next_fp
+    else
+      let alloc_hd_nat = U64.v hd + leftover * 8 in
+      if alloc_hd_nat >= heap_size || alloc_hd_nat >= pow2 64 ||
+         alloc_hd_nat % 8 <> 0 then next_fp
+      else (obj <: U64.t)
+
+/// The mirror is faithful.
+val alloc_replacement_fp_eq (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
+  : Lemma (snd (alloc_from_block g obj wz next_fp) ==
+           alloc_replacement_fp g obj wz next_fp)
+
 /// ---------------------------------------------------------------------------
 /// Free-List Search (first-fit)
 /// ---------------------------------------------------------------------------
@@ -184,7 +215,7 @@ let rec alloc_search (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
         let alloc_obj = U64.add cur_fp (U64.uint_to_t (leftover * 8)) in
         // The replacement for `obj` in the free list is a pure projection, so
         // it can be read off WITHOUT applying the block writes.
-        let new_remainder_fp = snd (alloc_from_block g obj requested_wz next_fp) in
+        let new_remainder_fp = alloc_replacement_fp g obj requested_wz next_fp in
         // Order matters, and not for the heap -- the two writes are disjoint,
         // so the final state is the same either way.  It matters for the
         // PROOF.  Rewiring `prev` first means the link write happens while
@@ -296,7 +327,9 @@ val alloc_search_found_head (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                      U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
           (ensures (let obj : obj_addr = cur in
                     let next = spec_next_fp g obj in
-                    let (g', new_fp) = alloc_from_block g obj wz next in
+                    let g' = fst (alloc_from_block g obj wz next) in
+                    // stated via the transparent mirror, matching the definition
+                    let new_fp = alloc_replacement_fp g obj wz next in
                     let leftover = U64.v (getWosize (read_word g (hd_address obj))) - wz in
                     let alloc_obj = U64.add cur (U64.uint_to_t (leftover * 8)) in
                     alloc_search g head prev cur wz fuel ==
@@ -320,7 +353,7 @@ val alloc_search_found_prev (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                     let next = spec_next_fp g obj in
                     // The prev-link rewrite comes FIRST, on `g`, where `obj` is
                     // still a well-formed cell.  See the note in alloc_search.
-                    let new_fp = snd (alloc_from_block g obj wz next) in
+                    let new_fp = alloc_replacement_fp g obj wz next in
                     let gw = write_word g (prev <: hp_addr) new_fp in
                     let g2 = fst (alloc_from_block gw obj wz next) in
                     let leftover = U64.v (getWosize (read_word g (hd_address obj))) - wz in

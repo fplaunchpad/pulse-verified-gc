@@ -44,6 +44,10 @@ module ImplObject = GC.Spec.Object
 /// Step lemmas for alloc_search (for loop correspondence proofs)
 /// ---------------------------------------------------------------------------
 
+let alloc_replacement_fp_eq (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t)
+  = hd_address_spec obj; hd_address_bounds obj;
+    reveal_opaque (`%alloc_from_block) alloc_from_block
+
 /// When fuel = 0: OOM
 let alloc_search_fuel_0 (g: heap) (head prev cur: U64.t) (wz: nat)
   = ()

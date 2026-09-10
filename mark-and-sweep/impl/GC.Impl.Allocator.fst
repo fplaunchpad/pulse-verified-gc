@@ -160,11 +160,21 @@ fn init_heap (heap: heap_t)
   }
 }
 
+/// Two distinct word-aligned addresses are a full word apart, so writing at
+/// one leaves the other's word intact.  Used to show that repairing the
+/// predecessor's link does not disturb the block header the allocation then
+/// reads back.
+let prev_write_keeps_header (g: SpecBase.heap) (p: SpecBase.hp_addr)
+                            (hd: SpecBase.hp_addr) (v: U64.t)
+  : Lemma (requires U64.v p <> U64.v hd)
+          (ensures SH.read_word (SH.write_word g p v) hd == SH.read_word g hd)
+  = SH.read_write_different g p hd v
+
 /// ---------------------------------------------------------------------------
 /// Main allocation function (fully proved — 0 admits)
 /// ---------------------------------------------------------------------------
 
-#push-options "--z3rlimit 25"
+#push-options "--z3rlimit 60"
 fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
   requires is_heap heap 's **
            pure (SF.well_formed_heap 's /\
@@ -281,22 +291,41 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               // header right-justified above it.  They differ only in what
               // replaces `obj` in the free list.
               SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
-
-              let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
-              write_word heap hd_addr rem_hdr;
-              let alloc_hdr = makeHeader wz white 0UL;
-              write_word heap alloc_hd_off alloc_hdr;
-
               let new_fp = (if U64.gte leftover 2UL then vcur else next);
 
-              if U64.eq vp 0UL {
+              // `vp = hd_addr` means the predecessor has wosize 0, which a
+              // free list never contains; `alloc_search` treats it exactly
+              // like an absent or invalid predecessor, so the two cases share
+              // this branch.  The header writes are duplicated into each side
+              // rather than hoisted -- Pulse cannot frame a `let` across the
+              // `if` here -- and on the predecessor side they come SECOND,
+              // matching the order `alloc_search` fixes.
+              let vp_unusable = (if U64.eq vp 0UL then true else U64.eq vp hd_addr);
+              if vp_unusable {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
+                let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+                write_word heap hd_addr rem_hdr;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap alloc_hd_off alloc_hdr;
                 head_fp := new_fp;
                 result_obj := alloc_obj;
                 go := false
               } else {
+                // re-state what `is_valid_fp` established; the branch above
+                // pushed it far enough back that the coercion below stalls
+                assert (pure (U64.v vcur >= U64.v mword));
+                assert (pure (U64.v vcur < heap_size));
+                assert (pure (U64.v vcur % U64.v mword == 0));
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) new_fp;
+                prev_write_keeps_header 's (vp <: hp_addr) hd_addr new_fp;
+                SA.alloc_from_block_split_normal
+                  (SH.write_word 's (vp <: hp_addr) new_fp) (vcur <: obj_addr) (U64.v wz) next;
+                let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+                write_word heap hd_addr rem_hdr;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap alloc_hd_off alloc_hdr;
                 result_obj := alloc_obj;
                 go := false
               }
@@ -304,18 +333,41 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               // === EXACT FIT === leftover = 0, so alloc_hd_off = hd_addr and
               // alloc_obj = vcur; the block is detached from the free list.
               SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
-
-              let alloc_hdr = makeHeader wz white 0UL;
-              write_word heap hd_addr alloc_hdr;
-
-              if U64.eq vp 0UL {
+              // Same split of cases, and the same ordering, as above.
+              let vp_unusable = (if U64.eq vp 0UL then true else U64.eq vp hd_addr);
+              if vp_unusable {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
                 head_fp := next;
                 result_obj := alloc_obj;
                 go := false
               } else {
+                // re-state what `is_valid_fp` established; the branch above
+                // pushed it far enough back that the coercion below stalls
+                assert (pure (U64.v vcur >= U64.v mword));
+                assert (pure (U64.v vcur < heap_size));
+                assert (pure (U64.v vcur % U64.v mword == 0));
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) next;
+                prev_write_keeps_header 's (vp <: hp_addr) hd_addr next;
+                // the link write left the block header where it was, so the
+                // exact-fit unfolding applies to the relinked heap too
+                assert (pure (SH.read_word (SH.write_word 's (vp <: hp_addr) next)
+                                           (SH.hd_address (vcur <: obj_addr))
+                              == SH.read_word 's (SH.hd_address (vcur <: obj_addr))));
+                hd_address_eq vcur;
+                getWosize_eq hdr;
+                assert (pure (SH.hd_address (vcur <: obj_addr) == hd_addr));
+                assert (pure (SH.read_word 's hd_addr == hdr));
+                assert (pure (U64.v leftover == 0));
+                assert (pure (U64.v block_wz == U64.v wz));
+                assert (pure (U64.v (SO.getWosize hdr) == U64.v wz));
+                SA.alloc_from_block_exact
+                  (SH.write_word 's (vp <: hp_addr) next) (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
                 result_obj := alloc_obj;
                 go := false
               }
@@ -352,7 +404,7 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
 /// and free-list link pointers — it never inspects object pointer fields,
 /// so well_formed_heap_part2 (pointer closure) is not needed.
 
-#push-options "--z3rlimit 25"
+#push-options "--z3rlimit 60"
 fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
   requires is_heap heap 's **
            pure (SF.well_formed_heap_part1 's /\
@@ -464,22 +516,41 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               // header right-justified above it.  They differ only in what
               // replaces `obj` in the free list.
               SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
-
-              let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
-              write_word heap hd_addr rem_hdr;
-              let alloc_hdr = makeHeader wz white 0UL;
-              write_word heap alloc_hd_off alloc_hdr;
-
               let new_fp = (if U64.gte leftover 2UL then vcur else next);
 
-              if U64.eq vp 0UL {
+              // `vp = hd_addr` means the predecessor has wosize 0, which a
+              // free list never contains; `alloc_search` treats it exactly
+              // like an absent or invalid predecessor, so the two cases share
+              // this branch.  The header writes are duplicated into each side
+              // rather than hoisted -- Pulse cannot frame a `let` across the
+              // `if` here -- and on the predecessor side they come SECOND,
+              // matching the order `alloc_search` fixes.
+              let vp_unusable = (if U64.eq vp 0UL then true else U64.eq vp hd_addr);
+              if vp_unusable {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                SA.alloc_from_block_split_normal 's (vcur <: obj_addr) (U64.v wz) next;
+                let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+                write_word heap hd_addr rem_hdr;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap alloc_hd_off alloc_hdr;
                 head_fp := new_fp;
                 result_obj := alloc_obj;
                 go := false
               } else {
+                // re-state what `is_valid_fp` established; the branch above
+                // pushed it far enough back that the coercion below stalls
+                assert (pure (U64.v vcur >= U64.v mword));
+                assert (pure (U64.v vcur < heap_size));
+                assert (pure (U64.v vcur % U64.v mword == 0));
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) new_fp;
+                prev_write_keeps_header 's (vp <: hp_addr) hd_addr new_fp;
+                SA.alloc_from_block_split_normal
+                  (SH.write_word 's (vp <: hp_addr) new_fp) (vcur <: obj_addr) (U64.v wz) next;
+                let rem_hdr = makeHeader (U64.sub leftover 1UL) blue 0UL;
+                write_word heap hd_addr rem_hdr;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap alloc_hd_off alloc_hdr;
                 result_obj := alloc_obj;
                 go := false
               }
@@ -487,18 +558,41 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
               // === EXACT FIT === leftover = 0, so alloc_hd_off = hd_addr and
               // alloc_obj = vcur; the block is detached from the free list.
               SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
-
-              let alloc_hdr = makeHeader wz white 0UL;
-              write_word heap hd_addr alloc_hdr;
-
-              if U64.eq vp 0UL {
+              // Same split of cases, and the same ordering, as above.
+              let vp_unusable = (if U64.eq vp 0UL then true else U64.eq vp hd_addr);
+              if vp_unusable {
                 SA.alloc_search_found_head 's vh vp vcur (U64.v wz) (U64.v vfuel);
+                SA.alloc_from_block_exact 's (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
                 head_fp := next;
                 result_obj := alloc_obj;
                 go := false
               } else {
+                // re-state what `is_valid_fp` established; the branch above
+                // pushed it far enough back that the coercion below stalls
+                assert (pure (U64.v vcur >= U64.v mword));
+                assert (pure (U64.v vcur < heap_size));
+                assert (pure (U64.v vcur % U64.v mword == 0));
                 SA.alloc_search_found_prev 's vh vp vcur (U64.v wz) (U64.v vfuel);
                 write_word heap (vp <: hp_addr) next;
+                prev_write_keeps_header 's (vp <: hp_addr) hd_addr next;
+                // the link write left the block header where it was, so the
+                // exact-fit unfolding applies to the relinked heap too
+                assert (pure (SH.read_word (SH.write_word 's (vp <: hp_addr) next)
+                                           (SH.hd_address (vcur <: obj_addr))
+                              == SH.read_word 's (SH.hd_address (vcur <: obj_addr))));
+                hd_address_eq vcur;
+                getWosize_eq hdr;
+                assert (pure (SH.hd_address (vcur <: obj_addr) == hd_addr));
+                assert (pure (SH.read_word 's hd_addr == hdr));
+                assert (pure (U64.v leftover == 0));
+                assert (pure (U64.v block_wz == U64.v wz));
+                assert (pure (U64.v (SO.getWosize hdr) == U64.v wz));
+                SA.alloc_from_block_exact
+                  (SH.write_word 's (vp <: hp_addr) next) (vcur <: obj_addr) (U64.v wz) next;
+                let alloc_hdr = makeHeader wz white 0UL;
+                write_word heap hd_addr alloc_hdr;
                 result_obj := alloc_obj;
                 go := false
               }

@@ -314,3 +314,13 @@ val walk_chain_valid_preserved (g g2: heap) (fp excl: U64.t) (d fuel: nat)
                  U64.v (hd_address (a <: obj_addr)) + 16 <= heap_size ==>
                    read_word g2 (a <: obj_addr) == read_word g (a <: obj_addr))))
     (ensures walk_chain_valid g2 fp d /\ walk_chain g2 fp d = walk_chain g fp d)
+
+/// An address that is not an object at all cannot be on the chain: every cell
+/// the walk visits is a member of `objects` (that is what `fl_valid` records
+/// of each hop), so an interior address -- the right-justified allocated block
+/// before it acquires its own header, say -- is avoided for free.
+val chain_avoids_non_object (g: heap) (fp: U64.t) (excl: obj_addr) (fuel: nat)
+  : Lemma (requires GC.Spec.Allocator.Lemmas.Common.fl_valid g fp fuel /\
+                    ~(Seq.mem (excl <: U64.t) (objects zero_addr g)))
+          (ensures chain_avoids g fp (excl <: U64.t) fuel = true)
+          (decreases fuel)

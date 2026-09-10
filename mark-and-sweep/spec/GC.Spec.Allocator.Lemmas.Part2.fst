@@ -91,6 +91,23 @@ private let rem_hd_ne (g: heap) (obj other: obj_addr) (rem_hd: U64.t) (hd: hp_ad
 /// The header of the object one word above `h` is `h` itself.  Phrased over the
 /// raw nat so that the `UInt.size` side condition of `U64.uint_to_t` is discharged
 /// here rather than inside the free-list proofs.
+/// The right-justified allocated address is INTERIOR to the free block, so it
+/// is not an object of the pre-allocation heap: `objects_separated` says the
+/// next object starts strictly past `obj + block_wz * 8`, and `wz >= 1` keeps
+/// the allocated address a word below that.
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+private let alloc_obj_interior (g: heap) (obj a: obj_addr) (block_wz: nat)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    Seq.mem (obj <: U64.t) (objects zero_addr g) /\
+                    U64.v (getWosize (read_word g (hd_address obj))) == block_wz /\
+                    U64.v a > U64.v obj /\
+                    U64.v a <= U64.v obj + (block_wz - 1) * 8)
+          (ensures ~(Seq.mem (a <: U64.t) (objects zero_addr g)))
+  = hd_address_spec obj;
+    wosize_of_object_spec obj g;
+    objects_separated zero_addr g obj a
+#pop-options
+
 #push-options "--fuel 0 --ifuel 0 --z3rlimit 10"
 private let hd_address_of_succ (h o: hp_addr)
   : Lemma (requires U64.v o == U64.v h + U64.v mword /\ U64.v o >= U64.v mword)
@@ -497,48 +514,6 @@ let alloc_from_block_preserves_wfh_part1
 /// P2d: write within object body preserves wfh_part1
 /// ---------------------------------------------------------------------------
 
-#restart-solver
-#push-options "--z3rlimit 12 --fuel 0 --ifuel 0"
-private let write_body_preserves_wfh_part1
-  (g: heap) (obj: obj_addr) (addr: hp_addr) (v: U64.t)
-  : Lemma (requires well_formed_heap_part1 g /\
-                    Seq.mem obj (objects zero_addr g) /\
-                    U64.v addr >= U64.v obj /\
-                    U64.v addr < U64.v obj + (U64.v (wosize_of_object obj g) * 8) /\
-                    U64.v addr % 8 = 0)
-          (ensures well_formed_heap_part1 (write_word g addr v))
-  = // write_body doesn't change headers (addr >= obj > hd_address(obj))
-    // so objects walk is unchanged, and all bounds remain valid
-    write_body_preserves_objects_local zero_addr g obj addr v;
-    let g' = write_word g addr v in
-    assert (objects zero_addr g' == objects zero_addr g);
-    let aux (h: obj_addr) : Lemma
-      (requires Seq.mem h (objects zero_addr g'))
-      (ensures (let w = wosize_of_object h g' in
-                U64.v (hd_address h) + 8 + U64.v w * 8 <= Seq.length g'))
-    = hd_address_spec h;
-      hd_address_spec obj;
-      wosize_of_object_spec h g;
-      wosize_of_object_spec h g';
-      // addr >= obj = hd_address(obj) + 8, so addr > hd_address(obj)
-      // For any h: hd_address(h) ≠ addr because:
-      //   if h = obj: hd_address(obj) < obj <= addr
-      //   if h ≠ obj: by objects_separated, hd_address(h) is either < hd_address(obj) or > obj + wosize*8 - 8 > addr
-      if h = obj then
-        // hd_address(obj) < obj <= addr
-        read_write_different g addr (hd_address h) v
-      else begin
-        if U64.v h < U64.v obj then begin
-          objects_separated zero_addr g h obj;
-          read_write_different g addr (hd_address h) v
-        end else begin
-          objects_separated zero_addr g obj h;
-          read_write_different g addr (hd_address h) v
-        end
-      end
-    in
-    FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
-#pop-options
 
 /// ---------------------------------------------------------------------------
 /// P2e: alloc_search_preserves_wfh_part1 — recursive proof
@@ -583,7 +558,7 @@ private let rec alloc_search_preserves_wfh_part1
       in
       if block_wz >= wz then begin
         alloc_from_block_preserves_wfh_part1 g obj wz next_fp;
-        let new_fp = snd (alloc_from_block g obj wz next_fp) in
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
         if prev_fp = 0UL then ()
         else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
                 U64.v prev_fp % U64.v mword = 0 then begin
@@ -1115,7 +1090,11 @@ private let rec alloc_search_preserves_fl_valid_part1
          else fl_valid_elim g next_fp (fuel - 1));
         assert (is_pointer_field next_fp ==> Seq.mem next_fp (objects zero_addr g));
         alloc_from_block_preserves_wfh_part1 g obj wz next_fp;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
+        let g' = fst (alloc_from_block g obj wz next_fp) in
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
         // Upgrade fl_valid g next_fp (fuel-1) to fl_valid g next_fp big_fuel
         fl_valid_any_fuel g next_fp (fuel - 1) big_fuel;
         assert (fl_valid g next_fp big_fuel);
@@ -1449,18 +1428,25 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
          else fl_valid_elim g next_fp (fuel - 1));
         assert (is_pointer_field next_fp ==> Seq.mem next_fp (objects zero_addr g));
         alloc_from_block_preserves_wfh_part1 g obj wz next_fp;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
+        let g' = fst (alloc_from_block g obj wz next_fp) in
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
         // Upgrade fl_valid/terminates g next_fp (fuel-1) to big_fuel
         fl_valid_any_fuel g next_fp (fuel - 1) big_fuel;
         assert (fl_valid g next_fp big_fuel);
         fl_chain_terminates_weaken g next_fp (fuel - 1) big_fuel;
         assert (fl_chain_terminates g next_fp big_fuel);
         if prev_fp = 0UL then begin
-          // ===== prev_fp = 0UL: fp_out = new_fp =====
+          // ===== prev_fp = 0UL: fp_out = new_fp, heap_out = g' =====
           if block_wz - wz >= 2 then begin
-            // ===== Split case: new_fp = rem_obj =====
+            // ===== Split: right-justified, so new_fp = obj = cur_fp =====
+            // The remainder keeps `hd` and keeps the link word at hd + 8, so
+            // the chain out of new_fp is the old chain out of cur_fp.
             alloc_split_facts_part1 g obj wz next_fp;
             alloc_from_block_objects_facts_part1 g obj wz next_fp;
+            assert (new_fp == cur_fp);
             let transfer_aux (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -1475,77 +1461,26 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
             fl_chain_terminates_weaken g next_fp (fuel - 1) (big_fuel - 1);
             fl_valid_any_fuel g next_fp (fuel - 1) (big_fuel - 1);
             fl_chain_terminates_transfer g g' next_fp (big_fuel - 1);
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            alloc_from_block_split_normal g obj wz next_fp;
-            let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-            let g1 = write_word g hd alloc_hdr in
-            let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-            let rem_wz = block_wz - wz - 1 in
-            let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-            let g2 = write_word g1 rem_hd rem_hdr in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            let g3 = write_word g2 rem_obj next_fp in
-            assert (g' == g3);
-            assert (new_fp == rem_obj);
-            read_write_same g2 rem_obj next_fp;
+            // the link word at obj is one of the two words NOT written
+            alloc_split_g3_agrees_part1 g obj wz next_fp (obj <: hp_addr);
             assert (read_word g' new_fp == next_fp);
-            assert (U64.v new_fp >= U64.v mword);
-            assert (U64.v new_fp < heap_size);
-            assert (U64.v new_fp % U64.v mword == 0);
-            hd_address_of_succ rem_hd (new_fp <: hp_addr);
-            assert (hd_address (new_fp <: obj_addr) == rem_hd);
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
             fl_chain_terminates_step g' new_fp big_fuel
-          end else begin
-            // ===== Exact-fit case: new_fp = next_fp =====
-            alloc_exact_preserves_wfh_part1 g obj wz next_fp;
-            alloc_from_block_exact g obj wz next_fp;
-            let transfer_aux_e (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            fl_chain_terminates_transfer g g' next_fp big_fuel;
-            fl_chain_terminates_weaken g' next_fp big_fuel big_fuel;
-            ()
-          end
-        end
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-                U64.v prev_fp % U64.v mword = 0 then begin
-          // ===== prev_fp != 0UL: fp_out = head_fp, heap_out = write_word g' prev_fp new_fp =====
-          let prev_obj : obj_addr = prev_fp in
-          let g2 = write_word g' (prev_obj <: hp_addr) new_fp in
-          //
-          // Strategy: Use fl_chain_terminates_unfold_steps to decompose the chain.
-          // Let d = big_fuel - fuel - 1 (depth of prev_fp from head_fp).
-          // 1. Show walk_chain_valid g2 head_fp d and walk_chain g2 head_fp d = prev_fp
-          // 2. Apply fl_chain_terminates_unfold_steps g2 head_fp d big_fuel:
-          //    fl_chain_terminates g2 head_fp big_fuel = fl_chain_terminates g2 prev_fp (fuel+1)
-          // 3. prev_fp valid, read_word g2 prev_fp = new_fp:
-          //    fl_chain_terminates g2 prev_fp (fuel+1) = fl_chain_terminates g2 new_fp fuel
-          // 4. Establish fl_chain_terminates g2 new_fp fuel
-          //
-          let d = big_fuel - fuel - 1 in
-          if block_wz - wz >= 2 then begin
-            // ----- Split sub-case -----
+          end else if block_wz - wz = 1 then begin
+            // ===== One-word leftover: the whole block leaves the list =====
+            // `obj` becomes the wosize-0 empty block, so it is the one object
+            // the transfer cannot cover; the suffix never visits it.
             alloc_split_facts_part1 g obj wz next_fp;
             alloc_from_block_objects_facts_part1 g obj wz next_fp;
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            let rem_wz = block_wz - wz - 1 in
-            // Establish quantifier: for a in objects(g), read g' a = read g a
-            let transfer_aux_s (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
+            assert (new_fp == next_fp);
+            fl_chain_predecessor_not_in_suffix_b g cur_fp fuel;
+            not_in_fl_chain_b_is_chain_avoids g next_fp cur_fp (fuel - 1);
+            assert (chain_avoids g next_fp cur_fp (fuel - 1) = true);
+            (if big_fuel >= fuel - 1 then
+               chain_avoids_strengthen g next_fp cur_fp (fuel - 1) big_fuel
+             else
+               chain_avoids_weaken g next_fp cur_fp (fuel - 1) big_fuel);
+            let transfer_aux_f (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr g) /\ a <> obj)
               (ensures Seq.mem a (objects zero_addr g') /\
                        (U64.v (wosize_of_object a g) >= 1 ==>
                          U64.v (wosize_of_object a g') >= 1) /\
@@ -1554,97 +1489,10 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
                          read_word g' a == read_word g a))
             = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
             in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_s);
-            // Establish locality of write_word at prev_fp (read_word g2 a = read_word g' a for a far from prev_fp)
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            // Establish new_fp != prev_fp
-            alloc_from_block_split_normal g obj wz next_fp;
-            let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-            let g1 = write_word g hd alloc_hdr in
-            let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-            let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-            let g2_tmp = write_word g1 rem_hd rem_hdr in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            let g3 = write_word g2_tmp rem_obj next_fp in
-            assert (g' == g3);
-            assert (new_fp == rem_obj);
-            read_write_same g2_tmp rem_obj next_fp;
-            assert (read_word g' new_fp == next_fp);
-            (if U64.v prev_fp <= U64.v obj then begin
-               objects_separated zero_addr g prev_obj obj;
-               assert (U64.v new_fp > U64.v prev_fp)
-             end else begin
-               objects_separated zero_addr g obj prev_obj;
-               assert (U64.v prev_fp > U64.v obj + block_wz * 8);
-               assert (U64.v new_fp < U64.v obj + block_wz * 8);
-               assert (U64.v new_fp < U64.v prev_fp)
-             end);
-            assert (new_fp <> prev_fp);
-            read_write_different g' (prev_obj <: hp_addr) (new_fp <: hp_addr) new_fp;
-            assert (read_word g2 (new_fp <: obj_addr) == next_fp);
-            // Establish the g -> g2 transfer property explicitly.  Query
-            // splitting no longer derives it by chaining the g -> g' transfer
-            // with write_word locality at prev_fp.
-            let transfer_excl_s (a: U64.t) : Lemma
-              (ensures
-                (U64.v a >= U64.v mword /\ U64.v a < heap_size /\
-                 U64.v a % U64.v mword = 0 /\
-                 Seq.mem a (objects zero_addr g) /\ a <> prev_fp) ==>
-                (U64.v (wosize_of_object (a <: obj_addr) g) >= 1 /\
-                 U64.v (hd_address (a <: obj_addr)) + 16 <= heap_size ==>
-                   read_word g2 (a <: obj_addr) == read_word g (a <: obj_addr)))
-            = introduce
-                (U64.v a >= U64.v mword /\ U64.v a < heap_size /\
-                 U64.v a % U64.v mword = 0 /\
-                 Seq.mem a (objects zero_addr g) /\ a <> prev_fp) ==>
-                (U64.v (wosize_of_object (a <: obj_addr) g) >= 1 /\
-                 U64.v (hd_address (a <: obj_addr)) + 16 <= heap_size ==>
-                   read_word g2 (a <: obj_addr) == read_word g (a <: obj_addr))
-              with (
-                alloc_split_fl_transfer_pre_part1 g obj wz next_fp (a <: obj_addr);
-                aligned_distinct a prev_fp;
-                write_word_locality g' (prev_obj <: hp_addr) new_fp)
-            in
-            FStar.Classical.forall_intro transfer_excl_s;
-            // Step 4: Establish fl_chain_terminates g2 new_fp fuel
-            // Transfer fl_chain_terminates g next_fp (fuel-1) to g2 via transfer_excl
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            // fl_chain_terminates g2 next_fp (fuel-1)
-            // Build fl_chain_terminates g2 new_fp fuel via step
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            hd_address_spec (new_fp <: obj_addr);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
-            assert (U64.v new_fp >= U64.v mword);
-            assert (U64.v new_fp < heap_size);
-            assert (U64.v new_fp % U64.v mword == 0);
-            fl_chain_terminates_step g2 new_fp fuel;
-            assert (fl_chain_terminates g2 new_fp fuel);
-            // Build fl_chain_terminates g2 prev_fp (fuel+1)
-            fl_chain_terminates_step g2 prev_fp (fuel + 1);
-            // Now get fl_chain_terminates g2 head_fp big_fuel
-            if d = 0 then begin
-              // d = 0 → prev_fp = head_fp. Weaken (fuel+1) to big_fuel.
-              assert (fuel + 1 <= big_fuel);
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              fl_chain_terminates_weaken g2 head_fp (fuel + 1) big_fuel
-            end else begin
-              // d > 0: use unfold_steps to equate head chain with prev chain
-              assert (walk_chain g head_fp d = prev_fp);
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              assert (walk_chain_valid g head_fp d);
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              assert (d <= big_fuel);
-              fl_chain_terminates_unfold_steps g2 head_fp d big_fuel
-              // fl_chain_terminates g2 head_fp big_fuel = fl_chain_terminates g2 prev_fp (fuel+1) = true
-            end
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+            fl_chain_terminates_transfer_excl g g' next_fp obj big_fuel
           end else begin
-            // ----- Exact-fit sub-case -----
+            // ===== Exact fit: new_fp = next_fp =====
             alloc_exact_preserves_wfh_part1 g obj wz next_fp;
             alloc_from_block_exact g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
@@ -1658,42 +1506,145 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
             = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
             in
             FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            // Establish locality of write_word at prev_fp
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            // new_fp = next_fp in exact-fit. Show new_fp != prev_fp.
-            (if new_fp = prev_fp then begin
-               assert (read_word g (prev_fp <: obj_addr) == cur_fp);
-               assert (read_word g obj == next_fp);
-               assert (next_fp == prev_fp);
-               fl_chain_2cycle_not_terminates g prev_fp cur_fp (fuel - 1);
-               assert false
-             end else ());
-            assert (new_fp <> prev_fp);
-            // Step 4: fl_chain_terminates g2 new_fp fuel
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            fl_chain_terminates_weaken g2 next_fp (fuel - 1) fuel;
-            assert (fl_chain_terminates g2 new_fp fuel);
-            // Build fl_chain_terminates g2 prev_fp (fuel+1)
-            fl_chain_terminates_step g2 prev_fp (fuel + 1);
-            // Now get fl_chain_terminates g2 head_fp big_fuel
-            if d = 0 then begin
-              // d = 0 → prev_fp = head_fp. Weaken (fuel+1) to big_fuel.
-              assert (fuel + 1 <= big_fuel);
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              fl_chain_terminates_weaken g2 head_fp (fuel + 1) big_fuel
-            end else begin
-              // d > 0: use unfold_steps
-              assert (walk_chain g head_fp d = prev_fp);
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              assert (walk_chain_valid g head_fp d);
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              assert (d <= big_fuel);
-              fl_chain_terminates_unfold_steps g2 head_fp d big_fuel
-            end
+            fl_chain_terminates_transfer g g' next_fp big_fuel
+          end
+        end
+        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                U64.v prev_fp % U64.v mword = 0 then begin
+          // ===== prev_fp <> 0: fp_out = head_fp =====
+          //
+          // Reordered: the prev-link write runs FIRST, on `g`, and the block
+          // writes on the result:
+          //
+          //     gw = write_word g prev new_fp
+          //     g2 = fst (alloc_from_block gw obj wz next_fp)
+          //
+          // Step 1 rebuilds termination of the head chain in `gw`, using only
+          // facts about `g`; step 3 carries it across the block writes.
+          let prev_obj : obj_addr = prev_fp in
+          let gw = write_word g (prev_obj <: hp_addr) new_fp in
+          let g2 = fst (alloc_from_block gw obj wz next_fp) in
+          let d = big_fuel - fuel - 1 in
+
+          // --- separation: prev's block is disjoint from obj's ---
+          hd_address_spec prev_obj;
+          hd_address_bounds prev_obj;
+          wosize_of_object_spec prev_obj g;
+          wosize_of_object_bound prev_obj g;
+          wosize_of_object_spec obj g;
+          if U64.v prev_fp < U64.v obj then begin
+            objects_separated zero_addr g prev_obj obj;
+            assert (U64.v (hd_address prev_obj) + 8 <= U64.v hd)
+          end else begin
+            objects_separated zero_addr g obj prev_obj;
+            assert (U64.v prev_fp > U64.v obj + block_wz * 8);
+            assert (U64.v (hd_address prev_obj) >= U64.v hd + (block_wz + 1) * 8)
+          end;
+          assert (U64.v prev_fp <> U64.v hd);
+
+          // --- new_fp is either cur_fp (split) or next_fp, and is never prev ---
+          (if block_wz - wz >= 1 then alloc_split_facts_part1 g obj wz next_fp
+           else alloc_from_block_exact g obj wz next_fp);
+          assert (new_fp == (if block_wz - wz >= 2 then (obj <: U64.t) else next_fp));
+          fl_valid_any_fuel g cur_fp fuel big_fuel;
+          fl_valid_any_fuel g next_fp (fuel - 1) big_fuel;
+          (if block_wz - wz >= 2 then ()
+           else if new_fp = prev_fp then begin
+             assert (read_word g (prev_fp <: obj_addr) == cur_fp);
+             assert (read_word g (cur_fp <: obj_addr) == next_fp);
+             fl_chain_2cycle_not_terminates g prev_fp cur_fp (fuel - 1);
+             assert false
+           end else ());
+          assert (new_fp <> prev_fp);
+
+          // --- Step 1a: fl_valid gw head_fp, needed by every transfer below ---
+          fl_valid_field_write_tail_part1 g prev_obj new_fp big_fuel;
+          fl_valid_field_write_part1 g prev_obj new_fp head_fp big_fuel big_fuel;
+          assert (fl_valid gw head_fp big_fuel);
+
+          // --- Step 1b: fl_chain_terminates gw head_fp big_fuel ---
+          // The suffix from next_fp never revisits prev, so the single write
+          // is invisible to it.
+          chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
+          fl_chain_terminates_transfer_excl g gw next_fp prev_fp (fuel - 1);
+          assert (fl_chain_terminates gw next_fp (fuel - 1));
+          // The chain out of new_fp terminates within `fuel` steps: on a split
+          // new_fp is cur_fp, whose link in `gw` is still next_fp.
+          (if block_wz - wz >= 2 then begin
+             read_write_different g (prev_obj <: hp_addr) (cur_fp <: hp_addr) new_fp;
+             assert (read_word gw (cur_fp <: obj_addr) == next_fp);
+             fl_chain_terminates_step gw cur_fp fuel
+           end else
+             fl_chain_terminates_weaken gw next_fp (fuel - 1) fuel);
+          assert (fl_chain_terminates gw new_fp fuel);
+          read_write_same g (prev_obj <: hp_addr) new_fp;
+          assert (read_word gw (prev_obj <: obj_addr) == new_fp);
+          fl_chain_terminates_step gw prev_fp (fuel + 1);
+          if d = 0 then begin
+            walk_chain_zero g head_fp;
+            assert (head_fp == prev_fp);
+            fl_chain_terminates_weaken gw head_fp (fuel + 1) big_fuel
+          end else begin
+            walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
+            fl_chain_no_early_repeat g head_fp d big_fuel;
+            walk_chain_valid_preserved g gw head_fp prev_fp d big_fuel;
+            fl_chain_terminates_unfold_steps gw head_fp d big_fuel
+          end;
+          assert (fl_chain_terminates gw head_fp big_fuel);
+
+          // --- Step 2: obj is untouched by the link write ---
+          write_body_preserves_wfh_part1 g prev_obj (prev_obj <: hp_addr) new_fp;
+          write_body_preserves_objects_local zero_addr g prev_obj (prev_obj <: hp_addr) new_fp;
+          read_write_different g (prev_obj <: hp_addr) hd new_fp;
+          assert (objects zero_addr gw == objects zero_addr g);
+          assert (read_word gw hd == hdr);
+          assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          assert (Seq.mem obj (objects zero_addr gw));
+
+          // --- Step 3: carry termination across the block writes, gw -> g2 ---
+          if block_wz - wz >= 2 then begin
+            let transfer_aux (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw))
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
+            fl_chain_terminates_transfer gw g2 head_fp big_fuel
+          end
+          else if block_wz - wz = 1 then begin
+            chain_avoids_after_relink g prev_obj cur_fp next_fp head_fp fuel big_fuel;
+            assert (chain_avoids gw head_fp cur_fp big_fuel = true);
+            let transfer_aux_f (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw) /\ a <> obj)
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+            fl_chain_terminates_transfer_excl gw g2 head_fp obj big_fuel
+          end
+          else begin
+            let transfer_aux_e (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw))
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_exact_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
+            fl_chain_terminates_transfer gw g2 head_fp big_fuel
           end
         end
         else ()
@@ -1792,224 +1743,197 @@ private let rec alloc_search_obj_not_in_chain_part1
       fl_chain_terminates_elim g cur_fp fuel;
       assert (fl_chain_terminates g next_fp (fuel - 1));
       if block_wz >= wz then begin
-        // ===== Found a suitable block: obj_out = cur_fp =====
-        // (No need for next_fp_in_objects or alloc_from_block_preserves_wf under part1)
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
+        // ===== Found a suitable block =====
+        //
+        // `obj_out` is the RIGHT-JUSTIFIED allocated block, `leftover` words
+        // above cur_fp.  That makes the statement easy in two different ways:
+        //
+        //   leftover >= 1  the address is interior to the block in `g`, so it
+        //                  is not an object of `g` at all and no chain can
+        //                  visit it -- `chain_avoids_non_object`;
+        //   leftover  = 0  it IS cur_fp, and the content is that the relinked
+        //                  chain skips the block that just left the list.
+        let g' = fst (alloc_from_block g obj wz next_fp) in
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
         fl_valid_any_fuel g next_fp (fuel - 1) big_fuel;
         fl_chain_terminates_weaken g next_fp (fuel - 1) big_fuel;
-        // Key: cur_fp not in successor chain
+        fl_valid_any_fuel g cur_fp fuel big_fuel;
         fl_chain_predecessor_not_in_suffix_b g cur_fp fuel;
         not_in_fl_chain_b_is_chain_avoids g next_fp cur_fp (fuel - 1);
         assert (chain_avoids g next_fp cur_fp (fuel - 1) = true);
-        if prev_fp = 0UL then begin
-          // ===== prev_fp = 0: fp_out = new_fp =====
-          if block_wz - wz >= 2 then begin
-            // ----- Split: new_fp = rem_obj -----
-            alloc_split_facts_part1 g obj wz next_fp;
+        chain_avoids_strengthen g next_fp cur_fp (fuel - 1) big_fuel;
+        let leftover = block_wz - wz in
+        let ahn = U64.v hd + leftover * 8 in
+        if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then
+          // `alloc_search` bails here with obj_out = 0; nothing to prove.
+          ()
+        else begin
+          let alloc_obj : obj_addr = U64.add cur_fp (U64.uint_to_t (leftover * 8)) in
+          assert (U64.v alloc_obj == U64.v obj + leftover * 8);
+          (if leftover >= 1 then
+             alloc_obj_interior g obj alloc_obj block_wz
+           else ());
+          if prev_fp = 0UL then begin
+            // ===== prev_fp = 0: fp_out = new_fp, heap_out = g' =====
+            (if leftover >= 1 then alloc_split_facts_part1 g obj wz next_fp
+             else alloc_from_block_exact g obj wz next_fp);
             alloc_from_block_objects_facts_part1 g obj wz next_fp;
-            alloc_from_block_split_normal g obj wz next_fp;
-            let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-            let g1 = write_word g hd alloc_hdr in
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            let rem_wz = block_wz - wz - 1 in
-            let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-            let g2 = write_word g1 (U64.uint_to_t rem_hd_nat <: hp_addr) rem_hdr in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            let g3 = write_word g2 rem_obj next_fp in
-            assert (g' == g3);
-            assert (new_fp == rem_obj);
-            assert (U64.v new_fp > U64.v cur_fp);
-            read_write_same g2 rem_obj next_fp;
-            assert (read_word g' new_fp == next_fp);
-            let transfer_aux (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
-            chain_avoids_transfer_excl g g' next_fp cur_fp (fuel - 1);
-            fl_chain_terminates_transfer g g' next_fp (fuel - 1);
-            chain_avoids_strengthen g' next_fp cur_fp (fuel - 1) (big_fuel - 1);
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            hd_address_spec (new_fp <: obj_addr);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
-            chain_avoids_unfold_step g' new_fp cur_fp big_fuel
-          end else begin
-            // ----- Exact-fit: new_fp = next_fp -----
-            alloc_from_block_exact g obj wz next_fp;
-            let transfer_aux_e (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            chain_avoids_transfer_excl g g' next_fp cur_fp (fuel - 1);
-            fl_chain_terminates_transfer g g' next_fp (fuel - 1);
-            chain_avoids_strengthen g' next_fp cur_fp (fuel - 1) big_fuel
-          end
-        end
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-                U64.v prev_fp % U64.v mword = 0 then begin
-          // ===== prev_fp != 0: fp_out = head_fp, heap_out = g2 =====
-          let prev_obj : obj_addr = prev_fp in
-          let g2 = write_word g' (prev_obj <: hp_addr) new_fp in
-          let d = big_fuel - fuel - 1 in
-          if block_wz - wz >= 2 then begin
-            // ----- Split sub-case (prev != 0) -----
-            alloc_split_facts_part1 g obj wz next_fp;
-            alloc_from_block_objects_facts_part1 g obj wz next_fp;
-            alloc_from_block_split_normal g obj wz next_fp;
-            let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
-            let g1 = write_word g hd alloc_hdr in
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            let rem_wz = block_wz - wz - 1 in
-            let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-            let g2_tmp = write_word g1 (U64.uint_to_t rem_hd_nat <: hp_addr) rem_hdr in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            let g3 = write_word g2_tmp rem_obj next_fp in
-            assert (g' == g3);
-            assert (new_fp == rem_obj);
-            let transfer_aux_s (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_s);
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            (if U64.v prev_fp <= U64.v obj then begin
-               objects_separated zero_addr g prev_obj obj;
-               assert (U64.v new_fp > U64.v prev_fp)
-             end else begin
-               objects_separated zero_addr g obj prev_obj;
-               assert (U64.v prev_fp > U64.v obj + block_wz * 8);
-               assert (U64.v new_fp < U64.v obj + block_wz * 8);
-               assert (U64.v new_fp < U64.v prev_fp)
-             end);
-            assert (new_fp <> prev_fp);
-            assert (U64.v new_fp > U64.v cur_fp);
-            read_write_different g' (prev_obj <: hp_addr) (new_fp <: hp_addr) new_fp;
-            read_write_same g2_tmp rem_obj next_fp;
-            assert (read_word g2 (new_fp <: obj_addr) == next_fp);
-            read_write_same g' (prev_obj <: hp_addr) new_fp;
-            assert (read_word g2 (prev_fp <: obj_addr) == new_fp);
-            // Transfer chain_avoids for next_fp chain to g2
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            chain_avoids_transfer_excl2 g g2 next_fp cur_fp prev_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            // chain_avoids g2 new_fp cur_fp big_fuel
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            hd_address_spec (new_fp <: obj_addr);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
-            chain_avoids_strengthen g2 next_fp cur_fp (fuel - 1) (big_fuel - 1);
-            chain_avoids_unfold_step g2 new_fp cur_fp big_fuel;
-            assert (chain_avoids g2 new_fp cur_fp big_fuel = true);
-            // chain_avoids g2 prev_fp cur_fp (fuel + 1)
-            chain_avoids_shrink g2 new_fp cur_fp fuel big_fuel;
-            chain_avoids_unfold_step g2 prev_fp cur_fp (fuel + 1);
-            assert (chain_avoids g2 prev_fp cur_fp (fuel + 1) = true);
-            // Get chain_avoids g2 head_fp cur_fp big_fuel
-            if d = 0 then begin
-              // d = 0: head_fp = prev_fp. Strengthen (fuel+1) to big_fuel.
-              assert (fuel + 1 <= big_fuel);
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              fl_chain_terminates_step g2 new_fp fuel;
-              fl_chain_terminates_step g2 prev_fp (fuel + 1);
-              chain_avoids_strengthen g2 prev_fp cur_fp (fuel + 1) big_fuel
+            assert (new_fp == (if leftover >= 2 then (obj <: U64.t) else next_fp));
+            assert (fl_valid g new_fp big_fuel);
+            if leftover >= 2 then begin
+              let transfer_aux (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr g))
+                (ensures Seq.mem a (objects zero_addr g') /\
+                         (U64.v (wosize_of_object a g) >= 1 ==>
+                           U64.v (wosize_of_object a g') >= 1) /\
+                         (U64.v (wosize_of_object a g) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g' a == read_word g a))
+              = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
+              chain_avoids_non_object g new_fp alloc_obj big_fuel;
+              chain_avoids_transfer_excl g g' new_fp (alloc_obj <: U64.t) big_fuel
+            end else if leftover = 1 then begin
+              // `obj` becomes the wosize-0 empty block, so it is the one
+              // object the transfer cannot cover; the chain skips it already.
+              let transfer_aux_f (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr g) /\ a <> obj)
+                (ensures Seq.mem a (objects zero_addr g') /\
+                         (U64.v (wosize_of_object a g) >= 1 ==>
+                           U64.v (wosize_of_object a g') >= 1) /\
+                         (U64.v (wosize_of_object a g) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g' a == read_word g a))
+              = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+              chain_avoids_non_object g new_fp alloc_obj big_fuel;
+              chain_avoids_transfer_excl2 g g' new_fp (alloc_obj <: U64.t) cur_fp big_fuel
             end else begin
-              // d > 0: use prefix walk transfer + unfold
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              assert (walk_chain_valid g2 head_fp d);
-              assert (walk_chain g2 head_fp d = prev_fp);
-              fl_chain_no_early_repeat g head_fp (d + 1) big_fuel;
-              chain_avoids_shrink g head_fp cur_fp d (d + 1);
-              fl_valid_weaken g head_fp big_fuel d;
-              chain_avoids_transfer_excl2 g g2 head_fp cur_fp prev_fp d;
-              chain_avoids_unfold_steps g2 head_fp cur_fp d big_fuel
+              // Exact fit: alloc_obj IS cur_fp, and new_fp is next_fp.
+              alloc_exact_preserves_wfh_part1 g obj wz next_fp;
+              let transfer_aux_e (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr g))
+                (ensures Seq.mem a (objects zero_addr g') /\
+                         (U64.v (wosize_of_object a g) >= 1 ==>
+                           U64.v (wosize_of_object a g') >= 1) /\
+                         (U64.v (wosize_of_object a g) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g' a == read_word g a))
+              = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
+              assert ((alloc_obj <: U64.t) == cur_fp);
+              chain_avoids_transfer_excl g g' next_fp cur_fp big_fuel
             end
-          end else begin
-            // ----- Exact-fit sub-case (prev != 0) -----
-            alloc_from_block_exact g obj wz next_fp;
-            let transfer_aux_e (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            (if new_fp = prev_fp then begin
+          end
+          else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                  U64.v prev_fp % U64.v mword = 0 then begin
+            // ===== prev_fp <> 0: fp_out = head_fp, heap_out = g2 =====
+            let prev_obj : obj_addr = prev_fp in
+            let gw = write_word g (prev_obj <: hp_addr) new_fp in
+            let g2 = fst (alloc_from_block gw obj wz next_fp) in
+
+            // --- separation: prev's block is disjoint from obj's ---
+            hd_address_spec prev_obj;
+            hd_address_bounds prev_obj;
+            wosize_of_object_spec prev_obj g;
+            wosize_of_object_bound prev_obj g;
+            if U64.v prev_fp < U64.v obj then begin
+              objects_separated zero_addr g prev_obj obj;
+              assert (U64.v (hd_address prev_obj) + 8 <= U64.v hd)
+            end else begin
+              objects_separated zero_addr g obj prev_obj;
+              assert (U64.v prev_fp > U64.v obj + block_wz * 8);
+              assert (U64.v (hd_address prev_obj) >= U64.v hd + (block_wz + 1) * 8)
+            end;
+            assert (U64.v prev_fp <> U64.v hd);
+
+            (if leftover >= 1 then alloc_split_facts_part1 g obj wz next_fp
+             else alloc_from_block_exact g obj wz next_fp);
+            assert (new_fp == (if leftover >= 2 then (obj <: U64.t) else next_fp));
+            (if leftover >= 2 then ()
+             else if new_fp = prev_fp then begin
                assert (read_word g (prev_fp <: obj_addr) == cur_fp);
-               assert (read_word g obj == next_fp);
-               assert (next_fp == prev_fp);
+               assert (read_word g (cur_fp <: obj_addr) == next_fp);
                fl_chain_2cycle_not_terminates g prev_fp cur_fp (fuel - 1);
                assert false
              end else ());
             assert (new_fp <> prev_fp);
-            read_write_same g' (prev_obj <: hp_addr) new_fp;
-            assert (read_word g2 (prev_fp <: obj_addr) == new_fp);
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            chain_avoids_transfer_excl2 g g2 next_fp cur_fp prev_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            // chain_avoids g2 new_fp cur_fp big_fuel (new_fp = next_fp)
-            chain_avoids_strengthen g2 next_fp cur_fp (fuel - 1) big_fuel;
-            assert (chain_avoids g2 new_fp cur_fp big_fuel = true);
-            // chain_avoids g2 prev_fp cur_fp (fuel + 1)
-            chain_avoids_shrink g2 new_fp cur_fp fuel big_fuel;
-            chain_avoids_unfold_step g2 prev_fp cur_fp (fuel + 1);
-            assert (chain_avoids g2 prev_fp cur_fp (fuel + 1) = true);
-            // Get chain_avoids g2 head_fp cur_fp big_fuel
-            if d = 0 then begin
-              // d = 0: head_fp = prev_fp. Strengthen (fuel+1) to big_fuel.
-              assert (fuel + 1 <= big_fuel);
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              fl_chain_terminates_weaken g2 next_fp (fuel - 1) fuel;
-              fl_chain_terminates_step g2 prev_fp (fuel + 1);
-              chain_avoids_strengthen g2 prev_fp cur_fp (fuel + 1) big_fuel
-            end else begin
-              // d > 0: use prefix walk transfer + unfold
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              fl_chain_no_early_repeat g head_fp (d + 1) big_fuel;
-              chain_avoids_shrink g head_fp cur_fp d (d + 1);
-              fl_valid_weaken g head_fp big_fuel d;
-              chain_avoids_transfer_excl2 g g2 head_fp cur_fp prev_fp d;
-              chain_avoids_unfold_steps g2 head_fp cur_fp d big_fuel
+
+            // --- Step 1: the relinked head chain, on `gw` ---
+            fl_valid_field_write_tail_part1 g prev_obj new_fp big_fuel;
+            fl_valid_field_write_part1 g prev_obj new_fp head_fp big_fuel big_fuel;
+            assert (fl_valid gw head_fp big_fuel);
+
+            // --- Step 2: obj is untouched by the link write ---
+            write_body_preserves_wfh_part1 g prev_obj (prev_obj <: hp_addr) new_fp;
+            write_body_preserves_objects_local zero_addr g prev_obj (prev_obj <: hp_addr) new_fp;
+            read_write_different g (prev_obj <: hp_addr) hd new_fp;
+            assert (objects zero_addr gw == objects zero_addr g);
+            assert (read_word gw hd == hdr);
+            assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+            assert (Seq.mem obj (objects zero_addr gw));
+
+            // --- Step 3: carry the avoidance across the block writes ---
+            if leftover >= 2 then begin
+              chain_avoids_non_object gw head_fp alloc_obj big_fuel;
+              let transfer_aux (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr gw))
+                (ensures Seq.mem a (objects zero_addr g2) /\
+                         (U64.v (wosize_of_object a gw) >= 1 ==>
+                           U64.v (wosize_of_object a g2) >= 1) /\
+                         (U64.v (wosize_of_object a gw) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g2 a == read_word gw a))
+              = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
+              chain_avoids_transfer_excl gw g2 head_fp (alloc_obj <: U64.t) big_fuel
+            end
+            else if leftover = 1 then begin
+              chain_avoids_non_object gw head_fp alloc_obj big_fuel;
+              chain_avoids_after_relink g prev_obj cur_fp next_fp head_fp fuel big_fuel;
+              assert (chain_avoids gw head_fp cur_fp big_fuel = true);
+              let transfer_aux_f (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr gw) /\ a <> obj)
+                (ensures Seq.mem a (objects zero_addr g2) /\
+                         (U64.v (wosize_of_object a gw) >= 1 ==>
+                           U64.v (wosize_of_object a g2) >= 1) /\
+                         (U64.v (wosize_of_object a gw) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g2 a == read_word gw a))
+              = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+              chain_avoids_transfer_excl2 gw g2 head_fp (alloc_obj <: U64.t) cur_fp big_fuel
+            end
+            else begin
+              // Exact fit: alloc_obj IS cur_fp, which left the list when prev
+              // was rewired.
+              chain_avoids_after_relink g prev_obj cur_fp next_fp head_fp fuel big_fuel;
+              assert (chain_avoids gw head_fp cur_fp big_fuel = true);
+              assert ((alloc_obj <: U64.t) == cur_fp);
+              let transfer_aux_e (a: obj_addr) : Lemma
+                (requires Seq.mem a (objects zero_addr gw))
+                (ensures Seq.mem a (objects zero_addr g2) /\
+                         (U64.v (wosize_of_object a gw) >= 1 ==>
+                           U64.v (wosize_of_object a g2) >= 1) /\
+                         (U64.v (wosize_of_object a gw) >= 1 /\
+                          U64.v (hd_address a) + 16 <= heap_size ==>
+                           read_word g2 a == read_word gw a))
+              = alloc_exact_fl_transfer_pre_part1 gw obj wz next_fp a
+              in
+              FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
+              chain_avoids_transfer_excl gw g2 head_fp cur_fp big_fuel
             end
           end
+          else ()
         end
-        else ()
       end
       else begin
         // ===== Advance: block too small, continue search =====
@@ -2116,7 +2040,11 @@ private let rec alloc_search_read_other
           assert (U64.v addr >= U64.v hd + (block_wz + 1) * 8);
           alloc_from_block_read_outside g obj wz next_fp addr
         end;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
+        let g' = fst (alloc_from_block g obj wz next_fp) in
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
         // Handle prev_fp write
         if prev_fp = 0UL then ()
         else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
@@ -2237,7 +2165,11 @@ private let rec alloc_search_preserves_chain_avoids_other
       assert (chain_avoids g next_fp excl (fuel - 1) = true);
       if block_wz >= wz then begin
         // ===== Found a suitable block =====
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
+        let g' = fst (alloc_from_block g obj wz next_fp) in
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
         fl_valid_any_fuel g next_fp (fuel - 1) big_fuel;
         fl_chain_terminates_weaken g next_fp (fuel - 1) big_fuel;
         // cur_fp not in suffix
@@ -2245,22 +2177,15 @@ private let rec alloc_search_preserves_chain_avoids_other
         not_in_fl_chain_b_is_chain_avoids g next_fp cur_fp (fuel - 1);
         assert (chain_avoids g next_fp cur_fp (fuel - 1) = true);
         if prev_fp = 0UL then begin
-          // ===== prev_fp = 0: fp_out = new_fp =====
+          // ===== prev_fp = 0: fp_out = new_fp, heap_out = g' =====
+          (if block_wz - wz >= 1 then alloc_split_facts_part1 g obj wz next_fp
+           else alloc_from_block_exact g obj wz next_fp);
+          alloc_from_block_objects_facts_part1 g obj wz next_fp;
+          assert (new_fp == (if block_wz - wz >= 2 then (obj <: U64.t) else next_fp));
+          fl_valid_any_fuel g cur_fp fuel big_fuel;
           if block_wz - wz >= 2 then begin
-            // ----- Split: new_fp = rem_obj -----
-            alloc_split_facts_part1 g obj wz next_fp;
-            alloc_from_block_objects_facts_part1 g obj wz next_fp;
-            alloc_from_block_split_normal g obj wz next_fp;
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            assert (new_fp == rem_obj);
-            // rem_obj ≠ excl (rem_obj is within cur_fp's block, excl is a different object)
-            // rem_obj is at cur_fp + (wz+1)*8 which is within [hd, hd + (block_wz+1)*8)
-            // excl ≠ cur_fp and both in objects, so objects_separated gives disjointness
-            rem_obj_ne g obj (excl <: obj_addr) rem_obj hd wz block_wz;
-            assert (rem_obj <> excl);
-            // Transfer chain_avoids for next_fp chain to g'
+            // Split: the remainder keeps cur_fp, so the chain out of fp_out is
+            // literally the old chain out of cur_fp, and no read on it moves.
             let transfer_aux (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -2272,77 +2197,15 @@ private let rec alloc_search_preserves_chain_avoids_other
             = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
             in
             FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
-            // Transfer: chain_avoids g next_fp excl (fuel-1) → chain_avoids g' next_fp excl (fuel-1)
-            // Using transfer_excl2 with cur_fp excluded (writes at cur_fp's block)
-            chain_avoids_transfer_excl2 g g' next_fp excl cur_fp (fuel - 1);
-            fl_chain_terminates_transfer g g' next_fp (fuel - 1);
-            chain_avoids_strengthen g' next_fp excl (fuel - 1) (big_fuel - 1);
-            // rem_obj has valid header bounds
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            hd_address_spec (new_fp <: obj_addr);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
-            // Unfold: chain_avoids g' rem_obj excl big_fuel
-            //   = (rem_obj ≠ excl) && chain_avoids g' next_fp excl (big_fuel-1)
-            //   where read_word g' rem_obj = next_fp (from alloc_from_block_split_normal)
-            let g1 = write_word g hd (make_header (U64.uint_to_t wz) white_bits 0UL) in
-            let g2 = write_word g1 (U64.uint_to_t rem_hd_nat <: hp_addr) (make_header (U64.uint_to_t (block_wz - wz - 1)) blue_bits 0UL) in
-            let g3 = write_word g2 rem_obj next_fp in
-            assert (g' == g3);
-            read_write_same g2 rem_obj next_fp;
-            assert (read_word g' (new_fp <: obj_addr) == next_fp);
-            chain_avoids_unfold_step g' new_fp excl big_fuel;
-            assert (chain_avoids g' new_fp excl big_fuel = true)
-          end else begin
-            // ----- Exact-fit: new_fp = next_fp -----
-            alloc_from_block_exact g obj wz next_fp;
-            let transfer_aux_e (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
-              (ensures Seq.mem a (objects zero_addr g') /\
-                       (U64.v (wosize_of_object a g) >= 1 ==>
-                         U64.v (wosize_of_object a g') >= 1) /\
-                       (U64.v (wosize_of_object a g) >= 1 /\
-                        U64.v (hd_address a) + 16 <= heap_size ==>
-                         read_word g' a == read_word g a))
-            = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
-            in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            chain_avoids_transfer_excl2 g g' next_fp excl cur_fp (fuel - 1);
-            fl_chain_terminates_transfer g g' next_fp (fuel - 1);
-            chain_avoids_strengthen g' next_fp excl (fuel - 1) big_fuel;
-            assert (chain_avoids g' next_fp excl big_fuel = true);
-            assert (new_fp == next_fp)
-          end
-        end
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-                U64.v prev_fp % U64.v mword = 0 then begin
-          // ===== prev_fp != 0: fp_out = head_fp, heap_out = g2 =====
-          let prev_obj : obj_addr = prev_fp in
-          let g2 = write_word g' (prev_obj <: hp_addr) new_fp in
-          let d = big_fuel - fuel - 1 in
-          // excl ≠ prev_fp: excl avoids the chain from head_fp which visits prev_fp
-          // prev_fp = walk_chain g head_fp d, chain_avoids g head_fp excl big_fuel
-          // Use chain_avoids_weaken to get chain_avoids g head_fp excl d
-          // Then chain_avoids_unfold_steps to get chain_avoids g prev_fp excl (big_fuel - d)
-          // Then chain_avoids_head_ne gives prev_fp ≠ excl
-          walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-          chain_avoids_weaken g head_fp excl big_fuel d;
-          chain_avoids_unfold_steps g head_fp excl d big_fuel;
-          assert (chain_avoids g prev_fp excl (big_fuel - d) = true);
-          chain_avoids_head_ne g prev_fp excl (big_fuel - d);
-          assert (prev_fp <> excl);
-          if block_wz - wz >= 2 then begin
-            // ----- Split sub-case (prev != 0) -----
-            alloc_split_facts_part1 g obj wz next_fp;
-            alloc_from_block_objects_facts_part1 g obj wz next_fp;
-            alloc_from_block_split_normal g obj wz next_fp;
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            let rem_obj : hp_addr = U64.uint_to_t rem_obj_nat in
-            assert (new_fp == rem_obj);
-            let transfer_aux_s (a: obj_addr) : Lemma
-              (requires Seq.mem a (objects zero_addr g))
+            chain_avoids_strengthen g cur_fp excl fuel big_fuel;
+            chain_avoids_transfer g g' cur_fp excl big_fuel
+          end else if block_wz - wz = 1 then begin
+            // The block leaves the list; `obj` is the one object the transfer
+            // cannot cover, and the suffix never visits it.
+            chain_avoids_strengthen g next_fp excl (fuel - 1) big_fuel;
+            chain_avoids_strengthen g next_fp cur_fp (fuel - 1) big_fuel;
+            let transfer_aux_f (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr g) /\ a <> obj)
               (ensures Seq.mem a (objects zero_addr g') /\
                        (U64.v (wosize_of_object a g) >= 1 ==>
                          U64.v (wosize_of_object a g') >= 1) /\
@@ -2351,70 +2214,11 @@ private let rec alloc_search_preserves_chain_avoids_other
                          read_word g' a == read_word g a))
             = alloc_split_fl_transfer_pre_part1 g obj wz next_fp a
             in
-            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_s);
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            // Transfer chain_avoids for next_fp to g2 (excluding excl and prev_fp)
-            // The chain from next_fp avoids both excl and prev_fp
-            // Reads at chain nodes (≠ excl, ≠ prev_fp) are preserved in g2
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            chain_avoids_transfer_excl2 g g2 next_fp excl prev_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            // chain_avoids g2 next_fp excl (fuel-1) now established
-            // Build chain_avoids g2 head_fp excl big_fuel
-            // The chain from head_fp in g2: visits prefix (same as g), then prev_fp (link → new_fp),
-            // then new_fp = rem_obj (link → next_fp), then next_fp tail
-            // All prefix nodes ≠ excl (from chain_avoids g head_fp excl big_fuel)
-            // prev_fp ≠ excl (shown above)
-            // rem_obj ≠ excl (objects_separated on cur_fp vs excl)
-            rem_obj_ne g obj (excl <: obj_addr) rem_obj hd wz block_wz;
-            assert (rem_obj <> excl);
-            // chain_avoids g2 next_fp excl (fuel-1) from transfer above
-            // Now build chain_avoids g2 head_fp excl big_fuel
-            let next_hd_nat = U64.v hd + (block_wz + 1) * 8 in
-            assert (next_hd_nat <= heap_size);
-            assert (rem_obj_nat + 8 <= next_hd_nat);
-            hd_address_spec (new_fp <: obj_addr);
-            assert (U64.v (hd_address (new_fp <: obj_addr)) + 16 <= heap_size);
-            read_write_same (write_word (write_word g hd (make_header (U64.uint_to_t wz) white_bits 0UL)) (U64.uint_to_t rem_hd_nat <: hp_addr) (make_header (U64.uint_to_t (block_wz - wz - 1)) blue_bits 0UL)) rem_obj next_fp;
-            rem_obj_ne g obj prev_obj new_fp hd wz block_wz;
-            aligned_distinct prev_obj new_fp;
-            read_write_different g' (prev_obj <: hp_addr) (new_fp <: hp_addr) new_fp;
-            assert (read_word g2 (new_fp <: obj_addr) == next_fp);
-            read_write_same g' (prev_obj <: hp_addr) new_fp;
-            assert (read_word g2 (prev_fp <: obj_addr) == new_fp);
-            // chain_avoids g2 next_fp excl (fuel-1) is from transfer
-            // unfold new_fp: chain_avoids g2 new_fp excl fuel = chain_avoids g2 next_fp excl (fuel-1)
-            chain_avoids_unfold_step g2 new_fp excl fuel;
-            assert (chain_avoids g2 new_fp excl fuel = true);
-            hd_address_spec prev_obj;
-            // unfold prev_fp: chain_avoids g2 prev_fp excl (fuel+1) = chain_avoids g2 new_fp excl fuel
-            chain_avoids_unfold_step g2 prev_fp excl (fuel + 1);
-            assert (chain_avoids g2 prev_fp excl (fuel + 1) = true);
-            if d = 0 then begin
-              fl_chain_terminates_step g2 new_fp fuel;
-              fl_chain_terminates_step g2 prev_fp (fuel + 1);
-              chain_avoids_strengthen g2 prev_fp excl (fuel + 1) big_fuel;
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              assert (chain_avoids g2 head_fp excl big_fuel = true)
-            end else begin
-              // d > 0: transfer prefix and unfold
-              chain_avoids_weaken g head_fp excl big_fuel d;
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              fl_valid_weaken g head_fp big_fuel d;
-              chain_avoids_transfer_excl2 g g2 head_fp excl prev_fp d;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              assert (walk_chain g2 head_fp d == prev_fp);
-              assert (big_fuel - d == fuel + 1);
-              assert (chain_avoids g2 prev_fp excl (big_fuel - d) = true);
-              chain_avoids_unfold_steps g2 head_fp excl d big_fuel;
-              assert (chain_avoids g2 head_fp excl big_fuel = true)
-            end
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+            chain_avoids_transfer_excl2 g g' next_fp excl cur_fp big_fuel
           end else begin
-            // ----- Exact-fit sub-case (prev != 0) -----
-            alloc_from_block_exact g obj wz next_fp;
+            // ----- Exact fit: new_fp = next_fp -----
+            alloc_exact_preserves_wfh_part1 g obj wz next_fp;
             let transfer_aux_e (a: obj_addr) : Lemma
               (requires Seq.mem a (objects zero_addr g))
               (ensures Seq.mem a (objects zero_addr g') /\
@@ -2426,51 +2230,150 @@ private let rec alloc_search_preserves_chain_avoids_other
             = alloc_exact_fl_transfer_pre_part1 g obj wz next_fp a
             in
             FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
-            write_word_locality g' (prev_obj <: hp_addr) new_fp;
-            frame_excl_compose g g' g2 (prev_obj <: hp_addr);
-            // new_fp = next_fp (exact case)
-            assert (new_fp == next_fp);
-            (if new_fp = prev_fp then begin
-               assert (read_word g (prev_fp <: obj_addr) == cur_fp);
-               assert (next_fp == prev_fp);
-               fl_chain_2cycle_not_terminates g prev_fp cur_fp (fuel - 1);
-               assert false
-             end else ());
-            assert (new_fp <> prev_fp);
-            read_write_same g' (prev_obj <: hp_addr) new_fp;
-            assert (read_word g2 (prev_fp <: obj_addr) == new_fp);
-            // Transfer chain_avoids for next_fp to g2 (excluding excl and prev_fp)
-            chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
-            chain_avoids_transfer_excl2 g g2 next_fp excl prev_fp (fuel - 1);
-            fl_chain_terminates_transfer_excl g g2 next_fp prev_fp (fuel - 1);
-            // chain_avoids g2 next_fp excl (fuel-1) → strengthen to fuel
-            chain_avoids_strengthen g2 next_fp excl (fuel - 1) fuel;
-            hd_address_spec prev_obj;
-            chain_avoids_unfold_step g2 prev_fp excl (fuel + 1);
-            assert (chain_avoids g2 prev_fp excl (fuel + 1) = true);
-            // Prefix handling
-            if d = 0 then begin
-              // d = 0 means head_fp = prev_fp. chain_avoids g2 prev_fp excl (fuel+1)
-              // → strengthen to big_fuel
-              fl_chain_terminates_weaken g2 next_fp (fuel - 1) fuel;
-              fl_chain_terminates_step g2 prev_fp (fuel + 1);
-              chain_avoids_strengthen g2 prev_fp excl (fuel + 1) big_fuel;
-              walk_chain_zero g head_fp;
-              assert (head_fp == prev_fp);
-              assert (chain_avoids g2 head_fp excl big_fuel = true)
-            end else begin
-              chain_avoids_weaken g head_fp excl big_fuel d;
-              walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
-              fl_chain_no_early_repeat g head_fp d big_fuel;
-              fl_valid_weaken g head_fp big_fuel d;
-              chain_avoids_transfer_excl2 g g2 head_fp excl prev_fp d;
-              walk_chain_valid_preserved g g2 head_fp prev_fp d big_fuel;
-              assert (walk_chain g2 head_fp d == prev_fp);
-              assert (big_fuel - d == fuel + 1);
-              assert (chain_avoids g2 prev_fp excl (big_fuel - d) = true);
-              chain_avoids_unfold_steps g2 head_fp excl d big_fuel;
-              assert (chain_avoids g2 head_fp excl big_fuel = true)
-            end
+            chain_avoids_strengthen g next_fp excl (fuel - 1) big_fuel;
+            chain_avoids_transfer g g' next_fp excl big_fuel
+          end
+        end
+        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                U64.v prev_fp % U64.v mword = 0 then begin
+          // ===== prev_fp <> 0: fp_out = head_fp, heap_out = g2 =====
+          let prev_obj : obj_addr = prev_fp in
+          let gw = write_word g (prev_obj <: hp_addr) new_fp in
+          let g2 = fst (alloc_from_block gw obj wz next_fp) in
+          let d = big_fuel - fuel - 1 in
+          // excl is not prev: the head chain visits prev and avoids excl.
+          walk_chain_valid_prefix g head_fp (big_fuel - fuel) d;
+          chain_avoids_weaken g head_fp excl big_fuel d;
+          chain_avoids_unfold_steps g head_fp excl d big_fuel;
+          assert (chain_avoids g prev_fp excl (big_fuel - d) = true);
+          chain_avoids_head_ne g prev_fp excl (big_fuel - d);
+          assert (prev_fp <> excl);
+          chain_avoids_head_ne g cur_fp excl fuel;
+          assert (cur_fp <> excl);
+
+          // --- separation: prev's block is disjoint from obj's ---
+          hd_address_spec prev_obj;
+          hd_address_bounds prev_obj;
+          wosize_of_object_spec prev_obj g;
+          wosize_of_object_bound prev_obj g;
+          if U64.v prev_fp < U64.v obj then begin
+            objects_separated zero_addr g prev_obj obj;
+            assert (U64.v (hd_address prev_obj) + 8 <= U64.v hd)
+          end else begin
+            objects_separated zero_addr g obj prev_obj;
+            assert (U64.v prev_fp > U64.v obj + block_wz * 8);
+            assert (U64.v (hd_address prev_obj) >= U64.v hd + (block_wz + 1) * 8)
+          end;
+          assert (U64.v prev_fp <> U64.v hd);
+
+          (if block_wz - wz >= 1 then alloc_split_facts_part1 g obj wz next_fp
+           else alloc_from_block_exact g obj wz next_fp);
+          assert (new_fp == (if block_wz - wz >= 2 then (obj <: U64.t) else next_fp));
+          fl_valid_any_fuel g cur_fp fuel big_fuel;
+          (if block_wz - wz >= 2 then ()
+           else if new_fp = prev_fp then begin
+             assert (read_word g (prev_fp <: obj_addr) == cur_fp);
+             assert (read_word g (cur_fp <: obj_addr) == next_fp);
+             fl_chain_2cycle_not_terminates g prev_fp cur_fp (fuel - 1);
+             assert false
+           end else ());
+          assert (new_fp <> prev_fp);
+
+          // --- Step 1a: fl_valid gw head_fp ---
+          fl_valid_field_write_tail_part1 g prev_obj new_fp big_fuel;
+          fl_valid_field_write_part1 g prev_obj new_fp head_fp big_fuel big_fuel;
+          assert (fl_valid gw head_fp big_fuel);
+
+          // --- Step 1b: chain_avoids gw head_fp excl big_fuel ---
+          // The suffix out of next_fp survives the single write at prev.
+          chain_avoids_prev g prev_fp cur_fp next_fp (fuel - 1);
+          chain_avoids_transfer_excl2 g gw next_fp excl prev_fp (fuel - 1);
+          fl_chain_terminates_transfer_excl g gw next_fp prev_fp (fuel - 1);
+          read_write_same g (prev_obj <: hp_addr) new_fp;
+          assert (read_word gw (prev_obj <: obj_addr) == new_fp);
+          (if block_wz - wz >= 2 then begin
+             // new_fp is cur_fp, whose link in gw is still next_fp.
+             read_write_different g (prev_obj <: hp_addr) (cur_fp <: hp_addr) new_fp;
+             assert (read_word gw (cur_fp <: obj_addr) == next_fp);
+             fl_chain_terminates_step gw cur_fp fuel;
+             chain_avoids_unfold_step gw cur_fp excl fuel
+           end else begin
+             fl_chain_terminates_weaken gw next_fp (fuel - 1) fuel;
+             chain_avoids_strengthen gw next_fp excl (fuel - 1) fuel
+           end);
+          assert (chain_avoids gw new_fp excl fuel = true);
+          assert (fl_chain_terminates gw new_fp fuel);
+          chain_avoids_unfold_step gw prev_fp excl (fuel + 1);
+          fl_chain_terminates_step gw prev_fp (fuel + 1);
+          assert (chain_avoids gw prev_fp excl (fuel + 1) = true);
+          if d = 0 then begin
+            walk_chain_zero g head_fp;
+            assert (head_fp == prev_fp);
+            chain_avoids_strengthen gw prev_fp excl (fuel + 1) big_fuel
+          end else begin
+            fl_chain_no_early_repeat g head_fp d big_fuel;
+            fl_valid_weaken g head_fp big_fuel d;
+            chain_avoids_transfer_excl2 g gw head_fp excl prev_fp d;
+            walk_chain_valid_preserved g gw head_fp prev_fp d big_fuel;
+            assert (walk_chain gw head_fp d == prev_fp);
+            assert (big_fuel - d == fuel + 1);
+            chain_avoids_unfold_steps gw head_fp excl d big_fuel
+          end;
+          assert (chain_avoids gw head_fp excl big_fuel = true);
+
+          // --- Step 2: obj is untouched by the link write ---
+          write_body_preserves_wfh_part1 g prev_obj (prev_obj <: hp_addr) new_fp;
+          write_body_preserves_objects_local zero_addr g prev_obj (prev_obj <: hp_addr) new_fp;
+          read_write_different g (prev_obj <: hp_addr) hd new_fp;
+          assert (objects zero_addr gw == objects zero_addr g);
+          assert (read_word gw hd == hdr);
+          assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          assert (Seq.mem obj (objects zero_addr gw));
+
+          // --- Step 3: carry it across the block writes ---
+          if block_wz - wz >= 2 then begin
+            let transfer_aux (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw))
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux);
+            chain_avoids_transfer gw g2 head_fp excl big_fuel
+          end
+          else if block_wz - wz = 1 then begin
+            chain_avoids_after_relink g prev_obj cur_fp next_fp head_fp fuel big_fuel;
+            assert (chain_avoids gw head_fp cur_fp big_fuel = true);
+            let transfer_aux_f (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw) /\ a <> obj)
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_split_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_f);
+            chain_avoids_transfer_excl2 gw g2 head_fp excl cur_fp big_fuel
+          end
+          else begin
+            let transfer_aux_e (a: obj_addr) : Lemma
+              (requires Seq.mem a (objects zero_addr gw))
+              (ensures Seq.mem a (objects zero_addr g2) /\
+                       (U64.v (wosize_of_object a gw) >= 1 ==>
+                         U64.v (wosize_of_object a g2) >= 1) /\
+                       (U64.v (wosize_of_object a gw) >= 1 /\
+                        U64.v (hd_address a) + 16 <= heap_size ==>
+                         read_word g2 a == read_word gw a))
+            = alloc_exact_fl_transfer_pre_part1 gw obj wz next_fp a
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires transfer_aux_e);
+            chain_avoids_transfer gw g2 head_fp excl big_fuel
           end
         end
         else ()
@@ -2560,12 +2463,20 @@ private let alloc_from_block_preserves_wfh_part4
     let (g', _) = alloc_from_block g obj wz next_fp in
     hd_address_spec obj;
     hd_address_bounds obj;
-    if block_wz - wz >= 2 then begin
-      // Split case
+    if block_wz - wz >= 1 then begin
+      // Split, or a one-word leftover: the same two headers are written, the
+      // remainder at `hd` (blue, wosize leftover - 1) and the right-justified
+      // allocated block above it (white, wosize wz).  Both carry tag 0.
       alloc_split_facts_part1 g obj wz next_fp;
-      let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-      let rem_obj_nat = rem_hd_nat + 8 in
-      let rem_obj_addr : obj_addr = U64.uint_to_t rem_obj_nat in
+      let leftover = block_wz - wz in
+      let ahn = U64.v hd + leftover * 8 in
+      let rem_wz = leftover - 1 in
+      // wz >= 1 and hd + (block_wz + 1) * 8 <= heap_size leave a full word
+      // above the allocated header, so its object address is in range.
+      assert (ahn + 8 + wz * 8 == U64.v hd + (block_wz + 1) * 8);
+      assert (ahn + 8 < heap_size);
+      let alloc_obj_addr : obj_addr = U64.uint_to_t (ahn + 8) in
+      hd_address_of_succ (U64.uint_to_t ahn <: hp_addr) (alloc_obj_addr <: hp_addr);
       let aux (h: obj_addr) : Lemma
         (requires Seq.mem h (objects zero_addr g'))
         (ensures ~(is_infix h g'))
@@ -2573,13 +2484,12 @@ private let alloc_from_block_preserves_wfh_part4
         is_infix_spec h g';
         hd_address_spec h;
         if h = obj then begin
-          // Header = make_header wz white_bits 0UL → tag = 0
-          make_header_getTag (U64.uint_to_t wz) white_bits 0UL;
-          infix_tag_val ()
-        end else if h = rem_obj_addr then begin
-          // Header = make_header rem_wz blue_bits 0UL → tag = 0
-          let rem_wz = block_wz - wz - 1 in
+          // Header = make_header rem_wz blue_bits 0UL -> tag = 0
           make_header_getTag (U64.uint_to_t rem_wz) blue_bits 0UL;
+          infix_tag_val ()
+        end else if h = alloc_obj_addr then begin
+          // Header = make_header wz white_bits 0UL -> tag = 0
+          make_header_getTag (U64.uint_to_t wz) white_bits 0UL;
           infix_tag_val ()
         end else begin
           // Header unchanged from g, use part4 of g
@@ -2720,38 +2630,49 @@ private let rec alloc_search_preserves_wfh_part4
         else 0UL
       in
       if block_wz >= wz then begin
-        alloc_from_block_preserves_wfh_part4 g obj wz next_fp;
-        alloc_from_block_preserves_wfh_part1 g obj wz next_fp;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
-        if prev_fp = 0UL then ()
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
+        if prev_fp = 0UL then begin
+          alloc_from_block_preserves_wfh_part4 g obj wz next_fp;
+          alloc_from_block_preserves_wfh_part1 g obj wz next_fp
+        end
         else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
                 U64.v prev_fp % U64.v mword = 0 then begin
+          // Reordered: the link write runs first, on `g`, and the block writes
+          // on the result.  A body write preserves both shape invariants, and
+          // the block writes then see exactly the block they saw before.
           let prev : obj_addr = prev_fp in
-          alloc_from_block_objects_facts_part1 g obj wz next_fp;
-          assert (Seq.mem prev (objects zero_addr g'));
+          let gw = write_word g (prev <: hp_addr) new_fp in
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           hd_address_spec prev;
-          // prev's header lies outside the block, so allocation leaves it
-          // alone -- true in every arm, so no case split on leftover here.
           hd_address_bounds prev;
           wosize_of_object_spec obj g;
+          write_body_preserves_wfh_part4 g prev (prev <: hp_addr) new_fp;
+          write_body_preserves_wfh_part1 g prev (prev <: hp_addr) new_fp;
+          write_body_preserves_objects_local zero_addr g prev (prev <: hp_addr) new_fp;
+          // prev's block is disjoint from obj's, so obj's header survives.
           if U64.v prev < U64.v obj then begin
             objects_separated zero_addr g prev obj;
-            assert (U64.v (hd_address prev) + 8 <= U64.v hd)
+            assert (U64.v prev + 8 <= U64.v hd)
           end else begin
             objects_separated zero_addr g obj prev;
-            assert (U64.v prev > U64.v obj + block_wz * 8);
-            assert (U64.v (hd_address prev) >= U64.v hd + (block_wz + 1) * 8)
+            assert (U64.v hd + 8 <= U64.v prev)
           end;
-          alloc_from_block_read_outside g obj wz next_fp (hd_address prev);
-          wosize_of_object_spec prev g';
-          assert (wosize_of_object prev g' == wosize_of_object prev g);
-          assert (U64.v (wosize_of_object prev g') >= 1);
-          write_body_preserves_wfh_part4 g' prev (prev <: hp_addr) new_fp;
-          write_body_preserves_wfh_part1 g' prev (prev <: hp_addr) new_fp
+          read_write_different g (prev <: hp_addr) hd new_fp;
+          assert (objects zero_addr gw == objects zero_addr g);
+          assert (read_word gw hd == hdr);
+          assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          assert (Seq.mem obj (objects zero_addr gw));
+          alloc_from_block_preserves_wfh_part4 gw obj wz next_fp;
+          alloc_from_block_preserves_wfh_part1 gw obj wz next_fp
         end
-        else ()
+        else begin
+          alloc_from_block_preserves_wfh_part4 g obj wz next_fp;
+          alloc_from_block_preserves_wfh_part1 g obj wz next_fp
+        end
       end
       else begin
         fl_valid_next g cur_fp fuel;
@@ -2791,61 +2712,11 @@ let alloc_from_block_preserves_objects_part1 = alloc_from_block_preserves_object
 
 
 /// ---------------------------------------------------------------------------
-/// New objects are blue: alloc_from_block (split case)
+/// Right-justification creates exactly one object: the allocated block
 /// ---------------------------------------------------------------------------
 
-/// In the split case, new objects (not in original objects) are the remainder
-/// and it has a blue header.
-#restart-solver
-#push-options "--z3rlimit 50 --fuel 1 --ifuel 0"
-private let alloc_from_block_new_objects_blue_split
-  (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t) (h: obj_addr)
-  : Lemma (requires well_formed_heap_part1 g /\
-                    Seq.mem obj (objects zero_addr g) /\
-                    (let hdr = read_word g (hd_address obj) in
-                     let block_wz = U64.v (getWosize hdr) in
-                     block_wz >= wz /\ block_wz - wz >= 2) /\
-                    (let (g', _) = alloc_from_block g obj wz next_fp in
-                     Seq.mem h (objects zero_addr g') /\
-                     ~(Seq.mem h (objects zero_addr g))))
-          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
-                    is_blue h g' = true))
-  = alloc_split_facts_part1 g obj wz next_fp;
-    let hd = hd_address obj in
-    let hdr = read_word g hd in
-    let block_wz = U64.v (getWosize hdr) in
-    let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-    let rem_obj_nat = rem_hd_nat + 8 in
-    let rem_wz = block_wz - wz - 1 in
-    let (g3, _) = alloc_from_block g obj wz next_fp in
-    hd_address_spec obj;
-    // From split_new_mem_in_old_or_rem_part1: h ∈ objects(g) ∨ h = rem_obj
-    let aux_before (p: hp_addr) : Lemma
-      (requires U64.v p < U64.v hd)
-      (ensures read_word g3 p == read_word g p)
-    = alloc_split_g3_agrees_part1 g obj wz next_fp p
-    in
-    FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
-    objects_addresses_gt_start zero_addr g obj;
-    split_new_mem_in_old_or_rem_part1 zero_addr g g3 obj wz block_wz h;
-    // h ∉ objects(g), so h = rem_obj
-    assert (U64.v h == rem_obj_nat);
-    // The remainder header at rem_hd has blue_bits
-    let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-    let rem_hdr = make_header (U64.uint_to_t rem_wz) blue_bits 0UL in
-    // From alloc_split_facts_part1, read_word g3 rem_hd == rem_hdr
-    assert (read_word g3 rem_hd == rem_hdr);
-    // rem_hd = hd_address h (h = rem_obj = rem_hd + 8)
-    hd_address_of_succ rem_hd h;
-    assert (hd_address h == rem_hd);
-    // getColor rem_hdr = Blue
-    make_header_color_blue (U64.uint_to_t rem_wz);
-    // So color_of_object h g3 = Blue => is_blue h g3
-    color_of_object_spec h g3;
-    is_blue_iff h g3
-#pop-options
-
-/// In the exact case, no new objects appear.
+/// In the exact-fit case no object appears: only the header at `hd` is
+/// rewritten, and with the same wosize.
 #restart-solver
 #push-options "--z3rlimit 25 --fuel 1 --ifuel 0"
 private let alloc_from_block_no_new_objects_exact
@@ -2854,7 +2725,7 @@ private let alloc_from_block_no_new_objects_exact
                     Seq.mem obj (objects zero_addr g) /\
                     (let hdr = read_word g (hd_address obj) in
                      let block_wz = U64.v (getWosize hdr) in
-                     block_wz >= wz /\ block_wz - wz < 2) /\
+                     block_wz == wz) /\
                     (let (g', _) = alloc_from_block g obj wz next_fp in
                      Seq.mem h (objects zero_addr g')))
           (ensures Seq.mem h (objects zero_addr g))
@@ -2864,70 +2735,49 @@ private let alloc_from_block_no_new_objects_exact
     hd_address_spec obj;
     hd_address_bounds obj;
     alloc_from_block_exact g obj wz next_fp;
-    // Exact fit: g' = write_word g hd (make_header block_wz white_bits 0)
     let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
     make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
-    // New header has same wosize → objects are the same
     header_write_same_wosize_preserves_objects g obj alloc_hdr
 #pop-options
 
-/// Combined: alloc_from_block new objects are blue.
+/// The only object allocation can create is the RIGHT-JUSTIFIED allocated
+/// block, at `hd + leftover * 8 + 8`.  The remainder keeps `obj`'s address --
+/// it only shrinks -- so it is not new, which is exactly the structural gain
+/// of right-justification over placing the object at the low end.
 #restart-solver
-#push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
-private let alloc_from_block_new_objects_blue
+#push-options "--z3rlimit 50 --fuel 1 --ifuel 0"
+private let alloc_from_block_only_new_is_alloc
   (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t) (h: obj_addr)
   : Lemma (requires well_formed_heap_part1 g /\
                     Seq.mem obj (objects zero_addr g) /\
-                    (let hdr = read_word g (hd_address obj) in
-                     U64.v (getWosize hdr) >= wz /\ wz >= 1) /\
+                    (let hd = hd_address obj in
+                     let block_wz = U64.v (getWosize (read_word g hd)) in
+                     block_wz >= wz /\ wz >= 1 /\
+                     U64.v hd + (block_wz - wz) * 8 + 8 < heap_size) /\
                     (let (g', _) = alloc_from_block g obj wz next_fp in
                      Seq.mem h (objects zero_addr g') /\
                      ~(Seq.mem h (objects zero_addr g))))
-          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
-                    is_blue h g' = true))
-  = let hdr = read_word g (hd_address obj) in
+          (ensures (let hd = hd_address obj in
+                    let block_wz = U64.v (getWosize (read_word g hd)) in
+                    U64.v h == U64.v hd + (block_wz - wz) * 8 + 8))
+  = let hd = hd_address obj in
+    let hdr = read_word g hd in
     let block_wz = U64.v (getWosize hdr) in
-    if block_wz - wz >= 2 then
-      alloc_from_block_new_objects_blue_split g obj wz next_fp h
-    else
-      alloc_from_block_no_new_objects_exact g obj wz next_fp h  // absurd
-#pop-options
-
-/// Helper: writing at prev_fp preserves is_blue for h whose header is separate.
-#restart-solver
-#push-options "--z3rlimit 25 --fuel 0 --ifuel 0"
-private let write_prev_preserves_blue
-  (g': heap) (h: obj_addr) (prev_fp: U64.t) (val_fp: U64.t)
-  : Lemma (requires is_blue h g' = true /\
-                    prev_fp <> 0UL /\
-                    U64.v prev_fp >= U64.v mword /\
-                    U64.v prev_fp < heap_size /\
-                    U64.v prev_fp % U64.v mword = 0 /\
-                    prev_fp <> hd_address h)
-          (ensures (let g2 = write_word g' (prev_fp <: hp_addr) val_fp in
-                    is_blue h g2 = true))
-  = let hd = hd_address h in
-    hd_address_spec h;
-    hd_address_bounds h;
-    let g2 = write_word g' (prev_fp <: hp_addr) val_fp in
-    let p = U64.v (prev_fp <: hp_addr) in
-    let hv = U64.v hd in
-    FStar.Math.Lemmas.lemma_div_exact p 8;
-    FStar.Math.Lemmas.lemma_div_exact hv 8;
-    let kp = p / 8 in
-    let kh = hv / 8 in
-    if kp > kh then begin
-      FStar.Math.Lemmas.lemma_mult_le_right 8 (kh + 1) kp;
-      FStar.Math.Lemmas.distributivity_add_left kh 1 8
-    end else begin
-      FStar.Math.Lemmas.lemma_mult_le_right 8 (kp + 1) kh;
-      FStar.Math.Lemmas.distributivity_add_left kp 1 8
-    end;
-    read_write_different g' (prev_fp <: hp_addr) hd val_fp;
-    color_of_object_spec h g2;
-    color_of_object_spec h g';
-    is_blue_iff h g2;
-    is_blue_iff h g'
+    hd_address_spec obj;
+    hd_address_bounds obj;
+    if block_wz - wz >= 1 then begin
+      alloc_split_facts_part1 g obj wz next_fp;
+      let (g3, _) = alloc_from_block g obj wz next_fp in
+      let aux_before (p: hp_addr) : Lemma
+        (requires U64.v p < U64.v hd)
+        (ensures read_word g3 p == read_word g p)
+      = alloc_split_g3_agrees_part1 g obj wz next_fp p
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
+      objects_addresses_gt_start zero_addr g obj;
+      split_new_mem_in_old_or_rem_part1 zero_addr g g3 obj wz block_wz h
+    end else
+      alloc_from_block_no_new_objects_exact g obj wz next_fp h
 #pop-options
 
 /// ---------------------------------------------------------------------------
@@ -2975,102 +2825,67 @@ private let rec alloc_search_new_objects_blue_part1
         else 0UL
       in
       if block_wz >= wz then begin
-        // Found a suitable block
-        let (g', new_rem_fp) = alloc_from_block g obj wz next_fp in
-        // Prove: new objects in g' are blue
-        let aux_blue (x: obj_addr) : Lemma
-          (requires Seq.mem x (objects zero_addr g') /\ ~(Seq.mem x (objects zero_addr g)))
-          (ensures is_blue x g' = true)
-        = alloc_from_block_new_objects_blue g obj wz next_fp x
-        in
-        FStar.Classical.forall_intro (FStar.Classical.move_requires aux_blue);
-        if prev_fp = 0UL then ()
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
-                U64.v prev_fp % U64.v mword = 0 then begin
-          // heap_out = write_word g' prev_fp new_rem_fp
-          let prev : obj_addr = prev_fp in
-          // prev ≠ obj → prev's header is separate from obj's block
-          // Therefore the prev_fp write preserves objects and colors
-          assert (Seq.mem prev (objects zero_addr g));
-          alloc_from_block_objects_facts_part1 g obj wz next_fp;
-          assert (Seq.mem prev (objects zero_addr g'));
-          wosize_of_object_spec prev g;
-          wosize_of_object_bound prev g;
-          hd_address_spec prev;
-          // Show prev_fp header unchanged by alloc_from_block
-          if block_wz - wz >= 2 then begin
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
+        // Found a suitable block.  Right-justification makes this short: the
+        // only object allocation creates is `obj_out` itself, and `obj_out` is
+        // exactly what the statement excludes.
+        let leftover = block_wz - wz in
+        let ahn = U64.v hd + leftover * 8 in
+        if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then
+          // `alloc_search` bails here with obj_out = 0; nothing to prove.
+          ()
+        else begin
+          hd_address_bounds obj;
+          wosize_of_object_spec obj g;
+          wosize_of_object_bound obj g;
+          // The free-list replacement, read off transparently: `alloc_search`
+          // builds `gw` from this exact term, so use the same one here.
+          let new_rem_fp = alloc_replacement_fp g obj wz next_fp in
+          alloc_replacement_fp_eq g obj wz next_fp;
+          if prev_fp = 0UL then begin
+            let g' = fst (alloc_from_block g obj wz next_fp) in
+            let aux (x: obj_addr) : Lemma
+              (requires Seq.mem x (objects zero_addr g') /\
+                        ~(Seq.mem x (objects zero_addr g)))
+              (ensures U64.v x == ahn + 8)
+            = alloc_from_block_only_new_is_alloc g obj wz next_fp x
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+          end
+          else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                  U64.v prev_fp % U64.v mword = 0 then begin
+            // Reordered: the link write runs first, and it changes no object's
+            // header, so the enumeration it hands on is still `objects g`.
+            let prev : obj_addr = prev_fp in
+            let gw = write_word g (prev <: hp_addr) new_rem_fp in
+            let g2 = fst (alloc_from_block gw obj wz next_fp) in
+            wosize_of_object_spec prev g;
+            wosize_of_object_bound prev g;
+            hd_address_spec prev;
+            hd_address_bounds prev;
+            write_body_preserves_wfh_part1 g prev (prev <: hp_addr) new_rem_fp;
+            write_body_preserves_objects_local zero_addr g prev (prev <: hp_addr) new_rem_fp;
             if U64.v prev < U64.v obj then begin
               objects_separated zero_addr g prev obj;
-              alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
+              assert (U64.v prev + 8 <= U64.v hd)
             end else begin
-              wosize_of_object_spec obj g;
               objects_separated zero_addr g obj prev;
-              alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
-            end
-          end else begin
-            if U64.v prev < U64.v obj then
-              objects_separated zero_addr g prev obj
-            else
-              objects_separated zero_addr g obj prev;
-            alloc_from_block_exact g obj wz next_fp;
-            let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-            read_write_different g hd (hd_address prev) alloc_hdr
-          end;
-          wosize_of_object_spec prev g';
-          // write at prev_fp preserves objects
-          write_body_preserves_objects_local zero_addr g' prev (prev <: hp_addr) new_rem_fp;
-          // For any new object x: show is_blue x in write_word g'
-          let heap_out = write_word g' (prev <: hp_addr) new_rem_fp in
-          let aux_xfer (x: obj_addr) : Lemma
-            (requires Seq.mem x (objects zero_addr heap_out) /\
-                     ~(Seq.mem x (objects zero_addr g)))
-            (ensures is_blue x heap_out = true)
-          = // objects(heap_out) == objects(g'), so x ∈ objects(g')
-            assert (Seq.mem x (objects zero_addr g'));
-            // x ∉ objects(g) → is_blue x g'
-            assert (is_blue x g' = true);
-            // write at prev_fp preserves is_blue for x (prev_fp ≠ hd_address x)
-            hd_address_spec x;
-            // x is new (not in objects(g)), and prev ∈ objects(g)
-            // In the split case, x is the remainder with hd_address in block interior
-            // In the exact case, impossible (no new objects)
-            // Either way, prev_fp ≠ hd_address(x):
-            //   - If x is the remainder: hd(x) is in the block interior
-            //   - prev ∈ objects(g), prev ≠ obj, so prev is separate from obj's block
-            //   - So hd(prev) and prev are outside the block, while hd(x) is inside
-            //   - prev_fp = prev, and we need prev_fp ≠ hd_address(x)
-            //   - hd(x) is in [hd(obj)+wz*8+8, hd(obj)+block_wz*8)
-            //   - prev is outside [hd(obj), obj+block_wz*8)
-            // So prev ≠ hd(x).
-            if block_wz - wz >= 2 then begin
-              alloc_split_facts_part1 g obj wz next_fp;
-              let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-              let rem_obj_nat = rem_hd_nat + 8 in
-              // hd(x) = rem_hd (since x is rem_obj)
-              let aux_before (p: hp_addr) : Lemma
-                (requires U64.v p < U64.v hd)
-                (ensures read_word g' p == read_word g p)
-              = alloc_split_g3_agrees_part1 g obj wz next_fp p
-              in
-              FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
-              objects_addresses_gt_start zero_addr g obj;
-              split_new_mem_in_old_or_rem_part1 zero_addr g g' obj wz block_wz x;
-              assert (U64.v x == rem_obj_nat);
-              assert (U64.v (hd_address x) == rem_hd_nat);
-              // prev is separate from obj's block
-              wosize_of_object_spec obj g;
-              rem_hd_ne g obj prev (hd_address x) hd wz block_wz;
-              assert (prev_fp <> hd_address x);
-              write_prev_preserves_blue g' x prev_fp new_rem_fp
-            end else begin
-              // Exact fit: no new objects, contradiction
-              alloc_from_block_no_new_objects_exact g obj wz next_fp x
-            end
-          in
-          FStar.Classical.forall_intro (FStar.Classical.move_requires aux_xfer)
+              assert (U64.v hd + 8 <= U64.v prev)
+            end;
+            read_write_different g (prev <: hp_addr) hd new_rem_fp;
+            assert (objects zero_addr gw == objects zero_addr g);
+            assert (read_word gw hd == hdr);
+            assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+            assert (Seq.mem obj (objects zero_addr gw));
+            let aux (x: obj_addr) : Lemma
+              (requires Seq.mem x (objects zero_addr g2) /\
+                        ~(Seq.mem x (objects zero_addr gw)))
+              (ensures U64.v x == ahn + 8)
+            = alloc_from_block_only_new_is_alloc gw obj wz next_fp x
+            in
+            FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+          end
+          else ()
         end
-        else ()
       end
       else begin
         if U64.v hd + 16 <= heap_size then begin
@@ -3096,36 +2911,14 @@ let alloc_spec_new_objects_blue_part1 (g: heap) (fp: U64.t) (requested_wz: nat)
 
 /// ---------------------------------------------------------------------------
 /// alloc_from_block_objects_backward_part1:
-/// Backward inclusion — new objects in g' that weren't in g must be the remainder.
+/// Backward inclusion -- the only new object is the right-justified block.
 /// ---------------------------------------------------------------------------
 
 #restart-solver
 #push-options "--z3rlimit 50 --fuel 0 --ifuel 0"
 let alloc_from_block_objects_backward_part1
   (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t) (h: obj_addr)
-  = alloc_split_facts_part1 g obj wz next_fp;
-    let hd = hd_address obj in
-    let hdr = read_word g hd in
-    let block_wz = U64.v (getWosize hdr) in
-    let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-    let rem_obj_nat = rem_hd_nat + 8 in
-    let (g3, rem_fp) = alloc_from_block g obj wz next_fp in
-    hd_address_spec obj;
-    // Use split_new_mem_in_old_or_rem_part1: h ∈ objects(g) ∨ h = rem_obj
-    let aux_before (p: hp_addr) : Lemma
-      (requires U64.v p < U64.v hd)
-      (ensures read_word g3 p == read_word g p)
-    = alloc_split_g3_agrees_part1 g obj wz next_fp p
-    in
-    FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
-    objects_addresses_gt_start zero_addr g obj;
-    split_new_mem_in_old_or_rem_part1 zero_addr g g3 obj wz block_wz h;
-    // h ∉ objects(g), so h must be rem_obj
-    assert (U64.v h == rem_obj_nat);
-    // rem_fp = rem_obj from alloc_split_facts_part1
-    assert (rem_fp == U64.uint_to_t rem_obj_nat);
-    // Therefore h = rem_fp = snd(alloc_from_block ...)
-    assert (U64.v h == U64.v rem_fp)
+  = alloc_from_block_only_new_is_alloc g obj wz next_fp h
 #pop-options
 
 
@@ -3190,14 +2983,18 @@ private let alloc_from_block_preserves_no_black_part1
     hd_address_spec obj;
     getWosize_bound hdr;
     wosize_of_object_spec obj g;
-    if block_wz - wz >= 2 then begin
-      // Split case
+    if block_wz - wz >= 1 then begin
+      // Split, or a one-word leftover: the remainder keeps `hd` and turns
+      // blue, and the right-justified allocated block above it turns white.
+      // Neither is black, and nothing else is touched.
       alloc_split_facts_part1 g obj wz next_fp;
-      let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-      let rem_obj_nat = rem_hd_nat + 8 in
-      let rem_wz = block_wz - wz - 1 in
-      let rem_hd : hp_addr = U64.uint_to_t rem_hd_nat in
-      let rem_obj_addr : obj_addr = U64.uint_to_t rem_obj_nat in
+      let leftover = block_wz - wz in
+      let ahn = U64.v hd + leftover * 8 in
+      let rem_wz = leftover - 1 in
+      assert (ahn + 8 + wz * 8 == U64.v hd + (block_wz + 1) * 8);
+      assert (ahn + 8 < heap_size);
+      let alloc_obj_addr : obj_addr = U64.uint_to_t (ahn + 8) in
+      hd_address_of_succ (U64.uint_to_t ahn <: hp_addr) (alloc_obj_addr <: hp_addr);
       // Frame: reads before hd_address(obj) are preserved
       let aux_before (p: hp_addr) : Lemma
         (requires U64.v p < U64.v hd)
@@ -3205,7 +3002,7 @@ private let alloc_from_block_preserves_no_black_part1
       = alloc_split_g3_agrees_part1 g obj wz next_fp p
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires aux_before);
-      // Color facts for new/modified objects
+      // Color facts for the two rewritten headers
       make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
       getColor_raw (make_header (U64.uint_to_t wz) white_bits 0UL);
       make_header_getColor (U64.uint_to_t rem_wz) blue_bits 0UL;
@@ -3215,19 +3012,20 @@ private let alloc_from_block_preserves_no_black_part1
         (ensures ~(is_black h g'))
       = objects_addresses_gt_start zero_addr g obj;
         split_new_mem_in_old_or_rem_part1 zero_addr g g' obj wz block_wz h;
-        if U64.v h = rem_obj_nat then begin
-          // New remainder object: blue header → not black
-          hd_address_spec rem_obj_addr;
-          color_of_object_spec rem_obj_addr g';
-          is_black_iff rem_obj_addr g'
+        if U64.v h = ahn + 8 then begin
+          // The allocated block: white header -> not black
+          hd_address_spec alloc_obj_addr;
+          color_of_object_spec alloc_obj_addr g';
+          is_black_iff alloc_obj_addr g'
         end else begin
           assert (Seq.mem h (objects zero_addr g));
           if h = obj then begin
-            // Allocated block: white header → not black
+            // The remainder, still at `obj`: blue header -> not black
+            hd_address_spec obj;
             color_of_object_spec obj g';
             is_black_iff obj g'
           end else begin
-            // Pre-existing other object: header unchanged → not black
+            // Pre-existing other object: header unchanged -> not black
             hd_address_spec h;
             if U64.v h < U64.v obj then begin
               objects_separated zero_addr g h obj;
@@ -3316,48 +3114,43 @@ private let rec alloc_search_preserves_no_black_part1
         else 0UL
       in
       if block_wz >= wz then begin
-        alloc_from_block_preserves_no_black_part1 g obj wz next_fp;
-        let (g', new_fp) = alloc_from_block g obj wz next_fp in
-        if prev_fp = 0UL then ()
+        // The free-list replacement, read off transparently: `alloc_search`
+        // builds `gw` from this exact term, so use the same one here.
+        let new_fp = alloc_replacement_fp g obj wz next_fp in
+        alloc_replacement_fp_eq g obj wz next_fp;
+        if prev_fp = 0UL then
+          alloc_from_block_preserves_no_black_part1 g obj wz next_fp
         else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
                 U64.v prev_fp % U64.v mword = 0 then begin
+          // Reordered: the link write runs first, on `g`.  A body write
+          // touches no header, so no colour changes; the block writes then
+          // run on a heap that still has no black object.
           let prev : obj_addr = prev_fp in
-          alloc_from_block_objects_facts_part1 g obj wz next_fp;
-          assert (Seq.mem prev (objects zero_addr g'));
-          alloc_from_block_preserves_wfh_part1 g obj wz next_fp;
+          let gw = write_word g (prev <: hp_addr) new_fp in
           hd_address_spec prev;
+          hd_address_bounds prev;
           wosize_of_object_spec prev g;
           wosize_of_object_bound prev g;
           wfh_part1_obj_bound g prev;
-          if block_wz - wz >= 2 then begin
-            let rem_hd_nat = U64.v hd + (1 + wz) * 8 in
-            let rem_obj_nat = rem_hd_nat + 8 in
-            if U64.v prev < U64.v obj then begin
-              objects_separated zero_addr g prev obj;
-              alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
-            end else begin
-              objects_separated zero_addr g obj prev;
-              assert (U64.v prev > U64.v obj + block_wz * 8);
-              assert (U64.v (hd_address prev) > U64.v obj + block_wz * 8 - 8);
-              assert (U64.v (hd_address prev) <> U64.v hd);
-              assert (U64.v (hd_address prev) <> rem_hd_nat);
-              assert (U64.v (hd_address prev) <> rem_obj_nat);
-              alloc_split_g3_agrees_part1 g obj wz next_fp (hd_address prev)
-            end
+          field_write_preserves_no_black_part1 g prev (prev <: hp_addr) new_fp;
+          write_body_preserves_wfh_part1 g prev (prev <: hp_addr) new_fp;
+          write_body_preserves_objects_local zero_addr g prev (prev <: hp_addr) new_fp;
+          if U64.v prev < U64.v obj then begin
+            objects_separated zero_addr g prev obj;
+            assert (U64.v prev + 8 <= U64.v hd)
           end else begin
-            if U64.v prev < U64.v obj then
-              objects_separated zero_addr g prev obj
-            else
-              objects_separated zero_addr g obj prev;
-            let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-            alloc_from_block_exact g obj wz next_fp;
-            read_write_different g hd (hd_address prev) alloc_hdr
+            objects_separated zero_addr g obj prev;
+            assert (U64.v hd + 8 <= U64.v prev)
           end;
-          wosize_of_object_spec prev g';
-          assert (wosize_of_object prev g' == wosize_of_object prev g);
-          field_write_preserves_no_black_part1 g' prev (prev <: hp_addr) new_fp
+          read_write_different g (prev <: hp_addr) hd new_fp;
+          assert (objects zero_addr gw == objects zero_addr g);
+          assert (read_word gw hd == hdr);
+          assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          assert (Seq.mem obj (objects zero_addr gw));
+          alloc_from_block_preserves_no_black_part1 gw obj wz next_fp
         end
-        else ()
+        else
+          alloc_from_block_preserves_no_black_part1 g obj wz next_fp
       end
       else begin
         fl_valid_elim g cur_fp fuel;

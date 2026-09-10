@@ -1057,3 +1057,30 @@ let rec walk_chain_valid_preserved (g g2: heap) (fp excl: U64.t) (d fuel: nat)
 /// Corollary: the `heap_words` budget baked into `alloc_spec` never binds.
 /// Any surplus fuel leaves the answer unchanged, so `alloc_spec` reports OOM
 /// only when the free list genuinely holds no block of the requested size.
+
+/// ---------------------------------------------------------------------------
+/// chain_avoids for addresses that are not objects
+/// ---------------------------------------------------------------------------
+
+#push-options "--z3rlimit 20 --fuel 2 --ifuel 1"
+let rec chain_avoids_non_object (g: heap) (fp: U64.t) (excl: obj_addr) (fuel: nat)
+  : Lemma (requires GC.Spec.Allocator.Lemmas.Common.fl_valid g fp fuel /\
+                    ~(Seq.mem (excl <: U64.t) (objects zero_addr g)))
+          (ensures chain_avoids g fp (excl <: U64.t) fuel = true)
+          (decreases fuel)
+  = if fp = 0UL then ()
+    else if U64.v fp < U64.v mword then ()
+    else if U64.v fp >= heap_size then ()
+    else if U64.v fp % U64.v mword <> 0 then ()
+    else if fuel = 0 then ()
+    else begin
+      // fl_valid puts `fp` in objects, and `excl` is not there, so fp <> excl.
+      GC.Spec.Allocator.Lemmas.Common.fl_valid_gives_mem g fp fuel;
+      let hd = hd_address (fp <: obj_addr) in
+      if U64.v hd + 16 > heap_size then ()
+      else begin
+        GC.Spec.Allocator.Lemmas.Common.fl_valid_next g fp fuel;
+        chain_avoids_non_object g (read_word g (fp <: obj_addr)) excl (fuel - 1)
+      end
+    end
+#pop-options

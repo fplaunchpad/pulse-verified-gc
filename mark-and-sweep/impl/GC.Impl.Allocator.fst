@@ -157,7 +157,8 @@ fn init_heap (heap: heap_t)
 #push-options "--z3rlimit 25"
 fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
   requires is_heap heap 's **
-           pure (SF.well_formed_heap 's)
+           pure (SF.well_formed_heap 's /\
+                 U64.v wosize >= 1)
   returns res: (U64.t & U64.t)
   ensures exists* s2. is_heap heap s2 **
     pure (let spec_res = SA.alloc_spec 's fp (U64.v wosize) in
@@ -165,8 +166,9 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
           fst res == spec_res.fp_out /\
           snd res == spec_res.obj_out)
 {
-  // Ensure wosize >= 1 (need at least 1 word for free-list link)
-  let wz : U64.t = (if U64.eq wosize 0UL then 1UL else wosize);
+  // wosize >= 1 by precondition, so `alloc_spec`'s own 0 -> 1 bump is the
+  // identity here and there is nothing to adjust.
+  let wz : U64.t = wosize;
 
   // Mutable state for the search loop
   let mut head_fp = fp;
@@ -443,7 +445,8 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
   requires is_heap heap 's **
            pure (SF.well_formed_heap_part1 's /\
                  AllocLemmas.fl_valid 's fp SpecBase.heap_words /\
-                 AllocLemmas.fl_chain_terminates 's fp SpecBase.heap_words)
+                 AllocLemmas.fl_chain_terminates 's fp SpecBase.heap_words /\
+                 U64.v wosize >= 1)
   returns res: (U64.t & U64.t)
   ensures exists* s2. is_heap heap s2 **
     pure (let spec_res = SA.alloc_spec 's fp (U64.v wosize) in
@@ -451,8 +454,9 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
           fst res == spec_res.fp_out /\
           snd res == spec_res.obj_out)
 {
-  // Ensure wosize >= 1 (need at least 1 word for free-list link)
-  let wz : U64.t = (if U64.eq wosize 0UL then 1UL else wosize);
+  // wosize >= 1 by precondition, so `alloc_spec`'s own 0 -> 1 bump is the
+  // identity here and there is nothing to adjust.
+  let wz : U64.t = wosize;
 
   // Mutable state for the search loop
   let mut head_fp = fp;

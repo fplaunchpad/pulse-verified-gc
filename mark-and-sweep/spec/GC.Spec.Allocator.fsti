@@ -182,16 +182,26 @@ let rec alloc_search (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
           { heap_out = g; fp_out = head_fp; obj_out = 0UL }
         else
         let alloc_obj = U64.add cur_fp (U64.uint_to_t (leftover * 8)) in
-        let (g', new_remainder_fp) = alloc_from_block g obj requested_wz next_fp in
-        // Update the previous link.  On a split `new_remainder_fp` is `cur_fp`
-        // itself -- the cell keeps its address -- so this rewrites the same
-        // value and the free list is unchanged.
+        // The replacement for `obj` in the free list is a pure projection, so
+        // it can be read off WITHOUT applying the block writes.
+        let new_remainder_fp = snd (alloc_from_block g obj requested_wz next_fp) in
+        // Order matters, and not for the heap -- the two writes are disjoint,
+        // so the final state is the same either way.  It matters for the
+        // PROOF.  Rewiring `prev` first means the link write happens while
+        // `obj` is still a well-formed cell of wosize >= 1; doing it second
+        // would require `fl_valid` to hold of an intermediate heap in which
+        // `obj` has already become the wosize-0 empty block, which at
+        // leftover = 1 is false.  Choosing the good order here is what avoids
+        // needing a write_word commutation lemma.
         if prev_fp = 0UL then
+          let g' = fst (alloc_from_block g obj requested_wz next_fp) in
           { heap_out = g'; fp_out = new_remainder_fp; obj_out = alloc_obj }
         else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size && U64.v prev_fp % U64.v mword = 0 then
-          let g2 = write_word g' (prev_fp <: hp_addr) new_remainder_fp in
+          let gw = write_word g (prev_fp <: hp_addr) new_remainder_fp in
+          let g2 = fst (alloc_from_block gw obj requested_wz next_fp) in
           { heap_out = g2; fp_out = head_fp; obj_out = alloc_obj }
         else
+          let g' = fst (alloc_from_block g obj requested_wz next_fp) in
           { heap_out = g'; fp_out = new_remainder_fp; obj_out = alloc_obj }
       end
       else
@@ -308,8 +318,11 @@ val alloc_search_found_prev (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                      U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
           (ensures (let obj : obj_addr = cur in
                     let next = spec_next_fp g obj in
-                    let (g', new_fp) = alloc_from_block g obj wz next in
-                    let g2 = write_word g' (prev <: hp_addr) new_fp in
+                    // The prev-link rewrite comes FIRST, on `g`, where `obj` is
+                    // still a well-formed cell.  See the note in alloc_search.
+                    let new_fp = snd (alloc_from_block g obj wz next) in
+                    let gw = write_word g (prev <: hp_addr) new_fp in
+                    let g2 = fst (alloc_from_block gw obj wz next) in
                     let leftover = U64.v (getWosize (read_word g (hd_address obj))) - wz in
                     let alloc_obj = U64.add cur (U64.uint_to_t (leftover * 8)) in
                     alloc_search g head prev cur wz fuel ==

@@ -227,7 +227,15 @@ let rec alloc_search (g: heap) (head_fp: U64.t) (prev_fp: U64.t)
         if prev_fp = 0UL then
           let g' = fst (alloc_from_block g obj requested_wz next_fp) in
           { heap_out = g'; fp_out = new_remainder_fp; obj_out = alloc_obj }
-        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size && U64.v prev_fp % U64.v mword = 0 then
+        // `prev_fp <> hd` rules out one degenerate shape: the predecessor's
+        // OBJECT address being this block's HEADER word, which means the
+        // predecessor has wosize 0.  `fl_valid` excludes that -- a cell keeps
+        // its link in field 0, so it has wosize >= 1 -- but `alloc_search` is
+        // total and assumes nothing, and letting it through would have the
+        // link write clobber the header the block writes then read back.
+        // Such a `prev` is treated exactly like an invalid one.
+        else if U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                U64.v prev_fp % U64.v mword = 0 && U64.v prev_fp <> U64.v hd then
           let gw = write_word g (prev_fp <: hp_addr) new_remainder_fp in
           let g2 = fst (alloc_from_block gw obj requested_wz next_fp) in
           { heap_out = g2; fp_out = head_fp; obj_out = alloc_obj }
@@ -318,9 +326,16 @@ val alloc_search_found_head (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                     U64.v cur >= U64.v zero_addr + U64.v mword /\
                     U64.v cur < heap_size /\
                     U64.v cur % U64.v mword = 0 /\
-                    prev = 0UL /\
                     (let hd = hd_address (cur <: obj_addr) in
                      let bwz = U64.v (getWosize (read_word g hd)) in
+                     // `prev` is not usable as a predecessor: either there is
+                     // none, or it is out of range / misaligned, or it is the
+                     // degenerate wosize-0 shape.  All three take the same
+                     // arm -- allocate, and report the block's replacement as
+                     // the new head.
+                     (prev = 0UL \/
+                      U64.v prev < U64.v mword \/ U64.v prev >= heap_size \/
+                      U64.v prev % U64.v mword <> 0 \/ U64.v prev = U64.v hd) /\
                      bwz >= wz /\
                      // the right-justified object must be in bounds, matching
                      // the guard in alloc_search
@@ -347,6 +362,8 @@ val alloc_search_found_prev (g: heap) (head prev cur: U64.t) (wz: nat) (fuel: na
                     U64.v prev % U64.v mword = 0 /\
                     (let hd = hd_address (cur <: obj_addr) in
                      let bwz = U64.v (getWosize (read_word g hd)) in
+                     // see the note on the degenerate shape in `alloc_search`
+                     U64.v prev <> U64.v hd /\
                      bwz >= wz /\
                      U64.v hd + (bwz - wz) * 8 + 8 < heap_size))
           (ensures (let obj : obj_addr = cur in

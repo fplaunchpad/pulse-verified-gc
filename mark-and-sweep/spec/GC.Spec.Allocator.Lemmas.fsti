@@ -293,6 +293,16 @@ val write_body_preserves_objects_local :
       U64.v addr % 8 = 0)
     (ensures objects start (write_word g addr v) == objects start g)
 
+/// Writing within an object body preserves well_formed_heap_part1.
+val write_body_preserves_wfh_part1 :
+  (g: heap) -> (obj: obj_addr) -> (addr: hp_addr) -> (v: U64.t) ->
+  Lemma (requires well_formed_heap_part1 g /\
+                  Seq.mem obj (objects zero_addr g) /\
+                  U64.v addr >= U64.v obj /\
+                  U64.v addr < U64.v obj + (U64.v (wosize_of_object obj g) * 8) /\
+                  U64.v addr % 8 = 0)
+        (ensures well_formed_heap_part1 (write_word g addr v))
+
 /// **Theorem**: old objects survive alloc_from_block (forward inclusion).
 val alloc_from_block_objects_facts_part1 :
   (g: heap) -> (obj: obj_addr) -> (wz: nat) -> (next_fp: U64.t) ->

@@ -602,6 +602,8 @@ private let rec alloc_search_preserves_wfh_part1
           // Step 2: obj's header is untouched, so the block is the same size.
           read_write_different g (prev <: hp_addr) hd new_fp;
           assert (read_word gw hd == hdr);
+          assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           alloc_from_block_preserves_wfh_part1 gw obj wz next_fp
         end
         else ()
@@ -1288,6 +1290,7 @@ private let rec alloc_search_preserves_fl_valid_part1
           // each transfer lemma's precondition is stated over `read_word gw hd`
           // and Z3 does not chase it back to `hdr` on its own.
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           assert (Seq.mem obj (objects zero_addr gw));
 
           // --- Step 3: carry fl_valid across the block writes, gw -> g2 ---
@@ -1635,6 +1638,7 @@ private let rec alloc_search_preserves_fl_chain_terminates_part1
           assert (objects zero_addr gw == objects zero_addr g);
           assert (read_word gw hd == hdr);
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           assert (Seq.mem obj (objects zero_addr gw));
 
           // --- Step 3: carry termination across the block writes, gw -> g2 ---
@@ -1928,6 +1932,7 @@ private let rec alloc_search_obj_not_in_chain_part1
             assert (objects zero_addr gw == objects zero_addr g);
             assert (read_word gw hd == hdr);
             assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+            getWosize_bound hdr;
             assert (Seq.mem obj (objects zero_addr gw));
 
             // --- Step 3: carry the avoidance across the block writes ---
@@ -2121,6 +2126,7 @@ private let rec alloc_search_read_other
           read_write_different g (prev <: hp_addr) hd new_fp;
           assert (read_word gw hd == hdr);
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           alloc_from_block_read_outside gw obj wz next_fp addr
         end
         else
@@ -2400,6 +2406,7 @@ private let rec alloc_search_preserves_chain_avoids_other
           assert (objects zero_addr gw == objects zero_addr g);
           assert (read_word gw hd == hdr);
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           assert (Seq.mem obj (objects zero_addr gw));
 
           // --- Step 3: carry it across the block writes ---
@@ -2751,6 +2758,7 @@ private let rec alloc_search_preserves_wfh_part4
           assert (objects zero_addr gw == objects zero_addr g);
           assert (read_word gw hd == hdr);
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           assert (Seq.mem obj (objects zero_addr gw));
           alloc_from_block_preserves_wfh_part4 gw obj wz next_fp;
           alloc_from_block_preserves_wfh_part1 gw obj wz next_fp
@@ -2962,6 +2970,7 @@ private let rec alloc_search_new_objects_blue_part1
             assert (objects zero_addr gw == objects zero_addr g);
             assert (read_word gw hd == hdr);
             assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+            getWosize_bound hdr;
             assert (Seq.mem obj (objects zero_addr gw));
             let aux (x: obj_addr) : Lemma
               (requires Seq.mem x (objects zero_addr g2) /\
@@ -3233,6 +3242,7 @@ private let rec alloc_search_preserves_no_black_part1
           assert (objects zero_addr gw == objects zero_addr g);
           assert (read_word gw hd == hdr);
           assert (U64.v (getWosize (read_word gw hd)) == block_wz);
+          getWosize_bound hdr;
           assert (Seq.mem obj (objects zero_addr gw));
           alloc_from_block_preserves_no_black_part1 gw obj wz next_fp
         end

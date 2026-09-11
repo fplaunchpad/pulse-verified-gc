@@ -452,8 +452,8 @@ private let alloc_from_block_exact_dense
     SA.alloc_from_block_exact g obj wz next_fp;
     hd_address_spec obj;
     hd_address_bounds obj;
-    let ahdr = make_header (U64.uint_to_t bwz) white_bits 0UL in
-    AllocLemmas.make_header_getWosize (U64.uint_to_t bwz) white_bits 0UL;
+    let ahdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+    AllocLemmas.make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
     // All wosizes preserved (only hd_address(obj) written, same wosize)
     let hd_obj = hd_address obj in
     let aux_wz (p: hp_addr) : Lemma (getWosize (read_word g' p) == getWosize (read_word g p))

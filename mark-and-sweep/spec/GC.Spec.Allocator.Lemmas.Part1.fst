@@ -437,10 +437,14 @@ let alloc_from_block_objects_facts_part1
       in
       FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
     end else begin
-      // Exact fit case: objects are the same
+      // Exact fit: only the header at hd is rewritten, and right-justification
+      // writes it with `wz`, not `block_wz`.  They are equal here, but the
+      // lemma has to name the term `alloc_from_block` actually writes --
+      // otherwise the header write never matches and the goal is unprovable
+      // at any rlimit.
       alloc_from_block_exact g obj wz next_fp;
-      let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-      make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
+      let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
       header_write_same_wosize_preserves_objects g obj alloc_hdr
     end
 #pop-options

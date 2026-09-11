@@ -738,13 +738,13 @@ private let alloc_exact_fl_transfer_pre_part1
   = let hd = hd_address obj in
     let hdr = read_word g hd in
     let block_wz = U64.v (getWosize hdr) in
-    let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
+    let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
     alloc_from_block_exact g obj wz next_fp;
     let g' = write_word g hd alloc_hdr in
     hd_address_spec obj;
     hd_address_bounds obj;
     getWosize_bound hdr;
-    make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
+    make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
     header_write_same_wosize_preserves_objects g obj alloc_hdr;
     if U64.v (wosize_of_object a g) >= 1 then begin
       hd_address_spec a;
@@ -2612,8 +2612,8 @@ private let alloc_from_block_preserves_wfh_part4
     end else begin
       // Exact fit case: g' = write_word g hd (make_header block_wz white_bits 0UL)
       alloc_from_block_exact g obj wz next_fp;
-      let new_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-      make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
+      let new_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+      make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
       header_write_same_wosize_preserves_objects g obj new_hdr;
       let aux (h: obj_addr) : Lemma
         (requires Seq.mem h (objects zero_addr g'))
@@ -2622,7 +2622,7 @@ private let alloc_from_block_preserves_wfh_part4
         is_infix_spec h g';
         hd_address_spec h;
         if h = obj then begin
-          make_header_getTag (U64.uint_to_t block_wz) white_bits 0UL;
+          make_header_getTag (U64.uint_to_t wz) white_bits 0UL;
           read_write_same g hd new_hdr;
           infix_tag_val ()
         end else begin
@@ -2829,8 +2829,8 @@ private let alloc_from_block_no_new_objects_exact
     hd_address_spec obj;
     hd_address_bounds obj;
     alloc_from_block_exact g obj wz next_fp;
-    let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
-    make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
+    let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+    make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
     header_write_same_wosize_preserves_objects g obj alloc_hdr
 #pop-options
 
@@ -3139,12 +3139,12 @@ private let alloc_from_block_preserves_no_black_part1
     end else begin
       // Exact fit case
       alloc_from_block_exact g obj wz next_fp;
-      let alloc_hdr = make_header (U64.uint_to_t block_wz) white_bits 0UL in
+      let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
       getWosize_bound hdr;
-      make_header_getWosize (U64.uint_to_t block_wz) white_bits 0UL;
+      make_header_getWosize (U64.uint_to_t wz) white_bits 0UL;
       header_write_same_wosize_preserves_objects g obj alloc_hdr;
       read_write_same g hd alloc_hdr;
-      make_header_getColor (U64.uint_to_t block_wz) white_bits 0UL;
+      make_header_getColor (U64.uint_to_t wz) white_bits 0UL;
       getColor_raw alloc_hdr;
       let aux (h: obj_addr) : Lemma
         (requires Seq.mem h (objects zero_addr g'))

@@ -100,6 +100,23 @@ the right fix for the degenerate shape above.  Transparent, it put two nested
 `GC.Spec.Allocator.fst` 22s -> 610s, with knock-on timeouts in Part1 and Core.
 Folded into the arm's condition instead, the body stays the same size: 13.7s.
 
+**A stale term is not a flake, and `--retry` will hide the difference.**
+`alloc_from_block_objects_facts_part1` began failing without `--retry`, and I
+called it pre-existing on the strength of one retry-enabled run.  It was not:
+measured against the branch point, base passes 3/3 and HEAD failed 3/3,
+deterministically.  The cause was mine -- the exact-fit arm still built
+`make_header (uint_to_t block_wz)` while right-justification had changed
+`alloc_from_block` to write `make_header (uint_to_t wz)`.  Equal values,
+different terms, so the header write never matched; no rlimit could have
+fixed it (150 and 400 were both tried).  Naming the term the spec actually
+writes took it to 16.5s -- faster than base.  Four more sites carried the
+same stale term and were absorbing the cost silently; they are aligned too.
+
+The lesson is about method, not F*: `--retry` is there for genuine Z3
+flakiness, and it will happily mask a deterministic regression as one.  A
+claim of "pre-existing" is worth an A/B against the branch point before it
+is made.
+
 **Trivial goals fail in large contexts.**  `block_wz == wz` in an exact-fit
 arm, `d > 0` under `if d = 0`, two aligned addresses being a word apart —
 all linear arithmetic, all timing out at rlimit 400 inside these proofs.  The
@@ -126,7 +143,7 @@ Per-module, measured individually with `--retry` off:
 |---|---|
 | `GC.Spec.Allocator.fst` | 13.7s |
 | `GC.Spec.Allocator.Lemmas.Chain.fst` | 14.7s |
-| `GC.Spec.Allocator.Lemmas.Part1.fst` | 25.5s (needs `--retry`; pre-existing flake) |
+| `GC.Spec.Allocator.Lemmas.Part1.fst` | 16.5s |
 | `GC.Spec.Allocator.Lemmas.Core.fst` | 4.1s |
 | `GC.Spec.Allocator.Lemmas.Part2.fst` | 75.9s |
 | `GC.Impl.Allocator.fst` | 39.1s |

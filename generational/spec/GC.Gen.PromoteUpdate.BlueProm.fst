@@ -511,6 +511,18 @@ private let chain_blue_proof_for_excl
     copy_fields_other_hdr_precond new_major excl dst_obj wosize;
     copy_fields_preserves_other minor new_major obj dst_obj 0 wosize (hd_address excl);
     color_of_header_eq excl res.major_out new_major;
+    // `alloc_spec_read_header_other_part1` now needs `excl` off the free
+    // list: right-justification rewrites the remainder's header as well as
+    // the allocated one.  A cell is blue and stays blue, and the copy that
+    // follows leaves its header alone, so a non-blue `excl` is not one.
+    reveal_opaque (`%chain_objects_blue) chain_objects_blue;
+    (if AllocLemmas.chain_avoids major fp (excl <: U64.t) heap_words = false then begin
+       assert (is_blue excl major = true);
+       GC.Gen.AllocProps.alloc_spec_preserves_blue_part1 major fp wosize excl;
+       is_blue_iff excl new_major;
+       is_blue_iff excl res.major_out;
+       assert False
+     end else ());
     GC.Gen.AllocProps.alloc_spec_read_header_other_part1 major fp wosize excl;
     color_of_header_eq excl new_major major;
     assert (is_blue excl major = false);

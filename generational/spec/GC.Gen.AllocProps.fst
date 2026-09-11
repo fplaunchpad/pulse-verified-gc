@@ -1033,6 +1033,197 @@ let alloc_spec_obj_not_blue_part1 (g: heap) (fp: U64.t) (requested_wz: nat)
     alloc_search_obj_white g fp 0UL fp wz heap_words
 #pop-options
 
+/// ---------------------------------------------------------------------------
+/// A blue object other than the allocated block stays blue
+/// ---------------------------------------------------------------------------
+///
+/// Only two headers are written: the remainder's at `hd`, which turns BLUE,
+/// and the allocated block's, which turns white -- and that one is `obj_out`.
+/// So every other object keeps its colour outright, and the block the
+/// allocation came out of keeps its colour by accident of both being blue.
+///
+/// This is what lets a caller rule out "gray or black afterwards" for a
+/// free-list cell, which under right-justification it can no longer get from
+/// `alloc_spec_read_header_other_part1` -- that one now wants the object off
+/// the chain, which is exactly the fact being established.
+#push-options "--z3rlimit 50 --fuel 1 --ifuel 0"
+let alloc_from_block_preserves_blue
+  (g: heap) (obj: obj_addr) (wz: nat) (next_fp: U64.t) (h: obj_addr)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    Seq.mem obj (objects zero_addr g) /\
+                    Seq.mem (h <: U64.t) (objects zero_addr g) /\
+                    is_blue h g = true /\
+                    (let hd = hd_address obj in
+                     let bwz = U64.v (getWosize (read_word g hd)) in
+                     bwz >= wz /\ wz >= 1 /\
+                     U64.v hd + (bwz - wz) * 8 + 8 < heap_size /\
+                     U64.v h <> U64.v hd + (bwz - wz) * 8 + 8))
+          (ensures (let (g', _) = alloc_from_block g obj wz next_fp in
+                    is_blue h g' = true))
+  = let hd = hd_address obj in
+    hd_address_spec obj;
+    hd_address_bounds obj;
+    hd_address_spec h;
+    hd_address_bounds h;
+    let hdr = read_word g hd in
+    let bwz = U64.v (getWosize hdr) in
+    let leftover = bwz - wz in
+    wfh_part1_obj_bound g obj;
+    aligned_plus_mul8 (U64.v hd) leftover;
+    let ahn = U64.v hd + leftover * 8 in
+    let ah : hp_addr = mk_hp_addr ahn in
+    let (g', _) = alloc_from_block g obj wz next_fp in
+    let alloc_hdr = make_header (U64.uint_to_t wz) white_bits 0UL in
+    // `hd_address h = ah` would make h the allocated block, which is excluded
+    f_address_spec ah;
+    assert (U64.v (hd_address h) == U64.v h - 8);
+    assert (U64.v (hd_address h) <> ahn);
+    if leftover = 0 then begin
+      // single write, at hd; h = obj keeps a white header, so h <> obj
+      GC.Spec.Allocator.alloc_from_block_exact g obj wz next_fp;
+      assert (ahn == U64.v hd);
+      assert (U64.v (hd_address h) <> U64.v hd);
+      write_preserves_color g h hd alloc_hdr;
+      is_blue_iff h g;
+      is_blue_iff h g'
+    end else begin
+      GC.Spec.Allocator.alloc_from_block_split_normal g obj wz next_fp;
+      let rem_hdr = make_header (U64.uint_to_t (leftover - 1)) blue_bits 0UL in
+      let g1 = write_word g hd rem_hdr in
+      AllocLemmas.make_header_getColor (U64.uint_to_t (leftover - 1)) blue_bits 0UL;
+      getColor_raw rem_hdr;
+      // the allocated header never lands on h's header
+      write_preserves_color g1 h ah alloc_hdr;
+      if U64.v (hd_address h) = U64.v hd then begin
+        // h IS the block we allocated from; its header is now the blue
+        // remainder, so it is still blue
+        read_write_same g hd rem_hdr;
+        color_of_object_spec h g1;
+        is_blue_iff h g1;
+        is_blue_iff h g'
+      end else begin
+        write_preserves_color g h hd rem_hdr;
+        is_blue_iff h g;
+        is_blue_iff h g1;
+        is_blue_iff h g'
+      end
+    end
+#pop-options
+
+
+/// The same fact, lifted over the whole search.
+#push-options "--z3rlimit 60 --fuel 1 --ifuel 0"
+private let rec alloc_search_preserves_blue
+  (g: heap) (head_fp prev_fp cur_fp: U64.t) (wz: nat) (fuel: nat) (h: obj_addr)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    AllocLemmas.fl_valid g cur_fp fuel /\
+                    AllocLemmas.fl_chain_terminates g cur_fp fuel /\
+                    wz >= 1 /\
+                    Seq.mem (h <: U64.t) (objects zero_addr g) /\
+                    is_blue h g = true /\
+                    (prev_fp <> 0UL ==>
+                      (prev_fp <> cur_fp /\
+                       U64.v prev_fp >= U64.v mword /\
+                       U64.v prev_fp < heap_size /\
+                       U64.v prev_fp % U64.v mword = 0 /\
+                       Seq.mem prev_fp (objects zero_addr g) /\
+                       U64.v (wosize_of_object (prev_fp <: obj_addr) g) >= 1)))
+          (ensures (let r = alloc_search g head_fp prev_fp cur_fp wz fuel in
+                    r.obj_out <> 0UL /\ (h <: U64.t) <> r.obj_out ==>
+                    is_blue h r.heap_out = true))
+          (decreases fuel)
+  = if fuel = 0 then ()
+    else if U64.v cur_fp < U64.v zero_addr + U64.v mword then ()
+    else if U64.v cur_fp >= heap_size then ()
+    else if U64.v cur_fp % U64.v mword <> 0 then ()
+    else begin
+      let obj : obj_addr = cur_fp in
+      let hd = hd_address obj in
+      let hdr = read_word g hd in
+      let bwz = U64.v (getWosize hdr) in
+      hd_address_spec obj;
+      hd_address_bounds obj;
+      AllocLemmas.fl_valid_gives_mem g cur_fp fuel;
+      AllocLemmas.fl_valid_gives_wosize g cur_fp fuel;
+      wosize_of_object_spec obj g;
+      let next_fp = if U64.v hd + 16 <= heap_size then read_word g obj else 0UL in
+      if bwz >= wz then begin
+        let leftover = bwz - wz in
+        let ahn = U64.v hd + leftover * 8 in
+        if ahn + 8 >= heap_size || ahn >= pow2 64 || ahn % 8 <> 0 then ()
+        else begin
+          aligned_plus_mul8 (U64.v hd) leftover;
+          assert (U64.v (U64.add cur_fp (U64.uint_to_t (leftover * 8))) == ahn + 8);
+          if (h <: U64.t) = U64.add cur_fp (U64.uint_to_t (leftover * 8)) then
+            // h IS the allocated block; the conclusion is guarded on this
+            ()
+          else begin
+          let new_fp = alloc_replacement_fp g obj wz next_fp in
+          alloc_replacement_fp_eq g obj wz next_fp;
+          if prev_fp = 0UL || U64.v prev_fp = U64.v hd ||
+             not (U64.v prev_fp >= U64.v mword && U64.v prev_fp < heap_size &&
+                  U64.v prev_fp % U64.v mword = 0)
+          then
+            alloc_from_block_preserves_blue g obj wz next_fp h
+          else begin
+            // the link write comes first; it touches a field, not a header
+            let prev_obj : obj_addr = prev_fp in
+            let gw = write_word g (prev_obj <: hp_addr) new_fp in
+            hd_address_spec prev_obj;
+            hd_address_bounds prev_obj;
+            hd_address_spec h;
+            hd_address_bounds h;
+            wosize_of_object_spec prev_obj g;
+            wosize_of_object_bound prev_obj g;
+            AllocLemmas.write_body_preserves_wfh_part1
+              g prev_obj (prev_obj <: hp_addr) new_fp;
+            AllocLemmas.write_body_preserves_objects_local
+              zero_addr g prev_obj (prev_obj <: hp_addr) new_fp;
+            // prev's link is never h's header: it is h's own first field if
+            // h = prev, and otherwise object separation keeps them apart
+            (if (h <: U64.t) = prev_fp then ()
+             else begin
+               wosize_of_object_spec h g;
+               if U64.v h < U64.v prev_fp then
+                 objects_separated zero_addr g h prev_obj
+               else
+                 objects_separated zero_addr g prev_obj h
+             end);
+            write_preserves_color g h (prev_obj <: hp_addr) new_fp;
+            is_blue_iff h g;
+            is_blue_iff h gw;
+            // and it leaves obj's block exactly as it was
+            read_write_different g (prev_obj <: hp_addr) hd new_fp;
+            alloc_from_block_preserves_blue gw obj wz next_fp h
+          end
+          end
+        end
+      end
+      else begin
+        if U64.v hd + 16 <= heap_size then begin
+          AllocLemmas.fl_valid_elim g cur_fp fuel;
+          AllocLemmas.fl_chain_terminates_elim g cur_fp fuel;
+          alloc_search_preserves_blue g head_fp cur_fp next_fp wz (fuel - 1) h
+        end else ()
+      end
+    end
+#pop-options
+
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
+let alloc_spec_preserves_blue_part1 (g: heap) (fp: U64.t) (requested_wz: nat) (h: obj_addr)
+  : Lemma (requires well_formed_heap_part1 g /\
+                    AllocLemmas.fl_valid g fp heap_words /\
+                    AllocLemmas.fl_chain_terminates g fp heap_words /\
+                    requested_wz >= 1 /\
+                    Seq.mem (h <: U64.t) (objects zero_addr g) /\
+                    is_blue h g = true)
+          (ensures (let r = alloc_spec g fp requested_wz in
+                    r.obj_out <> 0UL /\ (h <: U64.t) <> r.obj_out ==>
+                    is_blue h r.heap_out = true))
+  = let wz = if requested_wz = 0 then 1 else requested_wz in
+    alloc_search_preserves_blue g fp 0UL fp wz heap_words h
+#pop-options
+
 /// Helper: alloc_from_block preserves read at hd_address of a different object.
 /// Proof: all writes (hd, rem_hd, rem_field) are within obj's block, which is
 /// separated from excl's header by objects_separated.

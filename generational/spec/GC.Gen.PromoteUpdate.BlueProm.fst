@@ -317,7 +317,7 @@ private let promote_object_preserves_bfc_close
     FStar.Classical.forall_intro_2 bfc_proof
 #pop-options
 
-#push-options "--z3rlimit 12 --fuel 1 --ifuel 0"
+#push-options "--z3rlimit 48 --fuel 1 --ifuel 0"
 let promote_object_preserves_bfc
   (minor: minor_state) (major: heap) (obj: U64.t) (fp: U64.t)
   (wosize: nat{wosize > 0})
@@ -626,7 +626,7 @@ let promote_object_preserves_chain_objects_blue
 /// A successful promotion preserves the shape of the free-list head and blue
 /// link fields. Allocation establishes the shape for the immediate post-alloc
 /// heap; copy/padding/tag writes do not affect link fields of still-blue objects.
-#push-options "--z3rlimit 20 --fuel 1 --ifuel 0"
+#push-options "--z3rlimit 80 --fuel 1 --ifuel 0"
 let promote_object_preserves_free_list_shape
   (minor: minor_state) (major: heap) (obj: U64.t) (fp: U64.t)
   (wosize: nat{wosize > 0})

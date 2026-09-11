@@ -158,6 +158,54 @@ Per-module, measured individually with `--retry` off:
 
 0 admits.
 
+
+## Verification cost, base vs HEAD
+
+Measured per module against the branch point `8bd4559`, each side with its
+own cold-built cache, `--retry 3` (the build default), and the same eager-QI
+flags the Makefile applies.  Both sides were measured under similar
+concurrent load except where noted.
+
+| module | base | HEAD | |
+|---|---|---|---|
+| `GC.Spec.Allocator` | 338.9s | **9.8s** | 0.03x |
+| `GC.Gen.PromoteUpdate.BlueAlloc` | 53.2s | 23.0s | 0.43x |
+| `GC.Gen.CheneyPreservation.NonBlueOrigin` | 10.1s | 5.4s | 0.53x |
+| `GC.Gen.Cheney.Dense` | 33.5s | 21.3s | 0.64x |
+| `GC.Spec.Allocator.Lemmas.Core` | 2.3s | 1.6s | 0.70x |
+| `GC.Spec.Allocator.Lemmas.Part2` | 96.8s | 76.8s | 0.79x |
+| `GC.Gen.CheneyPreservation.Fields` | 10.4s | 8.3s | 0.80x |
+| `GC.Gen.PromoteUpdate.BlueProm` | 8.4s | 6.9s | 0.82x |
+| `GC.Gen.Promote` | 9.8s | 8.3s | 0.85x |
+| `GC.Gen.CheneyPreservation.Forwarding` | 59.0s | 51.2s | 0.87x |
+| `GC.Impl.Allocator` | 50.4s | 44.6s | 0.88x |
+| `GC.Spec.Allocator.Lemmas.Part1` | 19.7s | 18.9s | 0.96x |
+| `GC.Gen.Cheney` | 304.4s | 307.5s | 1.01x |
+| `GC.Gen.CheneyPreservation` | 33.3s | 34.2s | 1.03x |
+| `GC.Gen.CheneyPreservation.Frame` | 7.2s | 7.7s | 1.07x |
+| `GC.Gen.AllocProps` | 20.4s | 53.8s | **2.64x** |
+
+Roughly 1058s -> 679s across the set.  `GC.Spec.Allocator` carries most of
+it: at 188 lines and 338.9s it was the worst cost-per-line in the
+repository, and the transparent `alloc_replacement_fp` mirror takes it to
+9.8s.  `Promote`, `Fields` and `Cheney` are untouched by this branch and
+got faster from the spec change alone.
+
+Two entries needed explaining rather than accepting.
+
+**`GC.Gen.AllocProps`, 2.64x.**  Attributed by deletion: with the 191-line
+blue section removed the module is 24.6s, so the new
+`alloc_search_preserves_blue` -- a fresh recursive induction over
+`alloc_search`, the expensive shape in this codebase -- accounts for ~29s
+of the ~33s, and the three rewritten arms for ~4s.  It is deterministic
+without `--retry` (51.7s, 52.3s on repeat), which is what distinguishes new
+work from the Part1 defect.
+
+**`GC.Gen.Cheney`, apparently 1.22x.**  An artifact: that pair was measured
+with both sweeps running concurrently.  Serialized on an idle machine it is
+304.4s vs 307.5s.  Worth recording because it is the failure mode of this
+kind of comparison -- a 300s module is where contention shows up first.
+
 ## Still open
 
 - `GC.Spec.Sweep.sweep_object` mishandles wosize 0 three ways (blue but not a

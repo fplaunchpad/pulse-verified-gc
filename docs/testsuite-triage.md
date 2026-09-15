@@ -17,7 +17,8 @@ seven named gaps. None of them is the allocator.
 
 - `tests/ast-invariants/'test.ml'` — **passes**, both `1 (hasunix)` and `1.1 (native)`.
   This is the SIGSEGV that motivated the whole change and the one entry the baseline
-  deliberately refused to record.
+  deliberately refused to record. **It is not evidence that the fix works**: see
+  "CI does not exercise the bug" below.
 - All of `tests/lib-hashtbl` passes. `Hashtbl`'s `land (Array.length - 1)` masking was
   the mechanism that turned the over-sized header into a wild read, so it is the right
   place to look for a regression, and there isn't one.
@@ -29,8 +30,38 @@ Newly passing versus the baseline:
 | `tests/asmcomp/'polling_insertion.ml' with 1.1 (native)` | poll-point insertion |
 | `tests/lib-threads/'torture.ml' with 1.1 (bytecode)` | previously flaky under load |
 
-Neither is claimed as a consequence of right-justification. `polling_insertion` is a
-codegen test and `torture` is timing-sensitive; treat both as noise unless they hold.
+Neither is a consequence of right-justification, and this is now measured rather than
+guessed: both are newly passing on `main` too (run 34926016097, `31ee076`). They are
+baseline drift against the reference branch the list was measured on — exactly what the
+file's own provenance note warns about.
+
+## CI does not exercise the bug
+
+`main` at `31ee076` carries the **old** allocator, and its testsuite report is
+behaviourally identical to this branch's:
+
+```
+main   passed=2923 failed=29 errors=40 considered=3141   ast-invariants: passed, passed
+PR #3  passed=2923 failed=29 errors=40 considered=3141   ast-invariants: passed, passed
+only on main: none     only on PR#3: none     summaries identical: True
+```
+
+The cause is heap sizing. The default major heap is 32M words = 256 MB
+(`verified_gc/alloc_gen.c:109`); the documented repro is
+`MIN_EXPANSION_WORDSIZE=8388608` = 8M words = **64 MB**. Nothing under `.github/` or
+`ci/` sets that variable — its only mention in the CI tree is the how-to-reproduce
+comment in `ci/expected-failures.txt` itself.
+
+The bug needs a free block *exactly one word* longer than the request. At 256 MB this
+test never pressures the major heap enough for the free list to hold a `wz+1` block when
+a `wz` request arrives: requests come out of large blocks, giving `leftover >= 2` — the
+ordinary split, which was always correct. At 64 MB, collection churn produces the tight
+fit.
+
+So the green gate says "no regressions", which is worth having, but it says nothing about
+the allocator change either way. The evidence for the fix is the local A/B: exit 139
+(SIGSEGV, core dumped) before, exit 0 after, same machine and binary, only the snapshot
+differing, checked in both directions under the tighter heap.
 
 ## How the 69 break down
 
@@ -200,6 +231,11 @@ counter never drops and the output differs.
 
 ## Follow-ups this triage suggests
 
+0. **Run the suite, or at least `tests/ast-invariants`, under
+   `MIN_EXPANSION_WORDSIZE=8388608` in CI.** Today the one test that distinguishes the
+   two allocators is invisible to the gate meant to protect it. Cheapest form: a second
+   `testsuite` matrix leg at the tighter heap, or a single extra step running that one
+   directory.
 1. **Raise `MAX_ROOTS` or make the root buffer grow.** Two failures, both of them OCaml
    tools rather than test programs, and the cheapest fix on the list.
 2. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is

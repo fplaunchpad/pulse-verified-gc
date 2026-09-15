@@ -17,8 +17,8 @@ seven named gaps. None of them is the allocator.
 
 - `tests/ast-invariants/'test.ml'` — **passes**, both `1 (hasunix)` and `1.1 (native)`.
   This is the SIGSEGV that motivated the whole change and the one entry the baseline
-  deliberately refused to record. **It is not evidence that the fix works**: see
-  "CI does not exercise the bug" below.
+  deliberately refused to record. On its own it is **weak** evidence that the fix works,
+  because it passes on `main` too — see the section below.
 - All of `tests/lib-hashtbl` passes. `Hashtbl`'s `land (Array.length - 1)` masking was
   the mechanism that turned the over-sized header into a wild read, so it is the right
   place to look for a regression, and there isn't one.
@@ -35,33 +35,53 @@ guessed: both are newly passing on `main` too (run 34926016097, `31ee076`). They
 baseline drift against the reference branch the list was measured on — exactly what the
 file's own provenance note warns about.
 
-## CI does not exercise the bug
+## CI caught this bug once, then stopped — and that is the real problem
 
-`main` at `31ee076` carries the **old** allocator, and its testsuite report is
-behaviourally identical to this branch's:
+The baseline's note predicted exactly one new failure, and **CI did catch it.** Run
+[33661032604](https://github.com/fplaunchpad/pulse-verified-gc/actions/runs/33661032604),
+2026-09-02, `push` on `a674bc1`:
 
 ```
-main   passed=2923 failed=29 errors=40 considered=3141   ast-invariants: passed, passed
-PR #3  passed=2923 failed=29 errors=40 considered=3141   ast-invariants: passed, passed
-only on main: none     only on PR#3: none     summaries identical: True
+passed=2923 failed=27 errors=42 considered=3141
+expected-failure entries: 71  new: 1  fixed: 3
+  NEW FAILURE: tests/ast-invariants/'test.ml' with 1.1 (native)
 ```
 
-The cause is heap sizing. The default major heap is 32M words = 256 MB
-(`verified_gc/alloc_gen.c:109`); the documented repro is
-`MIN_EXPANSION_WORDSIZE=8388608` = 8M words = **64 MB**. Nothing under `.github/` or
-`ci/` sets that variable — its only mention in the CI tree is the how-to-reproduce
-comment in `ci/expected-failures.txt` itself.
+with `Process 25168 got signal 11(Segmentation fault), core dumped`. So the pipeline
+works, and the red check on PR #2 was this.
 
-The bug needs a free block *exactly one word* longer than the request. At 256 MB this
-test never pressures the major heap enough for the free list to hold a `wz+1` block when
-a `wz` request arrives: requests come out of large blocks, giving `leftover >= 2` — the
-ordinary split, which was always correct. At 64 MB, collection churn produces the tight
-fit.
+Three days later the check went green on what the API reports as the **same head SHA**.
+That is an event artefact, not a mystery: the Sept 2 run was a `push` and tested
+`a674bc1` directly, while the Sept 5 run was a `pull_request` and tested
+`refs/pull/2/merge` — and `a8cdacb` had landed on the base 26 minutes earlier. The two
+trees differ by 24 lines of `alloc_gen.c` (major-heap exhaustion returning NULL instead
+of aborting) plus, in `runtime_gen.patch`, a restored
+`if (wosize > Max_wosize) return 0;` and a new `if (hp == NULL) return 0;` in
+`caml_alloc_shr_aux`.
 
-So the green gate says "no regressions", which is worth having, but it says nothing about
-the allocator change either way. The evidence for the fix is the local A/B: exit 139
-(SIGSEGV, core dumped) before, exit 0 after, same machine and binary, only the snapshot
-differing, checked in both directions under the tighter heap.
+**Neither delta plausibly changes free-list geometry, and two runs cannot separate "the
+code masked it" from "it is nondeterministic at the default heap".** I am not going to
+claim which. What is certain is that the suite drifts independently of the allocator:
+`lib-systhreads/eintr (bytecode)` was newly *passing* on Sept 2 and is in the error list
+today.
+
+The consequence matters more than the cause:
+
+- `main` at `31ee076` carries the **old** allocator and its report is behaviourally
+  identical to this branch's — same 69 failures, same summary, `ast-invariants` passing
+  on both. That is **one sample**, not evidence the old allocator is safe.
+- Equally, this branch's green run is not by itself evidence of the fix.
+- The deterministic evidence is the local A/B: exit 139 (SIGSEGV, core dumped) before,
+  exit 0 after, same machine and binary, only the snapshot differing, checked in both
+  directions under `MIN_EXPANSION_WORDSIZE=8388608`.
+
+Why the heap size is the lever: the bug needs a free block *exactly one word* longer than
+the request. The default major heap is 32M words = 256 MB
+(`verified_gc/alloc_gen.c:109`); the documented repro uses 8M words = **64 MB**, where
+collection churn produces the tight fit reliably. Nothing under `.github/` or `ci/` sets
+that variable — its only mention in the CI tree is the how-to-reproduce comment in
+`ci/expected-failures.txt` itself. So CI runs the one discriminating test at the heap size
+where it is a coin flip.
 
 ## How the 69 break down
 
@@ -231,11 +251,12 @@ counter never drops and the output differs.
 
 ## Follow-ups this triage suggests
 
-0. **Run the suite, or at least `tests/ast-invariants`, under
-   `MIN_EXPANSION_WORDSIZE=8388608` in CI.** Today the one test that distinguishes the
-   two allocators is invisible to the gate meant to protect it. Cheapest form: a second
-   `testsuite` matrix leg at the tighter heap, or a single extra step running that one
-   directory.
+0. **Pin `MIN_EXPANSION_WORDSIZE=8388608` for the one discriminating test in CI.** The
+   gate did catch this bug once, at the default 256 MB heap, and then stopped catching
+   it. A check that fires on some runs and not others is worse than one that never
+   fires, because a green result gets read as a result. Cheapest form: a second
+   `testsuite` leg at the tighter heap, or one extra step over
+   `tests/ast-invariants`.
 1. **Raise `MAX_ROOTS` or make the root buffer grow.** Two failures, both of them OCaml
    tools rather than test programs, and the cheapest fix on the list.
 2. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is

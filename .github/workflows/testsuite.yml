@@ -43,6 +43,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential
 
+      # Seconds, and deterministic. `ast-invariants` covers the same bug end to
+      # end but only sometimes: whether the free list holds a `wz + 1` block
+      # when a `wz` request arrives depends on allocation history, so at the
+      # default 256 MB major heap that result is a coin flip. This drives the
+      # extracted allocator directly and presents the tight fit every run.
+      # It fails on any pre-fix snapshot, so it must run before the 27-minute
+      # suite rather than after it.
+      - name: Allocator size-exactness
+        run: make -C generational/snapshot alloc-exact-test
+
       # Cheap, and catches the failure mode this repo is most exposed to:
       # `make snapshot` overwrites the extracted C by plain cp, so an
       # unguarded regeneration silently drops the hand patches.

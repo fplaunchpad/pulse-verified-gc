@@ -1,0 +1,99 @@
+# Known failures of the verified GC on the OCaml testsuite.
+#
+# The gate is "no NEW failures", not "zero failures": the collector implements
+# neither weak pointers, ephemerons, finalisers, compaction nor memprof
+# sampling, so a sizeable set of tests fails for reasons that are expected and
+# understood. Gating on zero would be permanently red and stop being read.
+#
+# Regenerate: ci/testsuite_report.py --log LOG --expected THIS --update-expected
+# Entries should only ever be REMOVED as fixes land, unless a note says why.
+#
+# Provenance, because a baseline is a claim about a specific collector: this
+# list was measured on the reference branch. Its GC snapshot is identical to
+# this one apart from the allocator fix ("patch 17"); the bridge and the
+# runtime patch differ too, so treat the list as a strong starting point
+# rather than a guarantee, and regenerate from a run of this branch.
+#
+# EXPECT ONE NEW FAILURE:
+#
+#     tests/ast-invariants/'test.ml' with 1.1 (native)
+#
+# That is the allocator bug ("patch 17"), not a broken pipeline: a free block
+# one word too large is handed over whole, and the header records the block's
+# size rather than the requested size, so the object declares a phantom field
+# holding 0 -- not a representable OCaml value. Reproduce it with:
+#
+#     MIN_EXPANSION_WORDSIZE=8388608 ./test.opt <ocaml-tree-root>
+#
+# Do not baseline it. Fix it, then this file needs no change.
+tests/asmcomp/'polling_insertion.ml' with 1.1 (native)
+tests/backtrace/'callstack.ml' with 1.1.1 (native)
+tests/backtrace/'callstack.ml' with 1.1.2 (bytecode)
+tests/c-api/'alloc_async.ml' with 1 (native)
+tests/c-api/'alloc_async.ml' with 2 (bytecode)
+tests/callback/'signals_alloc.ml' with 1.1 (bytecode)
+tests/ephe-c-api/'test.ml' with 1 (native)
+tests/ephe-c-api/'test.ml' with 2 (bytecode)
+tests/instrumented-runtime/'main.ml' with 1.1 (native)
+tests/lib-sys/'opaque.ml' with 1 (native)
+tests/lib-sys/'opaque.ml' with 2 (bytecode)
+tests/lib-systhreads/'eintr.ml' with 1.1.1 (bytecode)
+tests/lib-systhreads/'eintr.ml' with 1.1.2 (native)
+tests/lib-threads/'torture.ml' with 1.1 (bytecode)
+tests/misc/'ephe_infix.ml' with 1 (native)
+tests/misc/'ephe_infix.ml' with 2 (bytecode)
+tests/misc/'ephe_infix_new.ml' with 1 (native)
+tests/misc/'ephe_infix_new.ml' with 2 (bytecode)
+tests/misc/'ephe_issue9391.ml' with 1 (native)
+tests/misc/'ephe_issue9391.ml' with 2 (bytecode)
+tests/misc/'ephetest.ml' with 1 (native)
+tests/misc/'ephetest.ml' with 2 (bytecode)
+tests/misc/'ephetest2.ml' with 1 (native)
+tests/misc/'ephetest2.ml' with 2 (bytecode)
+tests/misc/'ephetest2_new.ml' with 1 (native)
+tests/misc/'ephetest2_new.ml' with 2 (bytecode)
+tests/misc/'ephetest3.ml' with 1 (native)
+tests/misc/'ephetest3.ml' with 2 (bytecode)
+tests/misc/'ephetest_new.ml' with 1 (native)
+tests/misc/'ephetest_new.ml' with 2 (bytecode)
+tests/misc/'finaliser.ml' with 1 (native)
+tests/misc/'finaliser.ml' with 2 (bytecode)
+tests/misc/'weaklifetime.ml' with 1 (native)
+tests/misc/'weaklifetime.ml' with 2 (bytecode)
+tests/misc/'weaklifetime2.ml' with 1 (native)
+tests/misc/'weaklifetime2.ml' with 2 (bytecode)
+tests/output-complete-obj/'test.ml' with 1.1.1 (script)
+tests/output-complete-obj/'test.ml' with 2.1.1 (script)
+tests/regression/pr3612/'pr3612.ml' with 1 (native)
+tests/regression/pr3612/'pr3612.ml' with 2 (bytecode)
+tests/regression/pr9292/'pr9292.ml' with 1 (native)
+tests/regression/pr9292/'pr9292.ml' with 2 (bytecode)
+tests/regression/pr9326/'gc_set.ml' with 1 (native)
+tests/statmemprof/'alloc_counts.ml' with 1 (native)
+tests/statmemprof/'alloc_counts.ml' with 2 (bytecode)
+tests/statmemprof/'arrays_in_major.ml' with 1 (native)
+tests/statmemprof/'arrays_in_major.ml' with 2 (bytecode)
+tests/statmemprof/'arrays_in_minor.ml' with 1 (native)
+tests/statmemprof/'arrays_in_minor.ml' with 2 (bytecode)
+tests/statmemprof/'blocking_in_callback.ml' with 1.1 (bytecode)
+tests/statmemprof/'blocking_in_callback.ml' with 1.2 (native)
+tests/statmemprof/'callstacks.ml' with 1.1 (native)
+tests/statmemprof/'callstacks.ml' with 1.2 (bytecode)
+tests/statmemprof/'comballoc.ml' with 1 (bytecode)
+tests/statmemprof/'comballoc.ml' with 2 (native)
+tests/statmemprof/'custom.ml' with 1 (native)
+tests/statmemprof/'custom.ml' with 2 (bytecode)
+tests/statmemprof/'exception_callback.ml' with 2 (bytecode)
+tests/statmemprof/'exception_callback_minor.ml' with 2 (bytecode)
+tests/statmemprof/'intern.ml' with 1 (native)
+tests/statmemprof/'intern.ml' with 2 (bytecode)
+tests/statmemprof/'lists_in_minor.ml' with 1 (native)
+tests/statmemprof/'lists_in_minor.ml' with 2 (bytecode)
+tests/statmemprof/'minor_no_postpone.ml' with 2 (bytecode)
+tests/statmemprof/'moved_while_blocking.ml' with 1.1 (bytecode)
+tests/statmemprof/'moved_while_blocking.ml' with 1.2 (native)
+tests/statmemprof/'thread_exit_in_callback.ml' with 1.1 (bytecode)
+tests/tool-ocaml/'t340-weak.ml' with 1.1 (ocaml)
+tests/tool-ocaml/'t350-heapcheck.ml' with 1.1 (ocaml)
+tests/typing-modules/'merge_constraint.ml' with 1 (expect)
+tests/unboxed-primitive-args/'test.ml' with 1.1.1.1 (ocamlopt.byte)

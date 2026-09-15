@@ -59,11 +59,32 @@ of aborting) plus, in `runtime_gen.patch`, a restored
 `if (wosize > Max_wosize) return 0;` and a new `if (hp == NULL) return 0;` in
 `caml_alloc_shr_aux`.
 
-**Neither delta plausibly changes free-list geometry, and two runs cannot separate "the
-code masked it" from "it is nondeterministic at the default heap".** I am not going to
-claim which. What is certain is that the suite drifts independently of the allocator:
-`lib-systhreads/eintr (bytecode)` was newly *passing* on Sept 2 and is in the error list
-today.
+**Those 29 lines cannot explain the flip, and this is provable rather than a guess:
+`generational/snapshot/` is byte-identical between `a674bc13` and `a8cdacbc`.** The
+extracted `allocate()` -- the one containing `makeHeader(block_wz, white, 0ULL)` -- was
+the same code in the failing run and the passing run, so the bug was equally present in
+both. Taking the delta apart:
+
+- `if (wosize > Max_wosize) return 0;` restored -- `Max_wosize` is 2^54 - 1 words,
+  unreachable for any real program.
+- `if (hp == NULL) return 0;` added -- on `a674bc13`, `verified_allocate`'s only
+  `return NULL` sits *after* `caml_fatal_error(...)`, so it is unreachable and there was
+  no NULL to guard against.
+- `caml_fatal_error` -> hint + `return NULL` -- fires only on major-heap exhaustion after
+  a collection, and that path aborts (SIGABRT), not the SIGSEGV Sept 2 reported.
+
+None of them touches `alloc_search`, the split arms, the header write, coalescing, or the
+minor/major boundary. So the flip is *not* explained by the code difference, which leaves
+run-to-run variation in whether the test presents a `wz + 1` free block. The reports
+corroborate that independently: `lib-systhreads/eintr (bytecode)` passed on Sept 2 *and*
+Sept 5 and is in the error list today, and the tallies drift 27/42 -> 29/39 -> 29/40
+across three runs with no allocator change between the last two.
+
+The lesson is not about these commits. A gate whose outcome depends on allocation
+sequencing cannot be reasoned about from commit diffs at all, which is why
+`generational/snapshot/alloc_exact_test.c` exists: it presents the tight fit on every run
+and fails on any pre-fix snapshot regardless of event type, base branch, heap pressure or
+allocation order.
 
 The consequence matters more than the cause:
 

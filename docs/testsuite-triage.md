@@ -36,9 +36,9 @@ codegen test and `torture` is timing-sensitive; treat both as noise unless they 
 
 | # | cause | verdict |
 |---|---|---|
-| 30 | weak pointers, ephemerons, finalisers | not implemented |
+| 32 | weak pointers, ephemerons, finalisers | not implemented |
 | 24 | `Gc.Memprof` allocation sampling | not implemented |
-| 5 | pending actions / signal delivery at allocation points | integration gap |
+| 3 | signal handlers not run at allocation safe points | integration gap |
 | 3 | `Gc.set` knobs the verified heap cannot honour | unsupported by design |
 | 3 | build and link packaging | not GC behaviour |
 | 2 | fixed-size root buffer | capacity limit |
@@ -47,20 +47,28 @@ codegen test and `torture` is timing-sensitive; treat both as noise unless they 
 Signal distribution: 33 SIGSEGV, 3 SIGABRT, 3 timeout, 30 output-mismatch or
 non-zero exit.
 
-### 30 — weak pointers, ephemerons, finalisers
+### 32 — weak pointers, ephemerons, finalisers
 
 `misc/ephetest{,2,3,_new,2_new}`, `misc/ephe_infix{,_new}`, `misc/ephe_issue9391`,
 `ephe-c-api/test`, `misc/weaklifetime{,2}`, `misc/finaliser`, `tool-ocaml/t340-weak`,
-`tool-ocaml/t350-heapcheck`, `lib-sys/opaque`, `backtrace/callstack`.
+`tool-ocaml/t350-heapcheck`, `lib-sys/opaque`, `backtrace/callstack`,
+`c-api/alloc_async`.
 
-The collector implements no weak table, ephemeron list or finaliser queue. Two of these
-are worth naming because the test name does not give the cause away:
+The collector implements no weak table, ephemeron list or finaliser queue. Three of
+these are worth naming because the test name does not give the cause away:
 
 - `lib-sys/opaque.ml` looks like a `Sys.opaque_identity` test, and it is — but its
   middle third calls `Gc.finalise` and asserts on finaliser timing across
   `Gc.full_major ()`.
 - `backtrace/callstack.ml` likewise installs `Gc.finalise (fun _ -> f0 ()) [|1|]` and
   prints a backtrace from inside the finaliser.
+- `c-api/alloc_async.ml` reads as a C-allocation test, and its failure looks like a
+  polling gap, but its subject is `Gc.finalise (fun s -> r := !s) (ref 17)`. The C stub
+  forces a major cycle so that finaliser becomes pending; the test then checks it did
+  *not* fire asynchronously inside the C code (`C, after: 42`) and *did* fire at the next
+  OCaml allocation (`OCaml, after alloc: 17`). We print `42`, so it never ran at all.
+  The allocation is only how the test observes the finaliser queue, which is why this
+  belongs here and not under the safe-point gap below.
 
 `misc/weaklifetime2.ml` is the one failure in this group whose mechanism is worth
 recording, because it aborts on an **internal consistency check** rather than simply
@@ -88,23 +96,40 @@ Every `tests/statmemprof/*` entry. `Gc.Memprof.start` has no implementation, so 
 either produce no samples (output mismatch), exit non-zero, or hang —
 `blocking_in_callback` and `moved_while_blocking` account for all three timeouts.
 
-### 5 — pending actions and signal delivery
+### 3 — signal handlers not run at allocation safe points
 
-`c-api/alloc_async` (native + bytecode), `callback/signals_alloc`, `lib-systhreads/eintr`
-(bytecode + native).
+`callback/signals_alloc`, `lib-systhreads/eintr` (bytecode + native).
 
 These are the most allocator-adjacent failures in the run, and they are about *when* the
-allocator yields, not what it returns:
+allocator yields, not what it returns.
 
-- `c-api/alloc_async` expects `OCaml, after alloc: 17` and gets `42` — the asynchronous
-  action never runs at the allocation point.
-- `callback/signals_alloc` expects `01234` and gets `01243` — the same thing showing up
-  as handler ordering.
+A Unix signal cannot run its OCaml handler at the instant it arrives: the handler is
+OCaml code that allocates, and the GC must see consistent roots, which is not true at an
+arbitrary instruction. So the C-level handler only records that something is pending, and
+the runtime runs it at the next *safe point* via `caml_process_pending_actions` — which
+covers signal handlers, finaliser callbacks and memprof callbacks alike. In 4.14 the
+primary safe point is an **allocation**: the handler sets `young_limit` so the next minor
+allocation appears to be out of room, `caml_alloc_small`'s fast path fails, and
+`caml_call_gc` processes pending actions before returning.
 
-`verified_allocate` does not poll for pending actions, so a signal that stock would
-deliver at an allocation is deferred. `eintr` adds threads and `Thread.sigmask` on top;
-its SIGSEGV is consistent with a handler running while root state is inconsistent, but
-the log does not pin the mechanism and I am not going to claim it does.
+`verified_allocate` and the minor bump path consult neither `young_limit` nor
+`caml_process_pending_actions`, so an allocation is no longer such a point. Deferred work
+still runs, at compiler-inserted polls and function returns — just later than stock.
+
+`signals_alloc` measures precisely that:
+
+```ocaml
+seen_states.(!pos) <- 2; pos := !pos + 1;     (* writes 2 *)
+let _ = Sys.opaque_identity (ref 1) in        (* allocation: handler should write 3 *)
+seen_states.(!pos) <- 4; pos := !pos + 1;     (* writes 4 *)
+```
+
+The handler writes `3`. Stock produces `01234`; we produce `01243`, so the handler ran
+after the allocation rather than at it.
+
+`eintr` adds threads and `Thread.sigmask`. Its SIGSEGV is consistent with a handler
+running while root state is inconsistent, but the log does not pin the mechanism and I am
+not going to claim it does.
 
 Note this area is live: main's `5ce4480` ("Do not route `caml_check_urgent_gc` through
 `caml_gc_dispatch`") is the same integration surface.
@@ -180,7 +205,9 @@ counter never drops and the output differs.
 2. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is
    the only failure that trips an invariant we wrote, and the reconstruction above should
    be confirmed rather than assumed.
-3. **Poll pending actions at allocation points.** Would address the `alloc_async` /
-   `signals_alloc` pair and is adjacent to work already on main.
+3. **Process pending actions at allocation points.** Restores the safe point stock
+   relies on, fixing `signals_alloc` and plausibly `eintr`. It would also make
+   `alloc_async` observable once finalisers exist — today that test fails one layer
+   earlier, on the empty finaliser queue. Adjacent to work already on main.
 4. **Reject unsupported `Gc.set` fields instead of corrupting the heap.** `pr9326`
    segfaults where raising `Invalid_argument` would be honest.

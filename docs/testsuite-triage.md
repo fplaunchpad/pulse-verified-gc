@@ -1,0 +1,186 @@
+# OCaml testsuite triage — PR #3 (`alloc-exactness-rightjust`)
+
+Run [34925353663](https://github.com/fplaunchpad/pulse-verified-gc/actions/runs/34925353663),
+head `1426bc2`, 2026-09-15, 27m 29s. Companion `verify` run: 30m 50s against the
+merge-base's 31m 48s, so the proof work costs nothing in CI.
+
+```
+passed=2923  failed=29  errors=40  skipped=43  not_started=106  considered=3141
+expected-failure entries: 71   new: 0   fixed: 2
+```
+
+**Verdict: nothing is failing that is not accounted for.** All 69 failures are in
+`ci/expected-failures.txt`, two tests newly pass, and every failure traces to one of
+seven named gaps. None of them is the allocator.
+
+## The two results this branch was for
+
+- `tests/ast-invariants/'test.ml'` — **passes**, both `1 (hasunix)` and `1.1 (native)`.
+  This is the SIGSEGV that motivated the whole change and the one entry the baseline
+  deliberately refused to record.
+- All of `tests/lib-hashtbl` passes. `Hashtbl`'s `land (Array.length - 1)` masking was
+  the mechanism that turned the over-sized header into a wild read, so it is the right
+  place to look for a regression, and there isn't one.
+
+Newly passing versus the baseline:
+
+| test | note |
+|---|---|
+| `tests/asmcomp/'polling_insertion.ml' with 1.1 (native)` | poll-point insertion |
+| `tests/lib-threads/'torture.ml' with 1.1 (bytecode)` | previously flaky under load |
+
+Neither is claimed as a consequence of right-justification. `polling_insertion` is a
+codegen test and `torture` is timing-sensitive; treat both as noise unless they hold.
+
+## How the 69 break down
+
+| # | cause | verdict |
+|---|---|---|
+| 30 | weak pointers, ephemerons, finalisers | not implemented |
+| 24 | `Gc.Memprof` allocation sampling | not implemented |
+| 5 | pending actions / signal delivery at allocation points | integration gap |
+| 3 | `Gc.set` knobs the verified heap cannot honour | unsupported by design |
+| 3 | build and link packaging | not GC behaviour |
+| 2 | fixed-size root buffer | capacity limit |
+| 2 | custom-block finalisation | not implemented |
+
+Signal distribution: 33 SIGSEGV, 3 SIGABRT, 3 timeout, 30 output-mismatch or
+non-zero exit.
+
+### 30 — weak pointers, ephemerons, finalisers
+
+`misc/ephetest{,2,3,_new,2_new}`, `misc/ephe_infix{,_new}`, `misc/ephe_issue9391`,
+`ephe-c-api/test`, `misc/weaklifetime{,2}`, `misc/finaliser`, `tool-ocaml/t340-weak`,
+`tool-ocaml/t350-heapcheck`, `lib-sys/opaque`, `backtrace/callstack`.
+
+The collector implements no weak table, ephemeron list or finaliser queue. Two of these
+are worth naming because the test name does not give the cause away:
+
+- `lib-sys/opaque.ml` looks like a `Sys.opaque_identity` test, and it is — but its
+  middle third calls `Gc.finalise` and asserts on finaliser timing across
+  `Gc.full_major ()`.
+- `backtrace/callstack.ml` likewise installs `Gc.finalise (fun _ -> f0 ()) [|1|]` and
+  prints a backtrace from inside the finaliser.
+
+`misc/weaklifetime2.ml` is the one failure in this group whose mechanism is worth
+recording, because it aborts on an **internal consistency check** rather than simply
+misbehaving:
+
+```
+verified gen GC: internal error — unpromoted root after check
+```
+
+emitted by `write_back_rewritten_roots` (`generational/ocaml-integration/verified_gc/alloc_gen.c:331`),
+which requires every rewritten root to come back as a major-heap address. The
+reconstruction, consistent with the code and the test but not stated by the log:
+`Weak.set` deliberately takes no write barrier, so a major-heap weak array pointing into
+the minor heap is neither a root nor a `ref_table` entry. Stock fixes those fields up
+explicitly during minor collection; we do not, so the array keeps a stale minor address.
+A later `Weak.get` hands that stale value back to live code, the next
+`scan_minor_root` collects it as a minor-absolute root, Cheney has no forwarding entry
+for it, and the check fires. If that is right it is a *downstream* symptom of the missing
+weak table, not an independent bug — but it is the only failure here that trips an
+invariant we wrote ourselves, so it is the one to re-examine when weak support lands.
+
+### 24 — `Gc.Memprof` sampling
+
+Every `tests/statmemprof/*` entry. `Gc.Memprof.start` has no implementation, so these
+either produce no samples (output mismatch), exit non-zero, or hang —
+`blocking_in_callback` and `moved_while_blocking` account for all three timeouts.
+
+### 5 — pending actions and signal delivery
+
+`c-api/alloc_async` (native + bytecode), `callback/signals_alloc`, `lib-systhreads/eintr`
+(bytecode + native).
+
+These are the most allocator-adjacent failures in the run, and they are about *when* the
+allocator yields, not what it returns:
+
+- `c-api/alloc_async` expects `OCaml, after alloc: 17` and gets `42` — the asynchronous
+  action never runs at the allocation point.
+- `callback/signals_alloc` expects `01234` and gets `01243` — the same thing showing up
+  as handler ordering.
+
+`verified_allocate` does not poll for pending actions, so a signal that stock would
+deliver at an allocation is deferred. `eintr` adds threads and `Thread.sigmask` on top;
+its SIGSEGV is consistent with a handler running while root state is inconsistent, but
+the log does not pin the mechanism and I am not going to claim it does.
+
+Note this area is live: main's `5ce4480` ("Do not route `caml_check_urgent_gc` through
+`caml_gc_dispatch`") is the same integration surface.
+
+### 3 — `Gc.set` knobs the verified heap cannot honour
+
+- `regression/pr9326/gc_set.ml` (SIGSEGV) sets `minor_heap_size = 512k` and
+  `major_heap_increment = 4M`. The verified minor heap is fixed at startup; resizing it
+  under the running collector leaves the young pointers dangling.
+- `regression/pr9292/pr9292.ml` (both variants) sets `allocation_policy = 2` (best-fit),
+  which does not exist here, and then allocates 5,000 × 10,000-word arrays — about
+  400 MB into a 256 MB major heap. It now reports
+
+  ```
+  verified gen GC: major heap exhausted (256 MB) — raising Out_of_memory.
+  ```
+
+  which is main's `a8cdacb` working as intended: a catchable `Out_of_memory` instead of a
+  fatal abort. The test still fails, because it does not expect the exception, but it
+  fails *politely*.
+
+### 3 — build and link packaging, not GC behaviour
+
+- `instrumented-runtime/main.ml` needs `-runtime-variant=i`; the verified build does not
+  produce `libasmrun_i.a`, so `ocamlopt` exits 2.
+- `output-complete-obj/test.ml` (both script variants) fails at `ld`, not at run time:
+
+  ```
+  undefined reference to `caml_startup', `minor_heap_size_u64', `zero_addr',
+  `heap_size_u64', `max_young_wosize_u64', `krmlinit_globals', `caml_do_roots', ...
+  ```
+
+  `-output-complete-obj` emits a self-contained object linked against `libcamlrun.a`
+  alone, and the verified GC's objects and KaRaMeL globals are not in that archive. A
+  packaging fix, with no bearing on collector semantics.
+
+### 2 — fixed-size root buffer
+
+```
+verified gen GC: root overflow          alloc_gen.c:256
+```
+
+- `typing-modules/merge_constraint.ml (expect)`
+- `unboxed-primitive-args/test.ml (ocamlopt.byte)` — aborts while *compiling*, exit −6
+
+Both look GC-unrelated from their names, and both are the same thing: the failing process
+is an OCaml **tool** (`expect_test`, `ocamlopt`) running on the verified runtime, and it
+exceeds `MAX_ROOTS = 1 << 18` (`alloc_gen.c:82`) during `caml_do_roots`. `unboxed-primitive-args`
+generates a very large source file, which is why it is the one that tips over. Raising
+`MAX_ROOTS`, or growing the buffer dynamically, would likely clear both — they are a
+capacity limit in the bridge, not a collector defect.
+
+### 2 — custom-block finalisation
+
+`regression/pr3612` (both variants) round-trips a custom block through `Marshal` a million
+times and prints deserialised-minus-freed. Custom-block finalisers never run, so the
+counter never drops and the output differs.
+
+## What this run does not tell us
+
+- The gate is "no NEW failures". A test that regresses *within* the baseline — same
+  entry, different reason — would not be flagged. Nothing here suggests that happened,
+  but the report cannot rule it out.
+- `verify` runs with `--retry 3` (`Makefile:26-38`), so green means less than it looks.
+- 106 tests are `not_started` and 43 skipped, mostly platform and configuration gates
+  (flambda disabled, no libwin32unix, non-x86 targets). Those are properties of the
+  runner, not of the collector.
+
+## Follow-ups this triage suggests
+
+1. **Raise `MAX_ROOTS` or make the root buffer grow.** Two failures, both of them OCaml
+   tools rather than test programs, and the cheapest fix on the list.
+2. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is
+   the only failure that trips an invariant we wrote, and the reconstruction above should
+   be confirmed rather than assumed.
+3. **Poll pending actions at allocation points.** Would address the `alloc_async` /
+   `signals_alloc` pair and is adjacent to work already on main.
+4. **Reject unsupported `Gc.set` fields instead of corrupting the heap.** `pr9326`
+   segfaults where raising `Invalid_argument` would be honest.

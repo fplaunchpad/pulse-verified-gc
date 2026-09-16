@@ -142,9 +142,11 @@ jobs:
           ./ocamlopt.opt -I "$R/runtime" -nostdlib -I "$R/stdlib" -I "$R/otherlibs/unix" \
             -I "$R/compilerlibs" -I "$R/parsing" -I "$R/utils" -I "$R/typing" \
             -I "$R/bytecomp" -I "$R/driver" ocamlcommon.cmxa unix.cmxa -o test.opt test.ml
+          # Write to a file, then both echo it and append it to the summary:
+          # step summaries are not retrievable through the API, so anything we
+          # want to read back has to reach stdout or an artifact.
+          T="$GITHUB_WORKSPACE/issue19.txt"
           {
-            echo "## Issue 19 standalone reproducer"
-            echo
             echo '| MIN_EXPANSION_WORDSIZE | bytecode | native |'
             echo '| --- | --- | --- |'
             for W in 4194304 8388608 16777216 33554432; do
@@ -162,7 +164,11 @@ jobs:
             echo "| (unset, default) | - | exit $d |"
             echo
             echo '139 = SIGSEGV, 134 = SIGABRT, 0 = passed.'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > "$T"
+          echo "ISSUE19_RESULTS_BEGIN"
+          cat "$T"
+          echo "ISSUE19_RESULTS_END"
+          { echo "## Issue 19 standalone reproducer"; echo; cat "$T"; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs
         if: always()
@@ -172,5 +178,6 @@ jobs:
           path: |
             build.log
             signals.txt
+            issue19.txt
           if-no-files-found: warn
           retention-days: 14

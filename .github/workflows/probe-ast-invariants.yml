@@ -1,0 +1,176 @@
+name: probe ast-invariants
+
+# Why this exists.
+#
+# `tests/ast-invariants` crashes on the pre-fix allocator (issue #19: a free
+# block one word longer than the request is handed over whole, so the object
+# declares a field it does not own). Locally that crash is DETERMINISTIC --
+# 130 runs across four configurations, zero passes. In CI it is not: attempt 1
+# of run 33661032604 failed on it, attempt 2 of the SAME job passed, with a
+# byte-identical build.log. Five hypotheses for the difference have been tested
+# and rejected (the a8cdacb delta, heap sizing, the test's input file set,
+# local nondeterminism, and bootstrapping the compiler on the buggy collector).
+# What is left is the platform, which can only be measured here.
+#
+# This branch carries main's PRE-FIX snapshot on purpose. Every probe below is
+# expected to fail; the job still succeeds, because the measurement is the
+# point. Read the job summary, not the exit status.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'ocamltest ast-invariants repetitions'
+        type: string
+        default: '15'
+  push:
+    branches: [ 'probe/**' ]
+
+concurrency:
+  group: probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential
+
+      # The platform is the remaining hypothesis, so record it.
+      - name: Record the environment
+        run: |
+          {
+            echo "## Environment"
+            echo '```'
+            uname -a
+            echo
+            gcc --version | head -1
+            ldd --version | head -1
+            echo
+            echo "nproc: $(nproc)"
+            free -m | head -2
+            echo "randomize_va_space: $(cat /proc/sys/kernel/randomize_va_space)"
+            echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Positive control: proves this checkout really carries the pre-fix
+      # allocator, independent of anything about the OCaml toolchain.
+      - name: Unit test (expected to FAIL -- confirms pre-fix snapshot)
+        run: |
+          set +e
+          out=$(make -C generational/snapshot alloc-exact-test 2>&1); rc=$?
+          echo "$out"
+          {
+            echo "## Unit test: allocator size-exactness"
+            echo
+            echo "exit $rc (1 = pre-fix allocator confirmed, 0 = UNEXPECTED, snapshot is fixed)"
+            echo '```'
+            echo "$out" | tail -14
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build both OCaml trees
+        run: make -C generational/ocaml-integration setup
+
+      - name: Build the compiler on the verified GC
+        working-directory: generational/ocaml-integration/ocaml-4.14-verified-gen
+        run: |
+          set -o pipefail
+          make world.opt 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Build ocamltest
+        working-directory: generational/ocaml-integration/ocaml-4.14-verified-gen
+        run: |
+          set -o pipefail
+          make ocamltest 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+
+      # The measurement. N independent runs of the one test, each with the
+      # build directory removed first so the binary is relinked every time --
+      # ocamltest keeps its build dir under the TEST's directory
+      # (tests/ast-invariants/_ocamltest), not under testsuite/, and reusing a
+      # stale test.opt is exactly how this was mismeasured locally.
+      - name: ast-invariants x N
+        id: probe
+        working-directory: generational/ocaml-integration/ocaml-4.14-verified-gen/testsuite
+        run: |
+          N='${{ github.event.inputs.iterations || 15 }}'
+          pass=0; fail=0; marks=''
+          for i in $(seq 1 "$N"); do
+            rm -rf tests/ast-invariants/_ocamltest
+            out=$(OCAMLRUNPARAM=b,v=0 TIMEOUT=120 make one DIR=tests/ast-invariants 2>&1 || true)
+            if printf '%s' "$out" | grep -q '1.1 (native) => passed'; then
+              pass=$((pass+1)); marks="$marks."
+            else
+              fail=$((fail+1)); marks="${marks}F"
+              printf '%s' "$out" | grep -o 'got signal [0-9]*([^)]*)' | head -1 \
+                >> "$GITHUB_WORKSPACE/signals.txt" || true
+            fi
+          done
+          echo "pass=$pass fail=$fail n=$N"
+          {
+            echo "## ocamltest ast-invariants, native variant"
+            echo
+            echo '```'
+            echo "$marks"
+            echo "passed=$pass  failed=$fail  of $N"
+            echo '```'
+            if [ -s "$GITHUB_WORKSPACE/signals.txt" ]; then
+              echo "Signals seen:"
+              echo '```'
+              sort "$GITHUB_WORKSPACE/signals.txt" | uniq -c
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Issue #19's own reproducer, which does not involve ocamltest at all.
+      # Bytecode is heap-size dependent per the issue; native crashed at every
+      # size locally.
+      - name: Issue 19 standalone reproducer
+        working-directory: generational/ocaml-integration/ocaml-4.14-verified-gen
+        run: |
+          R=$PWD
+          cp "$GITHUB_WORKSPACE/ci/probe/ast_invariants_standalone.ml" test.ml
+          UNCH="$GITHUB_WORKSPACE/generational/ocaml-integration/ocaml-4.14-unchanged/_install/bin/ocamlc"
+          "$UNCH" -I +compiler-libs -I +unix ocamlcommon.cma unix.cma -o test.byte test.ml
+          ./ocamlopt.opt -I "$R/runtime" -nostdlib -I "$R/stdlib" -I "$R/otherlibs/unix" \
+            -I "$R/compilerlibs" -I "$R/parsing" -I "$R/utils" -I "$R/typing" \
+            -I "$R/bytecomp" -I "$R/driver" ocamlcommon.cmxa unix.cmxa -o test.opt test.ml
+          {
+            echo "## Issue 19 standalone reproducer"
+            echo
+            echo '| MIN_EXPANSION_WORDSIZE | bytecode | native |'
+            echo '| --- | --- | --- |'
+            for W in 4194304 8388608 16777216 33554432; do
+              set +e
+              MIN_EXPANSION_WORDSIZE=$W timeout 600 ./runtime/ocamlrun ./test.byte "$R" >/dev/null 2>&1
+              b=$?
+              MIN_EXPANSION_WORDSIZE=$W timeout 600 ./test.opt "$R" >/dev/null 2>&1
+              n=$?
+              set -e
+              echo "| $W | exit $b | exit $n |"
+            done
+            set +e
+            timeout 600 ./test.opt "$R" >/dev/null 2>&1; d=$?
+            set -e
+            echo "| (unset, default) | - | exit $d |"
+            echo
+            echo '139 = SIGSEGV, 134 = SIGABRT, 0 = passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-logs
+          path: |
+            build.log
+            signals.txt
+          if-no-files-found: warn
+          retention-days: 14

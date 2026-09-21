@@ -43,6 +43,42 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential
 
+      # --- Issue #19 regression tests -------------------------------------
+      #
+      # BOTH OF THESE FAIL ON MAIN TODAY, ON PURPOSE. They detect the
+      # allocator bug of issue #19: when a free block is exactly one word
+      # longer than the request, the whole block is handed over and the
+      # header records the BLOCK's size, so the object declares a field it
+      # does not own.
+      #
+      # They are `continue-on-error` until the fix lands, so main stays green
+      # while the bug is measured rather than merely described. When the
+      # right-justification fix merges, DELETE the continue-on-error lines --
+      # both must then pass, and a regression must break the build. That flip
+      # is the point of landing them first.
+      #
+      # Seconds, and deterministic. `tests/ast-invariants` covers the same
+      # defect end to end but only sometimes: it fails 100% on Fedora 44 and
+      # passes 15/15 on ubuntu-latest with the allocator provably broken in
+      # both, because it needs the phantom field to be followed and faulted
+      # on. These decide on the code, not the platform.
+      - name: "Issue #19: allocator size-exactness (unit)"
+        id: unit19
+        continue-on-error: true
+        run: |
+          set +e
+          out=$(make -C generational/snapshot alloc-exact-test 2>&1); rc=$?
+          echo "$out"
+          {
+            echo "## Issue #19 — allocator size-exactness (unit)"
+            echo
+            echo "exit $rc — expected **non-zero until the fix lands**"
+            echo '```'
+            echo "$out" | tail -12
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
       # Cheap, and catches the failure mode this repo is most exposed to:
       # `make snapshot` overwrites the extracted C by plain cp, so an
       # unguarded regeneration silently drops the hand patches.
@@ -66,6 +102,45 @@ jobs:
         run: |
           set -o pipefail
           make ocamltest 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+
+      # The same defect through the path that actually reaches objects.
+      # Direct major allocation is harmless -- caml_alloc_shr_aux overwrites
+      # the header -- so this drives PROMOTION, where the minor->major copy
+      # keeps the allocator's header verbatim. Needs the tree's ocamlc,
+      # because it calls the caml_trigger_verified_gc primitive: Gc.full_major
+      # does NOT run this collector.
+      - name: "Issue #19: allocator size-exactness (end to end, promotion)"
+        id: e2e19
+        continue-on-error: true
+        run: |
+          set +e
+          out=$(sh ci/run-promotion-test.sh 2>&1); rc=$?
+          echo "$out"
+          {
+            echo "## Issue #19 — through promotion (end to end)"
+            echo
+            echo "exit $rc — expected **non-zero until the fix lands**"
+            echo '```'
+            echo "$out" | tail -12
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: "Issue #19: report"
+        if: always()
+        run: |
+          {
+            echo "## Issue #19 status"
+            echo
+            echo "| test | outcome |"
+            echo "| --- | --- |"
+            echo "| unit (extracted allocator) | ${{ steps.unit19.outcome }} |"
+            echo "| end to end (promotion) | ${{ steps.e2e19.outcome }} |"
+            echo
+            echo "Both are expected to FAIL while the bug is present. When the"
+            echo "right-justification fix lands, remove the two"
+            echo "\`continue-on-error\` lines so these become hard gates."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The GC bugs this repo has hit are mostly silent-corruption bugs that
       # surface as a crash in an unrelated compilation unit, so the useful

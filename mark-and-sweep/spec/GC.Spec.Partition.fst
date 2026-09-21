@@ -4,9 +4,10 @@
    Right-justified allocation can leave a one-word remainder that is free but
    cannot be linked: a block of wosize 0 has no field to hold a free-list
    pointer (`GC.Spec.Allocator.alloc_from_block`, the `leftover = 1` arm).
-   `GC.Spec.FreeList.linkable_heap` asserts that no such object exists, which
-   is now false; it survives only because nothing establishes it, so the
-   theorems conditioned on it are vacuous rather than wrong.
+   `GC.Spec.FreeList.linkable_heap` used to assert that no such object exists.
+   It has since been deleted: the `wosize >= 1` bound it really supplied now
+   lives in `fl_sound`, where it is true, because it is a property of chain
+   cells rather than of every object.
 
    This module states the true version. Every object of the walk falls into
    exactly one class, and the classes sum to the space the walk covers:
@@ -163,7 +164,7 @@ let rec inflight_zero (g: heap) (objs: seq obj_addr)
 ///
 /// Every word the walk covers is allocated, on a free block big enough to be a
 /// cell, or in a fragment -- and each is counted once. The fragment term is
-/// what `linkable_heap` denies the existence of; here it is simply a summand.
+/// what `linkable_heap` used to deny the existence of; here it is a summand.
 let partition_swept (g: heap) (objs: seq obj_addr)
   : Lemma
     (requires forall (x: obj_addr). Seq.mem x objs ==> (is_white x g \/ is_blue x g))
@@ -233,10 +234,10 @@ let rec walk_is_tiled (g: heap) (start: hp_addr)
 /// enough to be cells, plus fragment words, is exactly the span the walk
 /// covers. Nothing is lost between the classes and nothing is counted twice.
 ///
-/// This is the true statement that `GC.Spec.FreeList.linkable_heap` gestures
-/// at and gets wrong. `linkable_heap` says no object has wosize 0, which
-/// right-justified allocation falsified; this says how many words are in such
-/// objects, which is a number, and is correct whatever that number is.
+/// This is the statement `GC.Spec.FreeList.linkable_heap` was reaching for and
+/// got wrong. It said no object has wosize 0 -- which right-justified
+/// allocation falsified -- where this says how many words are in such objects,
+/// which is a number, and is correct whatever that number is.
 let heap_partition_swept (g: heap)
   : Lemma
     (requires Seq.length g == heap_size /\

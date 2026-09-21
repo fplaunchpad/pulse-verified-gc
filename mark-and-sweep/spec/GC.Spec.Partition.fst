@@ -33,6 +33,8 @@ open GC.Lib.Header
 
 module U64 = FStar.UInt64
 module WE  = GC.Spec.WalkEnd
+module IndDesc = FStar.IndefiniteDescription
+module FL  = GC.Spec.FreeList
 
 /// Machine words an object occupies: its fields plus its header.
 let whsize (g: heap) (x: obj_addr) : GTot nat = 1 + U64.v (wosize_of_object x g)
@@ -247,4 +249,112 @@ let heap_partition_swept (g: heap)
          * U64.v mword
        == WE.walk_end g zero_addr))
   = partition_swept g (objects zero_addr g);
+    walk_is_tiled g zero_addr
+
+/// ---------------------------------------------------------------------------
+/// The strong partition: is the free space actually reachable?
+/// ---------------------------------------------------------------------------
+///
+/// `is_cellish` says a block is blue and big enough to hold a link. It does
+/// not say the block is on the chain. Splitting it names the difference:
+///
+///   onchain -- blue, wosize >= 1, and reachable from `fp`; allocatable
+///   orphan  -- blue, wosize >= 1, and NOT reachable; free but unreachable
+///
+/// `reachable_on_fl` is a `prop` (an existential over chain depth), so it
+/// cannot drive a boolean sum directly. Classical decidability is sound here
+/// and the file is ghost throughout; the repo already uses
+/// `FStar.IndefiniteDescription` this way elsewhere.
+
+let on_chain (g: heap) (fp: U64.t) (x: obj_addr) : GTot bool =
+  IndDesc.strong_excluded_middle (FL.reachable_on_fl g fp x)
+
+let is_onchain (g: heap) (fp: U64.t) (x: obj_addr) : GTot bool =
+  is_cellish g x && on_chain g fp x
+
+let is_orphan (g: heap) (fp: U64.t) (x: obj_addr) : GTot bool =
+  is_cellish g x && not (on_chain g fp x)
+
+let rec onchain_whsize (g: heap) (fp: U64.t) (objs: seq obj_addr)
+  : GTot nat (decreases Seq.length objs)
+  = if Seq.length objs = 0 then 0
+    else (if is_onchain g fp (Seq.head objs) then whsize g (Seq.head objs) else 0)
+         + onchain_whsize g fp (Seq.tail objs)
+
+let rec orphan_whsize (g: heap) (fp: U64.t) (objs: seq obj_addr)
+  : GTot nat (decreases Seq.length objs)
+  = if Seq.length objs = 0 then 0
+    else (if is_orphan g fp (Seq.head objs) then whsize g (Seq.head objs) else 0)
+         + orphan_whsize g fp (Seq.tail objs)
+
+/// The cellish class splits exactly in two.
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 40"
+let rec cell_splits (g: heap) (fp: U64.t) (objs: seq obj_addr)
+  : Lemma
+    (ensures cell_whsize g objs
+             == onchain_whsize g fp objs + orphan_whsize g fp objs)
+    (decreases Seq.length objs)
+  = if Seq.length objs = 0 then ()
+    else cell_splits g fp (Seq.tail objs)
+#pop-options
+
+/// The weakened completeness condition.
+///
+/// `GC.Spec.FreeList.fl_complete` says every *blue* object is on the chain.
+/// A wosize-0 fragment is blue and cannot be on the chain -- `fl_cell` demands
+/// `wosize >= 1` -- so that form is simply false once right-justified
+/// allocation can leave one. This is the same claim restricted to the blocks
+/// that could be cells at all, which is what the free list was ever about.
+let fl_complete_cells (g: heap) (fp: U64.t) : prop =
+  forall (o: obj_addr). (Seq.mem o (objects zero_addr g) /\ is_cellish g o) ==>
+    FL.reachable_on_fl g fp o
+
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 40"
+let rec orphan_zero (g: heap) (fp: U64.t) (objs: seq obj_addr)
+  : Lemma
+    (requires forall (o: obj_addr). Seq.mem o objs /\ is_cellish g o ==>
+                FL.reachable_on_fl g fp o)
+    (ensures orphan_whsize g fp objs == 0)
+    (decreases Seq.length objs)
+  = if Seq.length objs = 0 then ()
+    else begin
+      let x = Seq.head objs in
+      let tl = Seq.tail objs in
+      Seq.cons_head_tail objs;
+      mem_cons_lemma x x tl;
+      assert (Seq.mem x objs);
+      let aux (y: obj_addr)
+        : Lemma (requires Seq.mem y tl /\ is_cellish g y)
+                (ensures FL.reachable_on_fl g fp y)
+        = mem_tail_implies_mem objs y
+      in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires aux);
+      orphan_zero g fp tl
+    end
+#pop-options
+
+/// THE STRONG PARTITION THEOREM.
+///
+/// Allocated words, plus free words that are actually reachable on the free
+/// list, plus fragment words, is exactly the heap the walk covers. There is no
+/// fourth term: nothing is free-but-unreachable.
+///
+/// The fragment term is the price of right-justification, stated rather than
+/// denied, and it is the only class that is free without being allocatable.
+let heap_partition_strong (g: heap) (fp: U64.t)
+  : Lemma
+    (requires Seq.length g == heap_size /\
+              (forall (x: obj_addr). Seq.mem x (objects zero_addr g) ==>
+                 (is_white x g \/ is_blue x g)) /\
+              fl_complete_cells g fp)
+    (ensures
+      (let objs = objects zero_addr g in
+       U64.v zero_addr
+       + (white_whsize g objs + onchain_whsize g fp objs + frag_whsize g objs)
+         * U64.v mword
+       == WE.walk_end g zero_addr))
+  = let objs = objects zero_addr g in
+    partition_swept g objs;
+    cell_splits g fp objs;
+    orphan_zero g fp objs;
     walk_is_tiled g zero_addr

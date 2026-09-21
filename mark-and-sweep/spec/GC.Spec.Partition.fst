@@ -180,6 +180,12 @@ let total_whsize_cons (g: heap) (x: obj_addr) (s: seq obj_addr)
   : Lemma (total_whsize g (Seq.cons x s) == whsize g x + total_whsize g s)
   = Seq.head_cons x s; Seq.lemma_tl x s
 
+/// The same, for the allocated class.
+let white_whsize_cons (g: heap) (x: obj_addr) (s: seq obj_addr)
+  : Lemma (white_whsize g (Seq.cons x s)
+           == (if is_white x g then whsize g x else 0) + white_whsize g s)
+  = Seq.head_cons x s; Seq.lemma_tl x s
+
 /// THE TILING. The classes above sum to the space the walk actually covers:
 /// stepping block by block from `start` lands exactly at `walk_end`, with no
 /// gap and nothing counted twice. `objects` and `walk_end` share a recursion,
@@ -472,3 +478,136 @@ let alloc_from_block_gives_requested_size
     let bwz = U64.v (getWosize (read_word g hd)) in
     if bwz = wz then alloc_from_block_accounting_exact g obj wz next
     else alloc_from_block_accounting g obj wz next
+
+/// ---------------------------------------------------------------------------
+/// The sum form: how much the allocated class grows
+/// ---------------------------------------------------------------------------
+
+/// Two heaps that agree on every word from `start` upward have the same walk
+/// from `start`, and the same allocated total along it.
+///
+/// Walk-equality and sum-equality are proved together on purpose. Separating
+/// them would mean two inductions over the same recursion, and the second
+/// would still need the first at every step: a shared header gives the same
+/// wosize (so the same next position) AND the same colour (so the same
+/// contribution).
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 150"
+let rec walk_white_agree (g g': heap) (start: hp_addr)
+  : Lemma
+    (requires Seq.length g == heap_size /\ Seq.length g' == heap_size /\
+              (forall (a: hp_addr). U64.v a >= U64.v start ==>
+                 read_word g a == read_word g' a))
+    (ensures objects start g == objects start g' /\
+             white_whsize g (objects start g) == white_whsize g' (objects start g'))
+    (decreases (heap_size - U64.v start))
+  = if U64.v start + 8 >= heap_size then begin
+      assert (objects start g == Seq.empty);
+      assert (objects start g' == Seq.empty)
+    end
+    else begin
+      assert (read_word g start == read_word g' start);
+      let wz = getWosize (read_word g start) in
+      let next = U64.v start + (U64.v wz + 1) * 8 in
+      if next > heap_size || next >= pow2 64 then begin
+        assert (objects start g == Seq.empty);
+        assert (objects start g' == Seq.empty)
+      end
+      else begin
+        f_address_spec start;
+        hd_f_roundtrip start;
+        let o : obj_addr = f_address start in
+        // same header at `start`, so same size and same colour
+        wosize_of_object_spec o g;
+        wosize_of_object_spec o g';
+        assert (whsize g o == whsize g' o);
+        color_of_object_spec o g;
+        color_of_object_spec o g';
+        is_white_iff o g;
+        is_white_iff o g';
+        assert (is_white o g == is_white o g');
+        if next >= heap_size then begin
+          assert (objects start g == Seq.cons o Seq.empty);
+          assert (objects start g' == Seq.cons o Seq.empty);
+          white_whsize_cons g o Seq.empty;
+          white_whsize_cons g' o Seq.empty
+        end
+        else begin
+          aligned_plus_mul8 (U64.v start) (U64.v wz + 1);
+          let nx : hp_addr = mk_hp_addr next in
+          walk_white_agree g g' nx;
+          assert (objects start g == Seq.cons o (objects nx g));
+          assert (objects start g' == Seq.cons o (objects nx g'));
+          white_whsize_cons g o (objects nx g);
+          white_whsize_cons g' o (objects nx g')
+        end
+      end
+    end
+#pop-options
+
+/// **The allocated class grows by exactly the words requested.**
+///
+/// This is the sum form of `alloc_from_block_accounting`, over the walk that
+/// starts at the block being carved. Everything below the block is untouched,
+/// so the whole-heap statement differs from this one only by a prefix that
+/// both sides share -- splitting the walk at an arbitrary address is the one
+/// piece of machinery the repository does not have, and it is the only reason
+/// this is stated from `hd` rather than from `zero_addr`.
+///
+/// `~(is_white obj g)` holds because the block comes off the free list, and it
+/// is needed: if the source block were already allocated the arithmetic would
+/// count it twice.
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 200"
+let alloc_from_block_white_grows
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma
+    (requires (let hd = hd_address obj in
+               let bwz = U64.v (getWosize (read_word g hd)) in
+               Seq.length g == heap_size /\
+               bwz - wz >= 1 /\ wz >= 1 /\ wz < pow2 54 /\ bwz - wz - 1 < pow2 54 /\
+               ~(is_white obj g) /\
+               U64.v hd + (bwz + 1) * 8 < heap_size))
+    (ensures (let hd = hd_address obj in
+              let g' = fst (Alloc.alloc_from_block g obj wz next) in
+              white_whsize g' (objects hd g')
+                == white_whsize g (objects hd g) + (wz + 1)))
+  = let hd = hd_address obj in
+    let bwz = U64.v (getWosize (read_word g hd)) in
+    let leftover = bwz - wz in
+    let g' = fst (Alloc.alloc_from_block g obj wz next) in
+    let ahn = U64.v hd + leftover * 8 in
+    let ah : hp_addr = U64.uint_to_t ahn in
+    let aftn = U64.v hd + (bwz + 1) * 8 in
+    let aft : hp_addr = mk_hp_addr aftn in
+    // sizes and colours of the two rewritten headers
+    alloc_from_block_accounting g obj wz next;
+    // the walk above the block is untouched
+    let frame (a: hp_addr) : Lemma
+      (requires U64.v a >= aftn)
+      (ensures read_word g' a == read_word g a)
+      = Alloc.alloc_from_block_read_outside g obj wz next a
+    in
+    FStar.Classical.forall_intro (FStar.Classical.move_requires frame);
+    walk_white_agree g g' aft;
+    // the block's own two steps in g', and its one step in g
+    // `objects` emits `f_address hd`, and the goal is phrased with `obj`:
+    // this is the direction that identifies them.
+    f_hd_roundtrip obj;
+    hd_address_spec obj;
+    f_address_spec hd; hd_f_roundtrip hd;
+    f_address_spec ah; hd_f_roundtrip ah;
+    let ao : obj_addr = f_address ah in
+    wosize_of_object_spec obj g; wosize_of_object_spec obj g';
+    wosize_of_object_spec ao g';
+    color_of_object_spec obj g'; color_of_object_spec ao g';
+    is_white_iff obj g'; is_white_iff ao g';
+    // the arithmetic that makes the two walks meet again at `aft`
+    assert (ahn + (wz + 1) * 8 == aftn);
+    // one step in g: the block spans to `aft`
+    assert (objects hd g == Seq.cons obj (objects aft g));
+    // two steps in g': the remainder at `hd`, then the object at `ah`
+    assert (objects ah g' == Seq.cons ao (objects aft g'));
+    assert (objects hd g' == Seq.cons obj (objects ah g'));
+    white_whsize_cons g obj (objects aft g);
+    white_whsize_cons g' ao (objects aft g');
+    white_whsize_cons g' obj (objects ah g')
+#pop-options

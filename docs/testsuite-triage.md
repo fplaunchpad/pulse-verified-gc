@@ -270,22 +270,68 @@ counter never drops and the output differs.
   (flambda disabled, no libwin32unix, non-x86 targets). Those are properties of the
   runner, not of the collector.
 
+## Timeouts are not failures, and the gate cannot tell
+
+Three times now the gate has gone red on one check and green on another for the
+same commit, and each time the test involved was timing-sensitive rather than
+broken:
+
+| when | red check | green check |
+|---|---|---|
+| run 33661032604, attempts 1 vs 2 | `ast-invariants` (native) | — |
+| PR #3, push vs pull_request runs | `misc/weaktest.ml` (native) | `lib-systhreads/eintr` (bytecode) |
+
+`weaktest` is the clearest case because the reason string says so outright --
+`Timeout expired, killing all child processes`, never a signal -- and the
+bytecode variant passed in both runs. Measured locally on the fixed allocator:
+
+```
+native weaktest, verified GC:  108.31 s      harness budget was TIMEOUT=120
+native weaktest, stock OCaml:    0.20 s      ~540x slower
+```
+
+So it sat ~10% under the limit and flapped with runner load. `TIMEOUT` is now
+300 in `.github/workflows/testsuite.yml` and `ci/run-testsuite.sh`.
+
+Two things this corrects in the earlier sections of this document.
+
+The 540x is itself a finding, and it belongs with the weak/ephemeron/finaliser
+group: the collector implements no weak table, so a program that hammers a
+`Weak` hashtable degrades enormously. That is a performance consequence of the
+same gap, not a separate defect.
+
+And the "the crash traded places, totals conserved" reading was over-drawn. In
+both pairs the totals happened to match at 69, but each run simply contained
+exactly one timing-sensitive failure; two coin flips landing on the same count
+is not conservation. The substantive point survives in weaker form: a green
+"no new failures" can coexist with a different test having taken the hit, so
+the tally alone is not evidence that nothing changed.
+
 ## Follow-ups this triage suggests
 
-0. **Pin `MIN_EXPANSION_WORDSIZE=8388608` for the one discriminating test in CI.** The
-   gate did catch this bug once, at the default 256 MB heap, and then stopped catching
-   it. A check that fires on some runs and not others is worse than one that never
-   fires, because a green result gets read as a result. Cheapest form: a second
-   `testsuite` leg at the tighter heap, or one extra step over
-   `tests/ast-invariants`.
-1. **Raise `MAX_ROOTS` or make the root buffer grow.** Two failures, both of them OCaml
+0. **Done: gate on the deterministic tests, not on `ast-invariants`.** The
+   earlier suggestion here -- pin `MIN_EXPANSION_WORDSIZE` and re-run
+   `tests/ast-invariants` in CI -- is superseded. `ast-invariants` detects this
+   bug only when the phantom field happens to be followed and faulted on, which
+   is why it fails 100% on Fedora 44 / gcc 16 and passes 15/15 on
+   `ubuntu-latest` with the allocator provably broken in both. Two checks now
+   decide on the code instead of on the platform, and both run in
+   `testsuite.yml` ahead of the suite:
+   `generational/snapshot/alloc_exact_test.c` drives the extracted allocator
+   directly, and `ci/run-promotion-test.sh` drives the promotion path end to
+   end and asserts on the promoted objects' own lengths.
+1. **Do not baseline `weaktest` (or `eintr`).** Both are timing-sensitive and
+   pass most of the time; recording either as an expected failure would hide a
+   real weak-pointer or signals regression later. `ci/expected-failures.txt`
+   now carries that warning where someone would go to add the line.
+2. **Raise `MAX_ROOTS` or make the root buffer grow.** Two failures, both of them OCaml
    tools rather than test programs, and the cheapest fix on the list.
-2. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is
+3. **Re-examine `weaklifetime2`'s internal-error abort when weak support lands.** It is
    the only failure that trips an invariant we wrote, and the reconstruction above should
    be confirmed rather than assumed.
-3. **Process pending actions at allocation points.** Restores the safe point stock
+4. **Process pending actions at allocation points.** Restores the safe point stock
    relies on, fixing `signals_alloc` and plausibly `eintr`. It would also make
    `alloc_async` observable once finalisers exist — today that test fails one layer
    earlier, on the empty finaliser queue. Adjacent to work already on main.
-4. **Reject unsupported `Gc.set` fields instead of corrupting the heap.** `pr9326`
+5. **Reject unsupported `Gc.set` fields instead of corrupting the heap.** `pr9326`
    segfaults where raising `Invalid_argument` would be honest.

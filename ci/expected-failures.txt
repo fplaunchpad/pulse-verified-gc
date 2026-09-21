@@ -28,6 +28,21 @@
 #     MIN_EXPANSION_WORDSIZE=8388608 ./test.opt <ocaml-tree-root>
 #
 # still reproduces it on any branch that predates the fix.
+#
+# DO NOT BASELINE tests/misc/'weaktest.ml' with 1 (native).
+#
+# It appears as a NEW FAILURE from time to time, and the reason is always
+# "Timeout expired", never a signal. It is not a collector fault: the test
+# takes 108s natively against this GC and 0.2s against stock, because the
+# collector implements no weak table and weaktest hammers a Weak hashtable.
+# Against the old 120s budget that flapped -- in PR #3 it timed out in one
+# check and passed in the other on the same commit. TIMEOUT is now 300.
+#
+# Baselining it would hide a real weak-pointer regression later. If it times
+# out again, the collector got slower or the runner did; investigate that
+# rather than adding a line here. The same caution applies to
+# tests/lib-systhreads/'eintr.ml', which is timing-sensitive for its own
+# reasons (Thread.delay, tick thread) and has traded places with it.
 tests/asmcomp/'polling_insertion.ml' with 1.1 (native)
 tests/backtrace/'callstack.ml' with 1.1.1 (native)
 tests/backtrace/'callstack.ml' with 1.1.2 (bytecode)

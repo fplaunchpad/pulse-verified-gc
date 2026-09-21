@@ -74,6 +74,18 @@ jobs:
           set -o pipefail
           make ocamltest 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
 
+      # The allocator bug of issue #19 reached objects only through PROMOTION:
+      # the direct major path is masked because caml_alloc_shr_aux overwrites
+      # the header. This drives that path deliberately -- fill the heap so the
+      # free-list tail is gone, free wosize-101 blocks pinned between
+      # survivors, then promote wosize-100 objects -- and checks the promoted
+      # objects' own lengths. Unlike ast-invariants it does not depend on a
+      # crash, so it is not platform-sensitive: ast-invariants fails 100% on
+      # Fedora and passes 15/15 on ubuntu-latest with the allocator broken in
+      # both. Seconds, after the toolchain exists.
+      - name: Allocator size-exactness through promotion
+        run: sh ci/run-promotion-test.sh
+
       # The GC bugs this repo has hit are mostly silent-corruption bugs that
       # surface as a crash in an unrelated compilation unit, so the useful
       # signal is *which* unit was being compiled and what the runtime said.

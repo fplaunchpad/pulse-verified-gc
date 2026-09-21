@@ -301,17 +301,6 @@ let rec cell_splits (g: heap) (fp: U64.t) (objs: seq obj_addr)
     else cell_splits g fp (Seq.tail objs)
 #pop-options
 
-/// The weakened completeness condition.
-///
-/// `GC.Spec.FreeList.fl_complete` says every *blue* object is on the chain.
-/// A wosize-0 fragment is blue and cannot be on the chain -- `fl_cell` demands
-/// `wosize >= 1` -- so that form is simply false once right-justified
-/// allocation can leave one. This is the same claim restricted to the blocks
-/// that could be cells at all, which is what the free list was ever about.
-let fl_complete_cells (g: heap) (fp: U64.t) : prop =
-  forall (o: obj_addr). (Seq.mem o (objects zero_addr g) /\ is_cellish g o) ==>
-    FL.reachable_on_fl g fp o
-
 #push-options "--fuel 2 --ifuel 2 --z3rlimit 40"
 let rec orphan_zero (g: heap) (fp: U64.t) (objs: seq obj_addr)
   : Lemma
@@ -338,6 +327,12 @@ let rec orphan_zero (g: heap) (fp: U64.t) (objs: seq obj_addr)
 
 /// THE STRONG PARTITION THEOREM.
 ///
+/// The completeness hypothesis is `GC.Spec.FreeList.fl_complete` itself. It
+/// used to say every *blue* object is on the chain, which a fragment
+/// falsifies; it now says every blue object that can hold a link is, which is
+/// exactly the condition under which the orphan class is empty. This module
+/// briefly carried its own copy of that weakening -- no longer needed.
+///
 /// Allocated words, plus free words that are actually reachable on the free
 /// list, plus fragment words, is exactly the heap the walk covers. There is no
 /// fourth term: nothing is free-but-unreachable.
@@ -349,7 +344,7 @@ let heap_partition_strong (g: heap) (fp: U64.t)
     (requires Seq.length g == heap_size /\
               (forall (x: obj_addr). Seq.mem x (objects zero_addr g) ==>
                  (is_white x g \/ is_blue x g)) /\
-              fl_complete_cells g fp)
+              FL.fl_complete g fp)
     (ensures
       (let objs = objects zero_addr g in
        U64.v zero_addr
@@ -400,7 +395,13 @@ let alloc_from_block_accounting
               // words smaller than it was
               (U64.v (getWosize (read_word g' hd)) + 1) + (wz + 1) == bwz + 1 /\
               // and exactly those `wz + 1` words are the allocated object
-              U64.v (getWosize (read_word g' ah)) == wz))
+              U64.v (getWosize (read_word g' ah)) == wz /\
+              // Sizes alone would be satisfied by an allocator that carved the
+              // block correctly and coloured everything free, so the classes
+              // have to be pinned too: the words leave the free class and
+              // arrive in the allocated one.
+              getColor (read_word g' ah) == White /\
+              getColor (read_word g' hd) == Blue))
   = let hd = hd_address obj in
     let bwz = U64.v (getWosize (read_word g hd)) in
     let leftover = bwz - wz in
@@ -417,7 +418,12 @@ let alloc_from_block_accounting
     // the remainder header: written first, and `ah <> hd` because leftover >= 1
     read_write_different g1 ah hd ahdr;
     read_write_same g hd rhdr;
-    ACore.make_header_getWosize (U64.uint_to_t (leftover - 1)) Alloc.blue_bits 0UL
+    ACore.make_header_getWosize (U64.uint_to_t (leftover - 1)) Alloc.blue_bits 0UL;
+    // colours: the header bits decode to the classes
+    ACore.make_header_getColor (U64.uint_to_t wz) Alloc.white_bits 0UL;
+    getColor_raw ahdr;
+    ACore.make_header_getColor (U64.uint_to_t (leftover - 1)) Alloc.blue_bits 0UL;
+    getColor_raw rhdr
 #pop-options
 
 /// The exact-fit arm. The block becomes the object outright: no remainder, no

@@ -36,6 +36,8 @@ module U64 = FStar.UInt64
 module WE  = GC.Spec.WalkEnd
 module IndDesc = FStar.IndefiniteDescription
 module FL  = GC.Spec.FreeList
+module Alloc = GC.Spec.Allocator
+module ACore = GC.Spec.Allocator.Lemmas.Core
 
 /// Machine words an object occupies: its fields plus its header.
 let whsize (g: heap) (x: obj_addr) : GTot nat = 1 + U64.v (wosize_of_object x g)
@@ -359,3 +361,108 @@ let heap_partition_strong (g: heap) (fp: U64.t)
     cell_splits g fp objs;
     orphan_zero g fp objs;
     walk_is_tiled g zero_addr
+
+/// ---------------------------------------------------------------------------
+/// Allocation accounting: the words the block loses are the words the object
+/// gains
+/// ---------------------------------------------------------------------------
+///
+/// The partition above is bookkeeping -- it is true of any heap, so on its own
+/// it forbids nothing. This is the statement with teeth, and the reason it has
+/// any is that the REQUESTED size appears in it.
+///
+/// Plain conservation would not do. "The total is unchanged" is satisfied by
+/// the pre-fix allocator too: at a one-word leftover it handed the whole block
+/// over, so a blue block of whsize `bwz + 1` became a white block of whsize
+/// `bwz + 1` and nothing was lost. The defect is invisible to a law that only
+/// counts words. It becomes visible the moment the law says how many words the
+/// caller asked for.
+///
+/// So: the source block keeps its address and shrinks by exactly `wz + 1`
+/// words, and exactly `wz + 1` words appear at the right-justified header.
+/// The pre-fix allocator fails this -- it left `bwz` in the header at `hd` and
+/// wrote nothing at `hd + leftover * 8` -- which is issue #19 stated as
+/// arithmetic.
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 80"
+let alloc_from_block_accounting
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma
+    (requires (let hd = hd_address obj in
+               let bwz = U64.v (getWosize (read_word g hd)) in
+               bwz - wz >= 1 /\ wz < pow2 54 /\ bwz - wz - 1 < pow2 54 /\
+               U64.v hd + (bwz - wz) * 8 < heap_size))
+    (ensures (let hd = hd_address obj in
+              let bwz = U64.v (getWosize (read_word g hd)) in
+              let leftover = bwz - wz in
+              let g' = fst (Alloc.alloc_from_block g obj wz next) in
+              let ah : hp_addr = U64.uint_to_t (U64.v hd + leftover * 8) in
+              // the block at `hd` is still a block, and it is exactly `wz + 1`
+              // words smaller than it was
+              (U64.v (getWosize (read_word g' hd)) + 1) + (wz + 1) == bwz + 1 /\
+              // and exactly those `wz + 1` words are the allocated object
+              U64.v (getWosize (read_word g' ah)) == wz))
+  = let hd = hd_address obj in
+    let bwz = U64.v (getWosize (read_word g hd)) in
+    let leftover = bwz - wz in
+    Alloc.alloc_from_block_split_normal g obj wz next;
+    let rhdr = Alloc.make_header (U64.uint_to_t (leftover - 1)) Alloc.blue_bits 0UL in
+    let g1 = write_word g hd rhdr in
+    let ahn = U64.v hd + leftover * 8 in
+    let ah : hp_addr = U64.uint_to_t ahn in
+    let ahdr = Alloc.make_header (U64.uint_to_t wz) Alloc.white_bits 0UL in
+    let g2 = write_word g1 ah ahdr in
+    // the allocated header: written last, so read it back directly
+    read_write_same g1 ah ahdr;
+    ACore.make_header_getWosize (U64.uint_to_t wz) Alloc.white_bits 0UL;
+    // the remainder header: written first, and `ah <> hd` because leftover >= 1
+    read_write_different g1 ah hd ahdr;
+    read_write_same g hd rhdr;
+    ACore.make_header_getWosize (U64.uint_to_t (leftover - 1)) Alloc.blue_bits 0UL
+#pop-options
+
+/// The exact-fit arm. The block becomes the object outright: no remainder, no
+/// fragment, and the object declares exactly what was asked for. Stated
+/// separately because there is no leftover to account for -- the whole block
+/// is the `wz + 1` words.
+///
+/// The pre-fix allocator happened to get this arm right, because at
+/// `leftover = 0` the block size and the requested size coincide. It is the
+/// `leftover = 1` arm above where the two part company.
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 40"
+let alloc_from_block_accounting_exact
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma
+    (requires (let bwz = U64.v (getWosize (read_word g (hd_address obj))) in
+               bwz == wz /\ wz < pow2 54))
+    (ensures (let hd = hd_address obj in
+              let g' = fst (Alloc.alloc_from_block g obj wz next) in
+              U64.v (getWosize (read_word g' hd)) == wz))
+  = let hd = hd_address obj in
+    Alloc.alloc_from_block_exact g obj wz next;
+    let ahdr = Alloc.make_header (U64.uint_to_t wz) Alloc.white_bits 0UL in
+    read_write_same g hd ahdr;
+    ACore.make_header_getWosize (U64.uint_to_t wz) Alloc.white_bits 0UL
+#pop-options
+
+/// Both arms together: however the block is carved, the object the allocator
+/// hands back declares exactly the number of fields that were requested.
+///
+/// This is the whole of issue #19 as a single statement. It is not a counting
+/// law -- counting cannot see the defect, because the pre-fix allocator lost no
+/// words -- it is a law relating what was asked for to what was produced.
+let alloc_from_block_gives_requested_size
+  (g: heap) (obj: obj_addr) (wz: nat) (next: U64.t)
+  : Lemma
+    (requires (let hd = hd_address obj in
+               let bwz = U64.v (getWosize (read_word g hd)) in
+               bwz >= wz /\ wz >= 1 /\ wz < pow2 54 /\ bwz - wz - 1 < pow2 54 /\
+               U64.v hd + (bwz - wz) * 8 < heap_size))
+    (ensures (let hd = hd_address obj in
+              let bwz = U64.v (getWosize (read_word g hd)) in
+              let g' = fst (Alloc.alloc_from_block g obj wz next) in
+              let ah : hp_addr = U64.uint_to_t (U64.v hd + (bwz - wz) * 8) in
+              U64.v (getWosize (read_word g' ah)) == wz))
+  = let hd = hd_address obj in
+    let bwz = U64.v (getWosize (read_word g hd)) in
+    if bwz = wz then alloc_from_block_accounting_exact g obj wz next
+    else alloc_from_block_accounting g obj wz next

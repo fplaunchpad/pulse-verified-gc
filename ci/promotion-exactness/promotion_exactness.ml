@@ -105,19 +105,22 @@ let () =
   done
 
 let () =
-  let inflated = ref 0 and first = ref (-1) and first_got = ref 0 in
+  (* Both directions. The bug inflates, but the contract is exact size, and a
+     promoted object that under-declares is just as wrong -- it would hide
+     fields the program wrote. Testing only `>` would report that as a pass. *)
+  let wrong = ref 0 and first = ref (-1) and first_got = ref 0 in
   for j = 0 to m - 1 do
     let got = Array.length promoted.(j) in
-    if got > obj_wz then begin
-      incr inflated;
+    if got <> obj_wz then begin
+      incr wrong;
       if !first < 0 then begin first := j; first_got := got end
     end
   done;
-  if !inflated = 0 then begin
+  if !wrong = 0 then begin
     Printf.printf
       "ok: %d promoted objects, every one declares exactly %d fields\n" m obj_wz;
     exit 0
-  end else begin
+  end else if !first_got > obj_wz then begin
     Printf.printf
       "FAIL: %d of %d promoted objects declare MORE fields than they own\n\
       \  first at index %d: asked for %d fields, header says %d\n\
@@ -126,6 +129,16 @@ let () =
       \  request and kept the BLOCK's size in the header; promotion copied that\n\
       \  header verbatim, so field %d of this object is not a value -- reading\n\
       \  it, or letting a collector follow it, is undefined.\n"
-      !inflated m !first obj_wz !first_got (!first_got - obj_wz) obj_wz;
+      !wrong m !first obj_wz !first_got (!first_got - obj_wz) obj_wz;
+    exit 1
+  end else begin
+    Printf.printf
+      "FAIL: %d of %d promoted objects declare FEWER fields than they own\n\
+      \  first at index %d: asked for %d fields, header says %d\n\
+      \n\
+      \  Not the inflation of issue #19 but the opposite: the promoted header\n\
+      \  under-declares, so fields the program wrote are outside the object and\n\
+      \  a collector will not trace them.\n"
+      !wrong m !first obj_wz !first_got;
     exit 1
   end

@@ -9,23 +9,40 @@
 # Entries should only ever be REMOVED as fixes land, unless a note says why.
 #
 # Provenance, because a baseline is a claim about a specific collector: this
-# list was measured on the reference branch. Its GC snapshot is identical to
-# this one apart from the allocator fix ("patch 17"); the bridge and the
-# runtime patch differ too, so treat the list as a strong starting point
-# rather than a guarantee, and regenerate from a run of this branch.
+# list was measured on the reference branch, whose GC snapshot differed from
+# this one only in the allocator; the bridge and the runtime patch differ too,
+# so treat the list as a strong starting point rather than a guarantee, and
+# regenerate from a run of this branch.
 #
-# EXPECT ONE NEW FAILURE:
+# NO LONGER EXPECTED:
 #
 #     tests/ast-invariants/'test.ml' with 1.1 (native)
 #
-# That is the allocator bug ("patch 17"), not a broken pipeline: a free block
-# one word too large is handed over whole, and the header records the block's
-# size rather than the requested size, so the object declares a phantom field
-# holding 0 -- not a representable OCaml value. Reproduce it with:
+# That was the allocator bug ("patch 17"): a free block one word too large was
+# handed over whole, and the header recorded the block's size rather than the
+# requested size, so the object declared a phantom field holding 0 -- not a
+# representable OCaml value. The allocator is now size-exact and
+# right-justified, so the test passes and, as the note this one replaces
+# promised, this file needed no change. It was never baselined; keep it so.
 #
 #     MIN_EXPANSION_WORDSIZE=8388608 ./test.opt <ocaml-tree-root>
 #
-# Do not baseline it. Fix it, then this file needs no change.
+# still reproduces it on any branch that predates the fix.
+#
+# DO NOT BASELINE tests/misc/'weaktest.ml' with 1 (native).
+#
+# It appears as a NEW FAILURE from time to time, and the reason is always
+# "Timeout expired", never a signal. It is not a collector fault: the test
+# takes 108s natively against this GC and 0.2s against stock, because the
+# collector implements no weak table and weaktest hammers a Weak hashtable.
+# Against the old 120s budget that flapped -- in PR #3 it timed out in one
+# check and passed in the other on the same commit. TIMEOUT is now 300.
+#
+# Baselining it would hide a real weak-pointer regression later. If it times
+# out again, the collector got slower or the runner did; investigate that
+# rather than adding a line here. The same caution applies to
+# tests/lib-systhreads/'eintr.ml', which is timing-sensitive for its own
+# reasons (Thread.delay, tick thread) and has traded places with it.
 tests/asmcomp/'polling_insertion.ml' with 1.1 (native)
 tests/backtrace/'callstack.ml' with 1.1.1 (native)
 tests/backtrace/'callstack.ml' with 1.1.2 (bytecode)

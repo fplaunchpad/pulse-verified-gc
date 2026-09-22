@@ -45,17 +45,16 @@ jobs:
 
       # --- Issue #19 regression tests -------------------------------------
       #
-      # BOTH OF THESE FAIL ON MAIN TODAY, ON PURPOSE. They detect the
-      # allocator bug of issue #19: when a free block is exactly one word
-      # longer than the request, the whole block is handed over and the
-      # header records the BLOCK's size, so the object declares a field it
-      # does not own.
+      # These detect the allocator bug of issue #19: when a free block is
+      # exactly one word longer than the request, the whole block is handed
+      # over and the header records the BLOCK's size, so the object declares
+      # a field it does not own. Right-justification, in this PR, is the fix.
       #
-      # They are `continue-on-error` until the fix lands, so main stays green
-      # while the bug is measured rather than merely described. When the
-      # right-justification fix merges, DELETE the continue-on-error lines --
-      # both must then pass, and a regression must break the build. That flip
-      # is the point of landing them first.
+      # They landed on main FAILING (PR #6), as `continue-on-error`, so the
+      # bug was measured rather than merely described. THIS is the PR that
+      # fixes it, so the flip promised there happens here: the
+      # continue-on-error lines are gone and both are hard gates. A
+      # regression breaks the build.
       #
       # Seconds, and deterministic. `tests/ast-invariants` covers the same
       # defect end to end but only sometimes: it fails 100% on Fedora 44 and
@@ -64,7 +63,6 @@ jobs:
       # on. These decide on the code, not the platform.
       - name: "Issue #19: allocator size-exactness (unit)"
         id: unit19
-        continue-on-error: true
         run: |
           set +e
           out=$(make -C generational/snapshot alloc-exact-test 2>&1); rc=$?
@@ -72,7 +70,7 @@ jobs:
           {
             echo "## Issue #19 — allocator size-exactness (unit)"
             echo
-            echo "exit $rc — expected **non-zero until the fix lands**"
+            echo "exit $rc"
             echo '```'
             echo "$out" | tail -12
             echo '```'
@@ -111,7 +109,6 @@ jobs:
       # does NOT run this collector.
       - name: "Issue #19: allocator size-exactness (end to end, promotion)"
         id: e2e19
-        continue-on-error: true
         run: |
           set +e
           out=$(sh ci/run-promotion-test.sh 2>&1); rc=$?
@@ -119,7 +116,7 @@ jobs:
           {
             echo "## Issue #19 — through promotion (end to end)"
             echo
-            echo "exit $rc — expected **non-zero until the fix lands**"
+            echo "exit $rc"
             echo '```'
             echo "$out" | tail -12
             echo '```'
@@ -137,9 +134,8 @@ jobs:
             echo "| unit (extracted allocator) | ${{ steps.unit19.outcome }} |"
             echo "| end to end (promotion) | ${{ steps.e2e19.outcome }} |"
             echo
-            echo "Both are expected to FAIL while the bug is present. When the"
-            echo "right-justification fix lands, remove the two"
-            echo "\`continue-on-error\` lines so these become hard gates."
+            echo "Both must pass. They failed on main until the"
+            echo "right-justification fix; they are hard gates now."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The GC bugs this repo has hit are mostly silent-corruption bugs that
@@ -176,7 +172,15 @@ jobs:
         working-directory: generational/ocaml-integration/ocaml-4.14-verified-gen/testsuite
         env:
           OCAMLRUNPARAM: b,v=0
-          TIMEOUT: 120
+          # 300, not 120. The verified collector implements no weak table, so
+          # weak-heavy tests run orders of magnitude slower than stock:
+          # tests/misc/weaktest.ml takes 108s natively here against 0.2s on
+          # stock, which sat close enough to a 120s budget to flap. It timed out
+          # in one check of PR #3 and passed in the other on the same commit,
+          # and a timeout is then reported as a NEW FAILURE, so the gate flapped
+          # with it. This is headroom for a known-slow collector, not tolerance
+          # for a hang -- the job itself still has timeout-minutes.
+          TIMEOUT: 300
         run: make all 2>&1 | tee "$GITHUB_WORKSPACE/testsuite.log"
 
       - name: Sanity-check that tests actually ran
@@ -195,7 +199,7 @@ jobs:
         working-directory: generational/ocaml-integration/ocaml-4.14-unchanged
         env:
           OCAMLRUNPARAM: b,v=0
-          TIMEOUT: 120
+          TIMEOUT: 300
         run: |
           make ocamltest
           cd testsuite && make all 2>&1 | tee "$GITHUB_WORKSPACE/stock.log"

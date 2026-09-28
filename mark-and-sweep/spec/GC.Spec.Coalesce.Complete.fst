@@ -57,6 +57,7 @@ module FL = GC.Spec.FreeList
 module FLD = GC.Spec.FreeList.Descending
 module Part = GC.Spec.Partition
 module WE = GC.Spec.WalkEnd
+module SI = GC.Spec.SweepInv
 
 #set-options "--fuel 0 --ifuel 0 --z3rlimit 40"
 
@@ -664,5 +665,75 @@ let coalesce_partition (g: heap)
     coalesce_all_white_or_blue g;
     coalesce_complete g;
     Part.heap_partition_strong (fst (coalesce g)) (snd (coalesce g))
+#pop-options
+
+/// ---------------------------------------------------------------------------
+/// Consolidation with the coalescer's conservation theorems
+/// ---------------------------------------------------------------------------
+///
+/// `GC.Spec.Coalesce.coalesce_correct` and `GC.Spec.Partition` were written
+/// independently and converged: `Coalesce.whsize` and `Partition.whsize` are
+/// the same definition, and `Coalesce.blue_whsize` folds over the blue objects
+/// exactly as `Partition.cell_whsize` and `Partition.frag_whsize` fold over the
+/// two halves of that class.  This lemma is the bridge, and it is the only
+/// thing needed to make the two sets of theorems compose.
+///
+/// (The two copies of `whsize` are left alone: they are definitionally equal,
+/// so nothing is lost, and moving the definition down into `GC.Spec.Object`
+/// where it belongs would edit `GC.Spec.Coalesce.fst` while PR #20 is open.)
+#push-options "--fuel 2 --ifuel 1 --z3rlimit 40"
+let rec blue_splits (g: heap) (objs: seq obj_addr)
+  : Lemma
+    (ensures blue_whsize g objs == Part.cell_whsize g objs + Part.frag_whsize g objs)
+    (decreases Seq.length objs)
+  = if Seq.length objs = 0 then ()
+    else blue_splits g (Seq.tail objs)
+#pop-options
+
+/// **The collector recovers every free word it can hand back.**
+///
+/// Neither side could state this alone.  `coalesce_correct` conserves blue
+/// whsize but never mentions `snd (coalesce g)`, so it holds of a coalescer
+/// that returns a null head and reclaims nothing findable.  `GC.Spec.Partition`
+/// decomposes a heap into allocated, on-list and fragment words, but its
+/// `fl_complete` hypothesis had no base case.  Put together with
+/// `coalesce_complete`:
+///
+///   the words reachable on the post-collection free list,
+///   plus the fragment words,
+///   are exactly the blue words the sweeper produced.
+///
+/// So there is no free space that survives collection without becoming either
+/// allocatable or a fragment -- no fourth class, and nothing merely mislaid.
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 150"
+let coalesce_recovers_free_space (g: heap)
+  : Lemma
+    (requires post_sweep_strong g /\ SI.heap_objects_dense g /\
+              Seq.length g == heap_size /\
+              Seq.length (objects zero_addr g) > 0)
+    (ensures (
+      let r = coalesce g in
+      let g' = fst r in
+      let objs' = objects zero_addr g' in
+      Part.onchain_whsize g' (snd r) objs' + Part.frag_whsize g' objs'
+        == total_blue_whsize g))
+  = let r = coalesce g in
+    let g' = fst r in
+    let fp' = snd r in
+    let objs' = objects zero_addr g' in
+    coalesce_preserves_length g;
+    // Their half: no free word is gained or lost.
+    coalesce_conserves_whsize g;
+    blue_splits g' objs';
+    // This branch's half: every free block that can hold a link is on the list.
+    coalesce_complete g;
+    Part.cell_splits g' fp' objs';
+    let no_orphans (o: obj_addr)
+      : Lemma (requires Seq.mem o objs' /\ Part.is_cellish g' o)
+              (ensures FL.reachable_on_fl g' fp' o)
+      = FL.fl_complete_elim g' fp' o
+    in
+    FStar.Classical.forall_intro (FStar.Classical.move_requires no_orphans);
+    Part.orphan_zero g' fp' objs'
 #pop-options
 

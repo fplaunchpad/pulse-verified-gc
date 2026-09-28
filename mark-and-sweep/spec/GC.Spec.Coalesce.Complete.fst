@@ -776,3 +776,28 @@ let fused_partition (h_init h_mark: heap) (roots: seq obj_addr) (fp: U64.t)
     coalesce_partition (fst (SpecSweep.sweep h_mark fp))
 #pop-options
 
+/// **What the identity actually forbids.**
+///
+/// The partition is an equation between counts, so on its own it is easy to
+/// mistake for bookkeeping.  It is not: `onchain_whsize` counts only blocks
+/// *reachable from `fp`*, so the equation can only balance if no free block is
+/// missing from the chain.  Read backwards, the identity says exactly that.
+#push-options "--fuel 1 --ifuel 1 --z3rlimit 100"
+let partition_identity_forces_no_orphans (g: heap) (fp: U64.t)
+  : Lemma
+    (requires
+      Seq.length g == heap_size /\
+      (forall (x: obj_addr). Seq.mem x (objects zero_addr g) ==>
+         (is_white x g \/ is_blue x g)) /\
+      (let objs = objects zero_addr g in
+       U64.v zero_addr
+       + (Part.white_whsize g objs + Part.onchain_whsize g fp objs
+          + Part.frag_whsize g objs) * U64.v mword
+       == WE.walk_end g zero_addr))
+    (ensures Part.orphan_whsize g fp (objects zero_addr g) == 0)
+  = let objs = objects zero_addr g in
+    Part.walk_is_tiled g zero_addr;
+    Part.partition_swept g objs;
+    Part.cell_splits g fp objs
+#pop-options
+

@@ -5,11 +5,23 @@ the request, the pre-fix allocator hands the whole block over and writes the
 header with the *block's* wosize instead of the requested one, so the object
 declares a field it does not own.
 
-Both **fail on `main` today**, on purpose. They are wired into
-`.github/workflows/testsuite.yml` as `continue-on-error` so `main` stays green
-while the bug is measured rather than merely described. When the
-right-justification fix lands, delete those two lines and they become hard
-gates.
+Both **failed on `main`** when they landed (PR #6), on purpose, wired into
+`.github/workflows/testsuite.yml` as `continue-on-error` so `main` stayed green
+while the bug was measured rather than merely described. This branch is the
+right-justification fix, so that flip has happened: the `continue-on-error`
+lines are gone and both are hard gates. A regression breaks the build.
+
+To see them fail again, build the runtime from a pre-fix snapshot:
+
+```sh
+git archive origin/main~N generational/snapshot | tar -x -C /tmp/pre --strip-components=2
+gmake -C generational/ocaml-integration/ocaml-4.14-verified-gen/runtime \
+      ocamlrun libasmrun.a SNAPSHOT=/tmp/pre
+```
+
+Pass `SNAPSHOT=` to whichever `make` you invoke -- it propagates to the
+sub-make, but staging the `.a` files by hand and then running the runtime make
+without it will silently rebuild them from the default snapshot.
 
 | test | what it drives | run it |
 | --- | --- | --- |

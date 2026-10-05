@@ -139,7 +139,9 @@ The caller is `bool Spike_CasProbe_try_claim(uint32_t *r, uint32_t id) { return 
 
 ## Q3. Runtime (OCaml 4.14)
 
-**Answer. Not tested.** The precondition, extracted C for the two-thread CAS program, does not exist (Q1 and Q2). The two C-side tools are in place:
+**Answer. Not tested in Spike 1; answered by Spike 2 below.** Spike 2's extracted C, with a pthread-based `par_env`, runs inside OCaml 4.14.0 as both bytecode and native.
+
+Originally: The precondition, extracted C for the two-thread CAS program, does not exist (Q1 and Q2). The two C-side tools are in place:
 
 - The `4.14.0` opam switch is present (`ocamlc` and `ocamlopt` 4.14.0, `threads.posix` installed).
 - Apple clang 12.0.0 on x86_64 is available.
@@ -192,83 +194,121 @@ The open choice is whether that trusted surface is acceptable for Phase 1. Two a
 
 # Spike 2: option A, parallel composition over top-level functions plus an environment
 
-The brief: declare an assumed Pulse operation over top-level functions plus an explicit environment, with `Pulse.Lib.Par.par`'s specification. Give it a pthread C body. Use it so that two threads each fill their own half of one array, and the postcondition states the whole array afterwards. No atomics.
+The brief:
 
-## Outcome: verifies, but stopped at extraction
+- Declare an assumed Pulse operation over top-level functions plus an explicit environment, with `Pulse.Lib.Par.par`'s specification.
+- Write its C body with `pthread_create` and `pthread_join`.
+- Use it so that two threads each fill their own half of one array, with a postcondition that states the whole array.
+- Extract, compile, run under ThreadSanitizer, and call it from OCaml 4.14, as bytecode and as native.
+- No atomics.
+
+## Outcome: every step passes
 
 | Step | Result |
 |---|---|
 | Verify `Spike.ParEnv` (the assumed operation) | **yes** |
-| Verify `Spike.FillHalves` (the program) | **yes** |
-| Extract `Spike.ParEnv` | **no**: F* drops the declaration (below) |
-| krml on `Spike.FillHalves` | the C is emitted, but it calls an undeclared `Spike_ParEnv_par_env` |
-| C body, compile, ThreadSanitizer, OCaml bytecode and native | **not performed** |
+| Verify `Spike.FillHalves` (the program) | **yes**, no admits; the only trusted item is `par_env` |
+| Extract with F* `--codegen krml`, then krml (repo flags) | **yes**, with a typed `extern` prototype for `par_env` |
+| Compile with the hand-written `par_env.c` (Apple clang 12, `-Wall -Wextra`) | **yes**, no warnings |
+| Run | `ok: 1000001 elements, two threads` |
+| ThreadSanitizer, the spike (5 runs) | **no reports**, all `ok`, two distinct threads each time |
+| ThreadSanitizer, racy control | **data race reported**, so TSan is live |
+| OCaml 4.14.0, bytecode (`ocamlc -custom`) | `ok: OCaml 4.14.0 bytecode, 1000001 elements, two threads` |
+| OCaml 4.14.0, native (`ocamlopt`) | `ok: OCaml 4.14.0 native, 1000001 elements, two threads` |
+| A second thread really ran (C, TSan, bytecode, native) | checked by the test itself: the two branches record `pthread_self()`, and the test fails unless the ids differ |
 
-## The assumed operation (`Spike.ParEnv.fst`)
+One deviation needs flagging. **The TSan builds use Homebrew clang 18.1.8, not the system Apple clang 12.0.0.** Under Apple clang 12 on macOS 15.7.9, *an empty `int main(void){return 0;}`* compiled with `-fsanitize=thread` segfaults (exit 139). That is a broken sanitizer runtime on this OS, unrelated to the spike. The spike's own TSan binary crashed the same way before printing anything. Homebrew clang 18.1.8 runs the same empty program cleanly, so `build_c.sh` uses it for the two TSan builds only (`TSAN_CC`). The plain C build and the OCaml builds use the system compiler. F* and krml remain the pinned `./fstar`.
 
-```fstar
-assume val par_env
-  (#ea #eb: Type0)
-  (#preL #postL: ea -> slprop)
-  (#preR #postR: eb -> slprop)
-  (ef: ea)
-  (eg: eb)
-  {| is_send (preL ef) |} {| is_send (postL ef) |}
-  {| is_send (preR eg) |} {| is_send (postR eg) |}
-  (f: (e: ea -> stt unit (preL e) (fun _ -> postL e)))
-  (g: (e: eb -> stt unit (preR e) (fun _ -> postR e)))
-  : stt_div unit (preL ef ** preR eg) (fun _ -> postL ef ** postR eg)
-```
+## The first attempt: a generic declaration does not extract
 
-This is `par`'s specification with two changes:
-
-- Each branch is a function of an environment value.
-- Each pre- and postcondition is indexed by that environment.
-
-The result is `stt_div`, as with `par`. The branches are terminating `stt`, as with `par`.
-
-The environments and instances come before `f` and `g` because Pulse does not resolve typeclass arguments that come last. With the original order, the call failed with *"This function is partially applied. Remaining type: {| _: is_send (half_pre el) |} -> …"*.
-
-## The program (`Spike.FillHalves.fst`)
-
-- The environment is a record: `half = { arr: array U64.t; lo: SZ.t; hi: SZ.t; v: U64.t }`.
-- `half_pre e = exists* s. pts_to_range e.arr lo hi s`.
-- `half_post e = pts_to_range e.arr lo hi (Seq.create (len lo hi) e.v)`.
-- `fill_range` is a terminating `while` loop over `Pulse.Lib.Array.PtsToRange.pts_to_range_upd`. It needs a `decreases` clause, because an undecorated loop is `stt_div` and `par`'s branches must be `stt`.
-- `fill_half (e: half)` is the top-level branch function.
-- The entry point is `fill_halves`:
-  - `requires A.pts_to a s ** pure (Seq.length s == SZ.v n)`
-  - `ensures A.pts_to a (Seq.append (Seq.create (n/2) 1UL) (Seq.create (n - n/2) 2UL))`
-  - It splits with `pts_to_range_split`, calls `par_env … el er fill_half fill_half`, and rejoins with `pts_to_range_join`.
-
-Both modules verify with the repo flags, with no admits in the program. The only trusted item is `par_env`.
-
-## Why it stops: F* will not extract a polymorphic assumed operation
-
-From `fstar.exe --codegen krml --extract_module Spike.ParEnv Spike.ParEnv.fst`:
+The first version of `par_env` was generic over the environment types (`#ea #eb: Type0`). It verified, but F* would not extract it:
 
 ```
 Not extracting Spike.ParEnv.par_env to KaRaMeL (polymorphic assumes are not supported)
 ```
 
-The call site does extract (`_extract_fill/Spike_FillHalves.c`). The erased slprop and `is_send` arguments survive as `(void *)0U` placeholders, and no header declares the callee:
+The call site was still emitted, against an undeclared `Spike_ParEnv_par_env`. It had 12 arguments, 8 of them `(void *)0U` placeholders for erased proof terms. A hand-written C body would have had to match that call with nothing to check it against.
 
-```c
-void Spike_FillHalves_fill_halves(uint64_t *a, size_t n)
-{
-  size_t mid = n / (size_t)2U;
-  Spike_FillHalves_half el = { .arr = a, .lo = (size_t)0U, .hi = mid, .v = 1ULL };
-  Spike_FillHalves_half er = { .arr = a, .lo = mid, .hi = n, .v = 2ULL };
-  Spike_ParEnv_par_env((void *)0U, (void *)0U, (void *)0U, (void *)0U,
-    el, er,
-    (void *)0U, (void *)0U, (void *)0U, (void *)0U,
-    Spike_FillHalves_fill_half, Spike_FillHalves_fill_half);
+We chose option 1: make `par_env` monomorphic in a concrete environment type, still generic in the (erased) pre- and postconditions.
+
+## The assumed operation (`Spike.ParEnv.fst`)
+
+```fstar
+noeq
+type half = {
+  arr: A.array U64.t;
+  lo: SZ.t;
+  hi: SZ.t;
+  v: U64.t;
 }
+
+assume val par_env
+  (#preL #postL #preR #postR: half -> slprop)
+  (ef eg: half)
+  {| is_send (preL ef) |} {| is_send (postL ef) |}
+  {| is_send (preR eg) |} {| is_send (postR eg) |}
+  (f: (e: half -> stt unit (preL e) (fun _ -> postL e)))
+  (g: (e: half -> stt unit (preR e) (fun _ -> postR e)))
+  : stt_div unit (preL ef ** preR eg) (fun _ -> postL ef ** postR eg)
 ```
 
-`grep -rn par_env _extract_fill` finds only this call.
+This is `par`'s specification:
 
-The branch body did extract to the expected plain loop, with no atomics:
+- **Resources:** separate resources in, both postconditions out.
+- **Divergence:** `stt_div` overall, as with `par`; the branches are terminating `stt`.
+- **Thread-safety:** the same `is_send` obligations.
+
+Each branch is a top-level function applied to an environment, with conditions indexed by that environment.
+
+The environments and instances come before `f` and `g` because Pulse does not resolve typeclass arguments that come last: *"This function is partially applied. Remaining type: {| _: is_send (half_pre el) |} -> …"*.
+
+All the erased arguments disappear in C. krml emits this prototype in `Spike_ParEnv.h`:
+
+```c
+typedef struct Spike_ParEnv_half_s
+{
+  uint64_t *arr;
+  size_t lo;
+  size_t hi;
+  uint64_t v;
+}
+Spike_ParEnv_half;
+
+extern void
+Spike_ParEnv_par_env(
+  Spike_ParEnv_half ef,
+  Spike_ParEnv_half eg,
+  void (*f)(Spike_ParEnv_half x0),
+  void (*g)(Spike_ParEnv_half x0)
+);
+```
+
+## The program (`Spike.FillHalves.fst`)
+
+- `half_pre e = exists* s. pts_to_range e.arr lo hi s`.
+- `half_post e = pts_to_range e.arr lo hi (Seq.create (len lo hi) e.v)`.
+- Both have `is_send` instances.
+- `fill_range` is a `while` loop over `Pulse.Lib.Array.PtsToRange.pts_to_range_upd`. It carries a `decreases` clause, because an undecorated loop is `stt_div` and `par`'s branches must be terminating `stt`.
+- `fill_half (e: half)` is the top-level branch.
+- The entry point:
+
+```fstar
+divergent
+fn fill_halves (a: A.array U64.t) (n: SZ.t) (#s: erased (Seq.seq U64.t))
+  requires A.pts_to a s ** pure (Seq.length s == SZ.v n)
+  ensures A.pts_to a (expected (SZ.v n))
+//  expected n = Seq.append (Seq.create (n / 2) 1UL) (Seq.create (n - n / 2) 2UL)
+```
+
+It works in four steps:
+1. Split with `pts_to_range_split` at `n / 2`.
+2. Call `par_env #half_pre #half_post #half_pre #half_post el er fill_half fill_half`.
+3. Rejoin with `pts_to_range_join`.
+4. Convert back with `pts_to_range_elim`.
+
+The specification-only helpers `len` and `expected` are `noextract`. Before that, `len` leaked into the C as `krml_checked_int_t` arithmetic over `Prims_op_*`, and `expected` was dropped with a krml warning. Now neither reaches C, and krml prints no warnings.
+
+The extracted C (`_extract_fill/Spike_FillHalves.c`) is complete and contains no atomics:
 
 ```c
 void Spike_FillHalves_fill_range(uint64_t *a, size_t lo, size_t hi, uint64_t v)
@@ -276,27 +316,295 @@ void Spike_FillHalves_fill_range(uint64_t *a, size_t lo, size_t hi, uint64_t v)
   size_t i = lo;
   size_t __anf0 = i;
   bool cond = __anf0 < hi;
-  while (cond) { size_t vi = i; a[vi] = v; i = vi + (size_t)1U; size_t __anf0 = i; cond = __anf0 < hi; }
+  while (cond)
+  {
+    size_t vi = i;
+    a[vi] = v;
+    i = vi + (size_t)1U;
+    size_t __anf0 = i;
+    cond = __anf0 < hi;
+  }
 }
-void Spike_FillHalves_fill_half(Spike_FillHalves_half e)
-{ Spike_FillHalves_fill_range(e.arr, e.lo, e.hi, e.v); }
+
+void Spike_FillHalves_fill_half(Spike_ParEnv_half e)
+{
+  Spike_FillHalves_fill_range(e.arr, e.lo, e.hi, e.v);
+}
+
+void Spike_FillHalves_fill_halves(uint64_t *a, size_t n)
+{
+  size_t mid = n / (size_t)2U;
+  Spike_ParEnv_half el = { .arr = a, .lo = (size_t)0U, .hi = mid, .v = 1ULL };
+  Spike_ParEnv_half er = { .arr = a, .lo = mid, .hi = n, .v = 2ULL };
+  Spike_ParEnv_par_env(el, er, Spike_FillHalves_fill_half, Spike_FillHalves_fill_half);
+}
 ```
 
-A hand-written body *could* match that call by hand: twelve parameters, eight of them junk `void *`, and the environment `half` passed by value. That is exactly the workaround the brief rules out. Because there is no prototype, C would not check the signature, and nothing ties the hand-written signature to the declaration.
+## ThreadSanitizer
 
-One more note: the specification helper `len` was extracted to C (`krml_checked_int_t`, `Prims_op_*`), and `expected` was dropped with a warning. Both should be `noextract`. That is cosmetic, but it is to be fixed before the build goes further.
+**The spike** (`_build/test_fill_tsan`, Homebrew clang 18.1.8 `-fsanitize=thread -g -O1`) ran five times. Each run exited 0, produced **no ThreadSanitizer output**, and printed:
 
-## Hand-written C so far
+```
+branch f ran on thread 0x7a0000104000, branch g on thread 0x7ff84f9df180: distinct
+ok: 1000001 elements, two threads
+```
 
-None.
+The run covers both the verified entry point `fill_halves` and the thread probe (described in the next section).
 
-## Decision needed
+**The control** (`c/tsan_control.c`) deliberately breaks the Pulse precondition by handing both branches the *whole* array. TSan flags it (exit 134):
 
-Each way forward changes what the trusted operation is:
+```
+WARNING: ThreadSanitizer: data race (pid=18816)
+  Write of size 8 at 0x729000000000 by thread T1:
+    #0 Spike_FillHalves_fill_half Spike_FillHalves.c:29 (tsan_control:x86_64+0x100003dc7)
+    #1 run par_env.c:7 (tsan_control:x86_64+0x100003cdf)
 
-1. **Monomorphic `par_env`** over the concrete environment type (`half`).
-   - F* then emits a prototype, and krml type-checks the call.
-   - The C body is about ten lines over `pthread_create`/`pthread_join`, with the environment passed by value.
-   - It costs one assumed operation, and one C body, per environment type: probably one per parallel phase of the sweep.
-2. **Monomorphic `par_env` over a fixed, sweep-specific environment** designed up front, for example `{ heap; lo; hi }`. This is the same mechanism with exactly one trusted operation, but the generality is lost by design.
-3. **Keep the generic declaration** and check that the hand-written C matches the emitted call by reviewing it, without a prototype. This is not recommended: nothing mechanical ties the C to the declaration.
+  Previous write of size 8 at 0x729000000000 by main thread:
+    #0 Spike_FillHalves_fill_half Spike_FillHalves.c:29 (tsan_control:x86_64+0x100003dc7)
+    #1 Spike_ParEnv_par_env par_env.c:15 (tsan_control:x86_64+0x100003c72)
+    #2 main tsan_control.c:14 (tsan_control:x86_64+0x100003b8b)
+
+  Location is heap block of size 8000 at 0x729000000000 allocated by main thread:
+    #0 calloc <null>:179490793 (libclang_rt.tsan_osx_dynamic.dylib:x86_64h+0x5c944)
+    #1 main tsan_control.c:10 (tsan_control:x86_64+0x100003b03)
+
+  Thread T1 (tid=1118648, running) created by main thread at:
+    #0 pthread_create <null>:179490793 (libclang_rt.tsan_osx_dynamic.dylib:x86_64h+0x3310f)
+    #1 Spike_ParEnv_par_env par_env.c:14 (tsan_control:x86_64+0x100003c2d)
+    #2 main tsan_control.c:14 (tsan_control:x86_64+0x100003b8b)
+
+SUMMARY: ThreadSanitizer: data race Spike_FillHalves.c:29 in Spike_FillHalves_fill_half
+```
+
+So TSan does see the two threads `par_env` creates, and the spike's silence is a real negative.
+
+## OCaml 4.14.0
+
+Built by `build_ocaml.sh` with the `4.14.0` opam switch:
+
+- The stub (`ocaml/fill_stub.c`), `par_env.c`, the test probe `thread_probe.c` and the extracted `Spike_FillHalves.c` are compiled with `ocamlc -c`.
+- They are linked into `ocaml/main.ml`, both by `ocamlc -custom` (bytecode) and by `ocamlopt` (native).
+- The array is a `Bigarray.Array1` of `int64`, whose data lives outside the OCaml heap.
+
+`main.ml` calls the verified entry point `fill_halves` and checks every element. It then clears the array, runs the thread probe, and checks every element again. It exits 1 if any element is wrong or if the probe reports one thread.
+
+```
+branch f ran on thread 0x7000003ae000, branch g on thread 0x7ff84f9df180: distinct
+ok: OCaml 4.14.0 bytecode, 1000001 elements, two threads
+branch f ran on thread 0x70000af8f000, branch g on thread 0x7ff84f9df180: distinct
+ok: OCaml 4.14.0 native, 1000001 elements, two threads
+```
+
+### How the tests prove a second thread ran
+
+`par_env` falls back to running both branches sequentially if `pthread_create` fails, so a correct array alone does not prove that a second thread ran. The tests check it themselves, with no debugger and no extra tooling, so they can run in CI.
+
+`c/thread_probe.c` calls `Spike_ParEnv_par_env` on the two halves of the array. Its branches are a wrapper, `recording_fill_half`, which:
+
+1. stores `pthread_self()` in a slot chosen by the branch's environment, and
+2. runs the extracted, verified `Spike_FillHalves_fill_half`.
+
+After `par_env` returns, the probe compares the two ids with `pthread_equal`, prints both, and returns whether they differ. `test_fill.c` and `main.ml` both fail when they do not.
+
+Three choices to note:
+
+- **Nothing verified or trusted was changed for the test.** `fill_halves` itself cannot be observed this way: its branch function is fixed in the extracted C. So the probe drives `par_env` with the same extracted `fill_half` wrapped in a recorder, and `fill_halves` is still checked separately for its result.
+- **No counter in `par_env.c`.** Adding one would have put a test hook in trusted code.
+- **The two slots are not raced.** Each branch writes a different one, and the main thread reads them only after `pthread_join`. TSan confirms this.
+
+An earlier version of this check used a `DYLD_INSERT_LIBRARIES` interposer on `pthread_create`. It was macOS-only and outside the test, so it was replaced by the probe and deleted.
+
+What this does and does not show about the OCaml runtime:
+
+- **Shown:** the 4.14 runtime, in both backends, tolerates a C call that creates and joins a pthread. The worker never touches OCaml values or the runtime.
+- **Not tested:** worker threads that touch the OCaml heap, releasing the runtime lock (`caml_enter_blocking_section`), or the `threads` library. The real sweep will run on the OCaml heap with the mutator stopped, which needs its own spike.
+
+## Every line of hand-written C
+
+Three groups:
+
+- **Trusted, linked into the product:** `par_env.c`, the body of the assumed `par_env`, 17 lines.
+- **Glue between OCaml and the extracted C:** `ocaml/fill_stub.c`, 19 lines.
+- **Test-only, not part of any product:** `thread_probe.h`, `thread_probe.c`, `test_fill.c`, `tsan_control.c`.
+
+No hand-written C touches atomics.
+
+### Trusted
+
+`c/par_env.c` (17 lines):
+
+```c
+ 1  #include <pthread.h>
+ 2  #include <stdlib.h>
+ 3  #include "Spike_ParEnv.h"
+ 4  
+ 5  typedef struct { void (*f)(Spike_ParEnv_half); Spike_ParEnv_half e; } job;
+ 6  
+ 7  static void *run(void *p) { job *j = p; j->f(j->e); return NULL; }
+ 8  
+ 9  void Spike_ParEnv_par_env(Spike_ParEnv_half ef, Spike_ParEnv_half eg,
+10                            void (*f)(Spike_ParEnv_half), void (*g)(Spike_ParEnv_half))
+11  {
+12    job j = { f, ef };
+13    pthread_t t;
+14    if (pthread_create(&t, NULL, run, &j) != 0) { f(ef); g(eg); return; }
+15    g(eg);
+16    if (pthread_join(t, NULL) != 0) abort();
+17  }
+```
+
+On success it runs `f(ef)` on a new thread and `g(eg)` on the calling thread, then joins. If `pthread_create` fails it runs `f` then `g` sequentially, which still meets the specification. If `pthread_join` fails it aborts rather than return while `f` may still be running.
+
+### OCaml stub
+
+`spike_thread_probe_fill` exists only for the test.
+
+`ocaml/fill_stub.c` (19 lines):
+
+```c
+ 1  #include <caml/mlvalues.h>
+ 2  #include <caml/memory.h>
+ 3  #include <caml/bigarray.h>
+ 4  #include "Spike_FillHalves.h"
+ 5  #include "thread_probe.h"
+ 6  
+ 7  value spike_fill_halves(value ba)
+ 8  {
+ 9    CAMLparam1(ba);
+10    Spike_FillHalves_fill_halves((uint64_t *)Caml_ba_data_val(ba), Caml_ba_array_val(ba)->dim[0]);
+11    CAMLreturn(Val_unit);
+12  }
+13  
+14  value spike_thread_probe_fill(value ba)
+15  {
+16    CAMLparam1(ba);
+17    bool distinct = thread_probe_fill((uint64_t *)Caml_ba_data_val(ba), Caml_ba_array_val(ba)->dim[0]);
+18    CAMLreturn(Val_bool(distinct));
+19  }
+```
+
+### Test-only
+
+`c/thread_probe.h` (7 lines):
+
+```c
+ 1  #include <stdbool.h>
+ 2  #include <stddef.h>
+ 3  #include <stdint.h>
+ 4  
+ 5  /* Fills the two halves of a through par_env, with branches that record the
+ 6     thread they ran on.  Prints both, and returns true iff they differ. */
+ 7  bool thread_probe_fill(uint64_t *a, size_t n);
+```
+
+`c/thread_probe.c` (24 lines):
+
+```c
+ 1  #include <pthread.h>
+ 2  #include <stdio.h>
+ 3  #include "Spike_FillHalves.h"
+ 4  #include "thread_probe.h"
+ 5  
+ 6  static pthread_t ran_on[3];
+ 7  
+ 8  static void recording_fill_half(Spike_ParEnv_half e)
+ 9  {
+10    ran_on[e.v] = pthread_self();
+11    Spike_FillHalves_fill_half(e);
+12  }
+13  
+14  bool thread_probe_fill(uint64_t *a, size_t n)
+15  {
+16    Spike_ParEnv_half el = { .arr = a, .lo = 0, .hi = n / 2, .v = 1 };
+17    Spike_ParEnv_half er = { .arr = a, .lo = n / 2, .hi = n, .v = 2 };
+18    Spike_ParEnv_par_env(el, er, recording_fill_half, recording_fill_half);
+19    bool distinct = !pthread_equal(ran_on[1], ran_on[2]);
+20    printf("branch f ran on thread %p, branch g on thread %p: %s\n",
+21           (void *)ran_on[1], (void *)ran_on[2], distinct ? "distinct" : "SAME");
+22    fflush(stdout);
+23    return distinct;
+24  }
+```
+
+`c/test_fill.c` (25 lines):
+
+```c
+ 1  #include <stdio.h>
+ 2  #include <stdlib.h>
+ 3  #include "Spike_FillHalves.h"
+ 4  #include "thread_probe.h"
+ 5  
+ 6  static int check(const uint64_t *a, size_t n)
+ 7  {
+ 8    for (size_t i = 0; i < n; i++)
+ 9      if (a[i] != (i < n / 2 ? 1 : 2)) { printf("FAIL at %zu\n", i); return 0; }
+10    return 1;
+11  }
+12  
+13  int main(void)
+14  {
+15    size_t n = 1000001;
+16    uint64_t *a = calloc(n, sizeof *a);
+17    if (a == NULL) return 2;
+18    Spike_FillHalves_fill_halves(a, n);
+19    if (!check(a, n)) return 1;
+20    for (size_t i = 0; i < n; i++) a[i] = 0;
+21    if (!thread_probe_fill(a, n) || !check(a, n)) return 1;
+22    printf("ok: %zu elements, two threads\n", n);
+23    free(a);
+24    return 0;
+25  }
+```
+
+`c/tsan_control.c` (18 lines):
+
+```c
+ 1  /* Negative control, not verified: both branches write the WHOLE array, which
+ 2     the Pulse precondition of par_env forbids.  ThreadSanitizer must flag it. */
+ 3  #include <stdio.h>
+ 4  #include <stdlib.h>
+ 5  #include "Spike_FillHalves.h"
+ 6  
+ 7  int main(void)
+ 8  {
+ 9    size_t n = 1000;
+10    uint64_t *a = calloc(n, sizeof *a);
+11    if (a == NULL) return 2;
+12    Spike_ParEnv_half e1 = { .arr = a, .lo = 0, .hi = n, .v = 1 };
+13    Spike_ParEnv_half e2 = { .arr = a, .lo = 0, .hi = n, .v = 2 };
+14    Spike_ParEnv_par_env(e1, e2, Spike_FillHalves_fill_half, Spike_FillHalves_fill_half);
+15    printf("control ran\n");
+16    free(a);
+17    return 0;
+18  }
+```
+
+The OCaml side is `ocaml/main.ml` (23 lines), not C.
+
+## Reproducing
+
+From `spike/parallel/`:
+
+```sh
+F="../../fstar/bin/fstar.exe $(cat fstar.flags)"
+for m in Spike.ParEnv Spike.FillHalves; do
+  eval $F $m.fst
+  eval $F --codegen krml --extract_module $m $m.fst
+done
+../../fstar/karamel/krml -tmpdir _extract_fill -skip-compilation -skip-linking -warn-error -2-9-15 \
+  _output/Spike_ParEnv.krml _output/Spike_FillHalves.krml
+./build_c.sh            # plain build, TSan build, TSan control
+./_build/test_fill && ./_build/test_fill_tsan   # both check results and two threads
+./_build/tsan_control                          # must report a data race
+./build_ocaml.sh        # OCaml 4.14.0, bytecode and native
+./_build/ocaml/main.byte && ./_build/ocaml/main.native
+```
+
+## For Phase 1: one environment type, k-way parallelism by nesting
+
+F* extracts only a monomorphic assumed operation, and each assumed operation brings its own C body. The real parallel sweep should therefore keep the trusted surface to **one** `par_env`:
+
+- **A single environment type for segments.** Use one record that describes a segment of the heap for the sweep, for example `{ heap; lo; hi; ... }`, rather than one environment type per phase or per caller. Every parallel step of the pass takes this type, so one `assume val` and one C body cover the whole pass.
+- **k-way parallelism by nesting the binary operation.** `par_env` stays binary. A `k`-way split is a verified, recursive Pulse function on the segment environment: halve the range, then call `par_env` on two branches, each of which recurses on its half. A branch is itself the recursive function, still top-level, still a function of the segment environment. Each level splits the range with `pts_to_range_split`, and rejoins it on return. So k-way parallelism costs no extra trusted code, only proof.
+
+It follows that splitting, joining, and the per-segment sweep are all verified. The only trusted C stays the 17-line `par_env.c` above, reviewed once.

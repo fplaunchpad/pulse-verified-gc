@@ -11,17 +11,9 @@ module SZ = FStar.SizeT
 module U64 = FStar.UInt64
 module Seq = FStar.Seq
 
+noextract
 let len (lo hi: SZ.t) : nat =
   if SZ.v lo <= SZ.v hi then SZ.v hi - SZ.v lo else 0
-
-(* Environment for one branch: which range of which array, and the value. *)
-noeq
-type half = {
-  arr: A.array U64.t;
-  lo: SZ.t;
-  hi: SZ.t;
-  v: U64.t;
-}
 
 let half_pre (e: half) : slprop =
   exists* s. pts_to_range e.arr (SZ.v e.lo) (SZ.v e.hi) s
@@ -71,6 +63,7 @@ fn fill_half (e: half)
   fold half_post e;
 }
 
+noextract
 let expected (n: nat) : Seq.seq U64.t =
   Seq.append (Seq.create (n / 2) 1UL) (Seq.create (n - n / 2) 2UL)
 
@@ -95,7 +88,7 @@ fn fill_halves (a: A.array U64.t) (n: SZ.t)
        as (pts_to_range er.arr (SZ.v er.lo) (SZ.v er.hi) sr);
   fold (half_pre el);
   fold (half_pre er);
-  par_env #_ #_ #half_pre #half_post #half_pre #half_post el er fill_half fill_half;
+  par_env #half_pre #half_post #half_pre #half_post el er fill_half fill_half;
   unfold (half_post el);
   unfold (half_post er);
   rewrite (pts_to_range el.arr (SZ.v el.lo) (SZ.v el.hi) (Seq.create (len el.lo el.hi) el.v))

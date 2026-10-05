@@ -12,15 +12,26 @@ module Spike.ParEnv
 #lang-pulse
 open Pulse.Lib.Pervasives
 open Pulse.Lib.Send
+module A = Pulse.Lib.Array
+module SZ = FStar.SizeT
+module U64 = FStar.UInt64
+
+(* The environment: one range of one array, and the value to write there.
+   par_env is monomorphic in it, because F* does not extract polymorphic
+   assumed operations ("polymorphic assumes are not supported"). *)
+noeq
+type half = {
+  arr: A.array U64.t;
+  lo: SZ.t;
+  hi: SZ.t;
+  v: U64.t;
+}
 
 assume val par_env
-  (#ea #eb: Type0)
-  (#preL #postL: ea -> slprop)
-  (#preR #postR: eb -> slprop)
-  (ef: ea)
-  (eg: eb)
+  (#preL #postL #preR #postR: half -> slprop)
+  (ef eg: half)
   {| is_send (preL ef) |} {| is_send (postL ef) |}
   {| is_send (preR eg) |} {| is_send (postR eg) |}
-  (f: (e: ea -> stt unit (preL e) (fun _ -> postL e)))
-  (g: (e: eb -> stt unit (preR e) (fun _ -> postR e)))
+  (f: (e: half -> stt unit (preL e) (fun _ -> postL e)))
+  (g: (e: half -> stt unit (preR e) (fun _ -> postR e)))
   : stt_div unit (preL ef ** preR eg) (fun _ -> postL ef ** postR eg)

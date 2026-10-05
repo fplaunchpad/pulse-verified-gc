@@ -187,3 +187,116 @@ The open choice is whether that trusted surface is acceptable for Phase 1. Two a
 
 - Restate `par` as an assumed `val` over C function pointers plus an environment.
 - Keep parallelism entirely on the C/OCaml side, and verify only the per-thread work, with the shared word specified through an assumed atomic interface.
+
+---
+
+# Spike 2: option A, parallel composition over top-level functions plus an environment
+
+The brief: declare an assumed Pulse operation over top-level functions plus an explicit environment, with `Pulse.Lib.Par.par`'s specification. Give it a pthread C body. Use it so that two threads each fill their own half of one array, and the postcondition states the whole array afterwards. No atomics.
+
+## Outcome: verifies, but stopped at extraction
+
+| Step | Result |
+|---|---|
+| Verify `Spike.ParEnv` (the assumed operation) | **yes** |
+| Verify `Spike.FillHalves` (the program) | **yes** |
+| Extract `Spike.ParEnv` | **no**: F* drops the declaration (below) |
+| krml on `Spike.FillHalves` | the C is emitted, but it calls an undeclared `Spike_ParEnv_par_env` |
+| C body, compile, ThreadSanitizer, OCaml bytecode and native | **not performed** |
+
+## The assumed operation (`Spike.ParEnv.fst`)
+
+```fstar
+assume val par_env
+  (#ea #eb: Type0)
+  (#preL #postL: ea -> slprop)
+  (#preR #postR: eb -> slprop)
+  (ef: ea)
+  (eg: eb)
+  {| is_send (preL ef) |} {| is_send (postL ef) |}
+  {| is_send (preR eg) |} {| is_send (postR eg) |}
+  (f: (e: ea -> stt unit (preL e) (fun _ -> postL e)))
+  (g: (e: eb -> stt unit (preR e) (fun _ -> postR e)))
+  : stt_div unit (preL ef ** preR eg) (fun _ -> postL ef ** postR eg)
+```
+
+This is `par`'s specification with two changes:
+
+- Each branch is a function of an environment value.
+- Each pre- and postcondition is indexed by that environment.
+
+The result is `stt_div`, as with `par`. The branches are terminating `stt`, as with `par`.
+
+The environments and instances come before `f` and `g` because Pulse does not resolve typeclass arguments that come last. With the original order, the call failed with *"This function is partially applied. Remaining type: {| _: is_send (half_pre el) |} -> …"*.
+
+## The program (`Spike.FillHalves.fst`)
+
+- The environment is a record: `half = { arr: array U64.t; lo: SZ.t; hi: SZ.t; v: U64.t }`.
+- `half_pre e = exists* s. pts_to_range e.arr lo hi s`.
+- `half_post e = pts_to_range e.arr lo hi (Seq.create (len lo hi) e.v)`.
+- `fill_range` is a terminating `while` loop over `Pulse.Lib.Array.PtsToRange.pts_to_range_upd`. It needs a `decreases` clause, because an undecorated loop is `stt_div` and `par`'s branches must be `stt`.
+- `fill_half (e: half)` is the top-level branch function.
+- The entry point is `fill_halves`:
+  - `requires A.pts_to a s ** pure (Seq.length s == SZ.v n)`
+  - `ensures A.pts_to a (Seq.append (Seq.create (n/2) 1UL) (Seq.create (n - n/2) 2UL))`
+  - It splits with `pts_to_range_split`, calls `par_env … el er fill_half fill_half`, and rejoins with `pts_to_range_join`.
+
+Both modules verify with the repo flags, with no admits in the program. The only trusted item is `par_env`.
+
+## Why it stops: F* will not extract a polymorphic assumed operation
+
+From `fstar.exe --codegen krml --extract_module Spike.ParEnv Spike.ParEnv.fst`:
+
+```
+Not extracting Spike.ParEnv.par_env to KaRaMeL (polymorphic assumes are not supported)
+```
+
+The call site does extract (`_extract_fill/Spike_FillHalves.c`). The erased slprop and `is_send` arguments survive as `(void *)0U` placeholders, and no header declares the callee:
+
+```c
+void Spike_FillHalves_fill_halves(uint64_t *a, size_t n)
+{
+  size_t mid = n / (size_t)2U;
+  Spike_FillHalves_half el = { .arr = a, .lo = (size_t)0U, .hi = mid, .v = 1ULL };
+  Spike_FillHalves_half er = { .arr = a, .lo = mid, .hi = n, .v = 2ULL };
+  Spike_ParEnv_par_env((void *)0U, (void *)0U, (void *)0U, (void *)0U,
+    el, er,
+    (void *)0U, (void *)0U, (void *)0U, (void *)0U,
+    Spike_FillHalves_fill_half, Spike_FillHalves_fill_half);
+}
+```
+
+`grep -rn par_env _extract_fill` finds only this call.
+
+The branch body did extract to the expected plain loop, with no atomics:
+
+```c
+void Spike_FillHalves_fill_range(uint64_t *a, size_t lo, size_t hi, uint64_t v)
+{
+  size_t i = lo;
+  size_t __anf0 = i;
+  bool cond = __anf0 < hi;
+  while (cond) { size_t vi = i; a[vi] = v; i = vi + (size_t)1U; size_t __anf0 = i; cond = __anf0 < hi; }
+}
+void Spike_FillHalves_fill_half(Spike_FillHalves_half e)
+{ Spike_FillHalves_fill_range(e.arr, e.lo, e.hi, e.v); }
+```
+
+A hand-written body *could* match that call by hand: twelve parameters, eight of them junk `void *`, and the environment `half` passed by value. That is exactly the workaround the brief rules out. Because there is no prototype, C would not check the signature, and nothing ties the hand-written signature to the declaration.
+
+One more note: the specification helper `len` was extracted to C (`krml_checked_int_t`, `Prims_op_*`), and `expected` was dropped with a warning. Both should be `noextract`. That is cosmetic, but it is to be fixed before the build goes further.
+
+## Hand-written C so far
+
+None.
+
+## Decision needed
+
+Each way forward changes what the trusted operation is:
+
+1. **Monomorphic `par_env`** over the concrete environment type (`half`).
+   - F* then emits a prototype, and krml type-checks the call.
+   - The C body is about ten lines over `pthread_create`/`pthread_join`, with the environment passed by value.
+   - It costs one assumed operation, and one C body, per environment type: probably one per parallel phase of the sweep.
+2. **Monomorphic `par_env` over a fixed, sweep-specific environment** designed up front, for example `{ heap; lo; hi }`. This is the same mechanism with exactly one trusted operation, but the generality is lost by design.
+3. **Keep the generic declaration** and check that the hand-written C matches the emitted call by reviewing it, without a prototype. This is not recommended: nothing mechanical ties the C to the declaration.

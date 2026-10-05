@@ -1538,6 +1538,10 @@ uint64_t collect_with_roots(heap_t heap, gray_stack_rec st, uint64_t fp)
 {
   KRML_MAYBE_UNUSED_VAR(fp);
   mark_loop_bounded(heap, st);
+  /* SPIKE (sheera/spike-parallel only, not extracted): see spike/parallel/SPIKE.md, Spike 3. */
+#ifdef SPIKE_SWEEP_PROBE
+  { extern void spike_sweep_probe(uint8_t *base); spike_sweep_probe(heap.data); }
+#endif
   return fused_sweep_coalesce(heap);
 }
 

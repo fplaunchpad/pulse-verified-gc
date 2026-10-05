@@ -1,6 +1,6 @@
 # Phase 0 spike: parallel mark-and-sweep
 
-Branch `sheera/spike-parallel`. No existing GC file was touched.
+Branch `sheera/spike-parallel`. Spikes 1 and 2 touched no existing GC file. Spike 3 adds one `#ifdef`'d call to `generational/snapshot/GC_Gen_Impl.c`, on this branch only.
 
 Toolchain: the pinned `./fstar` only.
 
@@ -608,3 +608,200 @@ F* extracts only a monomorphic assumed operation, and each assumed operation bri
 - **k-way parallelism by nesting the binary operation.** `par_env` stays binary. A `k`-way split is a verified, recursive Pulse function on the segment environment: halve the range, then call `par_env` on two branches, each of which recurses on its half. A branch is itself the recursive function, still top-level, still a function of the segment environment. Each level splits the range with `pts_to_range_split`, and rejoins it on return. So k-way parallelism costs no extra trusted code, only proof.
 
 It follows that splitting, joining, and the per-segment sweep are all verified. The only trusted C stays the 17-line `par_env.c` above, reviewed once.
+
+---
+
+# Spike 3: par_env inside a real collection, on the real major heap
+
+The brief:
+
+- Inside the existing collector, at the start of sweep, with the mutator stopped, walk the heap once to pick two segment boundaries on object headers.
+- Use `par_env` so two threads each walk their own segment, read-only, counting objects and total whole size.
+- Check the two counts add up to the sequential walk.
+- The workers call no OCaml runtime function.
+- Run in bytecode and native, under ThreadSanitizer, on a few test-suite programs.
+
+"The existing collector" is the repo's verified generational collector (`generational/ocaml-integration`). It is the collector Phase 1 will change, on the heap Phase 1 will walk.
+
+## Outcome: passes in bytecode; native does not exist
+
+| Step | Result |
+|---|---|
+| Hook between mark and sweep in `collect_with_roots` | **yes**, 4 lines, compiled only with `-DSPIKE_SWEEP_PROBE` |
+| Default build unchanged | **yes**: the rebuilt default `ocamlrun` contains no probe symbol, and `make test` passes |
+| Sequential walk, split, two-thread walk, counts add up | **yes**, in every one of 111 probed collections across 5 programs |
+| Two distinct threads every time | **yes**, checked by the probe; it aborts otherwise |
+| Program output unchanged versus the unprobed runtime | **yes**, all 5 programs, with heap addresses masked |
+| ThreadSanitizer, whole bytecode runtime instrumented (5 runs × 5 programs) | **no reports** |
+| ThreadSanitizer, racy control on the real heap | **data race reported**, so TSan is live there |
+| **Native** | **not run: the verified collector has no native integration** (next section) |
+
+## The verified collector has no native integration
+
+**The strategy note assumed the verified collector runs under native code. It does not.** The integration is bytecode only:
+
+- `setup.sh:75` builds `make -C runtime ocamlrun`, commented *"we only need ocamlrun for bytecode"*. The compiler used for the tests is the separate, unchanged OCaml build.
+- `patches/runtime_gen.patch` links `libvergc_gen.a` only into `ocamlrun`, `ocamlrund` and `ocamlruni`. No `libasmrun` target links it.
+- The patch redirects allocation in `memory.h` (`Alloc_small`, used by C and the bytecode interpreter) and in `interp.c`. Native code emits its own inline allocation against `Caml_state->young_ptr`, and nothing patches that path.
+- `verified_gc/OCAML_INTEGRATION.md:949` notes that native frame-table roots are *"not applicable to bytecode"*. The bridge never scans them.
+- The repo README describes the integration as *"an OCaml bytecode runtime integration"*.
+
+So a native run of this spike would need a native port of the integration first: inline allocation, frame-table roots, and `libasmrun` linking. That is a project of its own, not a workaround, so it was not attempted. The strategy note itself is not in this repository, so it is not edited here.
+
+## Toolchain
+
+- OCaml **4.14.2**: the tag `generational/ocaml-integration/setup.sh` pins, cloned and built by its `make setup` (4.5 minutes). Spike 2 used the opam `4.14.0` switch. That switch has no verified collector, so it is not used here.
+- Plain build: Apple clang 12.0.0, the compiler `make setup` uses.
+- TSan build: Homebrew clang 18.1.8, for the reason given in Spike 2 (Apple clang 12's TSan runtime crashes on macOS 15.7.9).
+- F* and krml: not re-run. The probe reuses Spike 2's extracted `_extract_fill/Spike_ParEnv.h` and its unchanged trusted `c/par_env.c`.
+
+## Where the hook is
+
+`gen_gc` → `collect_with_roots` (`generational/snapshot/GC_Gen_Impl.c`) runs `mark_loop_bounded` and then `fused_sweep_coalesce`. The probe call goes between the two:
+
+```c
+   mark_loop_bounded(heap, st);
++  /* SPIKE (sheera/spike-parallel only, not extracted): see spike/parallel/SPIKE.md, Spike 3. */
++#ifdef SPIKE_SWEEP_PROBE
++  { extern void spike_sweep_probe(uint8_t *base); spike_sweep_probe(heap.data); }
++#endif
+   return fused_sweep_coalesce(heap);
+```
+
+At that point:
+
+- **Marking is finished and nothing is swept.**
+- **The mutator is stopped.** `gen_gc` is called synchronously from the allocation slow path: `caml_alloc` → `verified_allocate_minor` → `do_minor_gc` → `do_full_gc` (see the TSan stack below). The test programs are single-threaded and do not use the `threads` library.
+
+The heap is the real major heap that `alloc_gen.c` allocates. `heap.data` is `NULL` (the bridge's NULL-base convention), so addresses are absolute, and the heap spans `[zero_addr1, heap_size_u640)`. These are the same two globals `fused_sweep_coalesce` uses.
+
+## The probe (`c/sweep_probe.c`, test-only)
+
+1. **One sequential walk on the main thread.** It uses `fused_sweep_coalesce`'s own loop: header at `cur`, `whsize = (hdr >> 10) + 1`, stop when `cur + 8 >= heap_size_u640`. It counts objects and whole words. A second cursor trails it, one object for every two the walk passes, so it ends on the header of object number `objs / 2`.
+   - Segment A is `[start, mid)` and segment B is `[mid, stop)`. Both boundaries are object headers.
+2. **`par_env` on the two segments.** Spike 2's `half` record is reused as it is: `arr` is the first heap word, `lo..hi` are word indices, and `v` is the result slot. `walk_segment` loads headers, counts, and finally stores `{objs, words, pthread_self()}` into `res[v]`.
+   - That is all a worker does. It makes **no OCaml runtime call**, not even a `caml/` macro; its one library call is `pthread_self`.
+   - It writes nothing on the heap.
+3. **Checks on the main thread, after the join.** `res[0] + res[1]` must equal the sequential counts, for objects and for words, and the two thread ids must differ. Otherwise the probe prints `FAIL` and aborts.
+
+The probe prints one line per collection to stderr, and a summary at exit:
+
+```
+sweep-probe #1: 56440 objs = 28220 + 28220, 2000000 words = 86311 + 1913689, split at word 86311 of 2000000, threads distinct
+...
+sweep-probe: 2 collections checked, all matched, two threads each
+```
+
+### The first split was degenerate
+
+The first version split at the first header at or past the **byte** midpoint. Segment B came out empty in every collection: `1974 objs = 1974 + 0, ... split at word 300000 of 300000`.
+
+The cause is the heap's shape after promotion. Live objects are packed at the front, and one free block runs from there to the end of the heap: in `infix_closures`, the first 4183 of 300000 words hold 1974 objects. So no header lies past the midpoint.
+
+The object-count split fixes the spike. **For Phase 1:** balancing the parallel sweep by address range will not work on this heap. It needs a split by object count, or by estimated sweep work.
+
+## Programs
+
+`run_sweep.sh` runs each program on a probe runtime and on the unprobed verified `ocamlrun`, using the `.byte` files that `make test` builds. Collections are counted from one runner pass; the TSan runtime gave the same counts.
+
+| Program | Major heap (words), args | Probed collections | Objects per split (first collection) |
+|---|---|---|---|
+| `infix_closures` | 300000 (its `make test` size) | 54 | 987 + 987 |
+| `no_scan` | 4000000 (its `make test` size) | 22 | 878 + 878 |
+| `make_vect_barrier` | 4000000 (its `make test` size) | 2 | 1130 + 1130 |
+| `fasta` | 300000, `100000` | 31 | 320 + 321 |
+| `count_change` | 2000000, `100` | 2 | 28220 + 28220 |
+
+The fourth correctness test, `nursery_no_scan_interior`, does no major collection, at its `make test` size or at 1000000 words.
+
+**None of the eight benchmarks collects at its smoke-test size.** Their major heaps (8M to 134M words) never reach `do_minor_gc`'s 50%-promoted trigger. So `fasta` and `count_change` were run with smaller heaps. `binarytrees` and `quicksort` could not be used:
+
+- `quicksort` (100000 and 1000000 elements, heaps of 1M to 6M words) did no major collection.
+- With any heap small enough to force a major collection, the following abort with `Fatal error: verified gen GC: out of memory (major heap too small)` **on the unprobed runtime as well**:
+  - `binarytrees` 10, 12 and 14 (300000, 1M and 3M words);
+  - `count_change` 200 (4M and 8M words) and 300 (20M words).
+
+  That is a property of the existing collector, unrelated to this spike, and was not investigated. `binarytrees 10` failing in a 300000-word heap looks worth a separate look.
+
+## ThreadSanitizer
+
+`build_sweep.sh` builds `_build/sweep/ocamlrun_tsan`:
+
+- It copies the `make setup` tree and **rebuilds the bytecode runtime itself** (`libcamlrun.a`, `prims.o`) with `-fsanitize=thread`. 45 of its members reference `__tsan_write8`. So the interpreter's own heap writes are instrumented, not just the GC.
+- The extracted collector, `alloc_gen.c`, `par_env.c` and the probe are compiled with TSan as well.
+
+**The spike.** `run_sweep.sh _build/sweep/ocamlrun_tsan` was run five times. Every program exited 0 with unchanged output, and there was no ThreadSanitizer output at all. The plain runtime was run three more times, also clean.
+
+**The control.** With `SPIKE_PROBE_RACE=1`, branch `g`, on the main thread, rewrites (with its own value) the first header of segment A while branch `f` walks it. TSan reports it, exit 134:
+
+```
+WARNING: ThreadSanitizer: data race (pid=54618)
+  Read of size 8 at 0x000107bfe000 by thread T1:
+    #0 walk_segment sweep_probe.c:44
+    #1 run par_env.c:7
+
+  Previous write of size 8 at 0x000107bfe000 by main thread:
+    #0 walk_segment_racy sweep_probe.c:54
+    #1 Spike_ParEnv_par_env par_env.c:15
+    #2 spike_sweep_probe sweep_probe.c:83
+    #3 collect_with_roots GC_Gen_Impl.c:1543
+    #4 gen_gc GC_Gen_Impl.c:363
+    #5 do_full_gc alloc_gen.c:509
+    #6 do_minor_gc alloc_gen.c:428
+    #7 verified_allocate_minor alloc_gen.c:546
+    #8 caml_alloc alloc.c:46
+    #9 caml_alloc_tuple alloc.c:75
+    #10 caml_gc_quick_stat gc_ctrl.c:304
+    #11 caml_interprete interp.c:938
+    #12 caml_main startup_byt.c:588
+    #13 main main.c:37
+
+  Location is heap block of size 2400000 at 0x000107bfe000 allocated by main thread:
+    #0 calloc
+    #1 ensure_heap alloc_gen.c:115
+    ...
+  Thread T1 (tid=1243867, running) created by main thread at:
+    #0 pthread_create
+    #1 Spike_ParEnv_par_env par_env.c:14
+    #2 spike_sweep_probe sweep_probe.c:83
+    #3 collect_with_roots GC_Gen_Impl.c:1543
+    ...
+```
+
+The racing address is the first word of the real major heap, the 2400000-byte block (300000 words) that `ensure_heap` allocates. So TSan sees both `par_env` threads touching the OCaml heap from inside a collection, and the spike's silence is a real negative.
+
+## What this does and does not show
+
+- **Shown:** `par_env`, Spike 2's trusted 17 lines unchanged, runs two threads over the live major heap from inside a real verified collection, between mark and sweep, in the 4.14.2 bytecode runtime. The runtime tolerates it, results are exact, and TSan finds no race with the whole runtime instrumented.
+- **Not shown:**
+  - Native code, for the reason above.
+  - A verified worker: the segment walk is test-only C. Phase 1's per-segment sweep would be Pulse code behind the `par_env` interface, as in Spike 2.
+  - Workers that **write** the heap, or the sweep's free-list and coalescing state, which crosses segment boundaries.
+  - Programs using the `threads` library.
+  - Any platform other than macOS 15.7.9 on x86_64.
+- **For Phase 1:**
+  - The hook point is `collect_with_roots`.
+  - Heap addresses are absolute (`heap.data == NULL`), so a segment environment must carry absolute bounds or a base pointer.
+  - Split by objects, not bytes (see "The first split was degenerate").
+
+## Every line of hand-written C and script
+
+- **Snapshot edit:** the 4 lines above in `GC_Gen_Impl.c`. They are inert unless `SPIKE_SWEEP_PROBE` is defined.
+- **Test-only:**
+  - `c/sweep_probe.c` (100 lines): the probe and the race control.
+  - `build_sweep.sh`: builds both runtimes, out of tree, under `_build/sweep/`. It never touches the `make setup` tree.
+  - `run_sweep.sh`: the runner and its checks.
+- **Unchanged:** `c/par_env.c`, `_extract_fill/`, and every other repository file.
+
+## Reproducing
+
+```sh
+cd generational/ocaml-integration && make setup && make test   # 4.14.2 + verified GC; builds tests/*.byte
+cd ../../spike/parallel
+./build_sweep.sh                            # _build/sweep/ocamlrun and ocamlrun_tsan
+./run_sweep.sh                              # plain: must end "ok: all programs"
+./run_sweep.sh _build/sweep/ocamlrun_tsan   # TSan: same, no reports
+cd ../../generational/ocaml-integration/tests
+SPIKE_PROBE_RACE=1 MIN_EXPANSION_WORDSIZE=300000 \
+  ../../../spike/parallel/_build/sweep/ocamlrun_tsan infix_closures.byte   # must report a data race
+```

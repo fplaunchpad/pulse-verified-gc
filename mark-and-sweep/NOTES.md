@@ -1,4 +1,4 @@
-# NOTES: GC.Spec.Coalesce.fst
+# NOTES: GC.Spec.Coalesce.Correct.fst
 
 This file records the proof of `coalesce`'s correctness: the coalescing
 pass merges each maximal run of consecutive blue (free) objects into one
@@ -8,7 +8,8 @@ mathematically false as stated; corrected replacements were proved
 instead. This file documents what was true, what was false, why, and how
 each closed lemma is proved.
 
-Working file: `mark-and-sweep/spec/GC.Spec.Coalesce.fst`.
+Working file: `mark-and-sweep/spec/GC.Spec.Coalesce.Correct.fst`, which
+opens `GC.Spec.Coalesce` (the pass itself and its existing lemmas).
 
 Fast iteration: `/tmp/check_coalesce.sh` runs `fstar.exe` directly on
 just this file, with the same flags as the Makefile, using the shared

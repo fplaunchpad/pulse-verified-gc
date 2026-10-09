@@ -284,19 +284,23 @@ reaches `start`, which equals `first_blue - mword`; while a run extends,
 `g` and `first_blue` are both unchanged. With this clause, the wrapper is
 just the induction, for every `run_words`, with no admit.
 
-**Structure.** A four-way dispatcher over empty objects, heap-top, a
-blue-headed continuation, and a white-headed continuation. Each case is
-its own lemma with a lexicographic `decreases` clause. The dispatcher and
-the two recursive cases form one mutual-recursion group; the empty and
-heap-top cases do not recurse and sit outside it. The two continuation
-cases each delegate to a standalone leaf lemma for the actual
-flush-crossing argument, giving each its own small, independently
-checkable proof rather than one large nested body.
+**Structure.** The recursion lives in one place. There are two terminal
+lemmas, one for an empty walk (`caw_empty`) and one for a head that is
+the last object, reaching the top of the heap (`caw_top`). There are two
+step lemmas, each concluding the invariant at the next position from the
+invariant at the current one: `white_inv_step_blue` for a blue head (the
+pending run grows, nothing is written) and `white_inv_step_flush` for a
+non-blue head (the run is flushed). The parent,
+`coalesce_aux_preserves_white`, dispatches: a terminal lemma, or a step
+lemma, the matching `coalesce_aux` unfolding equation, and a recursive
+call on the tail of the walk. The next state is named by `step_next`,
+`step_fb` and `step_rw`, so a step lemma's conclusion is exactly the
+recursive call's precondition.
 
-This four-way dispatcher pattern (empty / heap-top / blue-continuing /
-white-continuing, continuation cases delegating to standalone leaf
-lemmas) is reused unchanged for lemmas 6, 7, and 8 below. It is not
-described again for each.
+Lemmas 6, 7 and 8 use the same shape. Their invariants each extend
+`white_inv`, so their step lemmas call `white_inv`'s step lemma and prove
+only their own extra clauses; `white_inv_head` supplies the facts about
+the head object they need.
 
 **Shared machinery, factored out after the same fact went missing
 independently at more than one call site:**
@@ -387,9 +391,8 @@ is not a valid `hp_addr`):
   position, given the invariant already supplies the sum fact that rules
   out emptiness (see the F* finding below for the general case).
 
-**The induction** mirrors lemma 5's four-way split, reusing `white_inv`'s
-re-establishment bookkeeping verbatim and adding only the whsize-specific
-facts. One shared helper, `caw_ws_head_whsize`, was factored out the
+**The induction** has lemma 5's shape; its step lemmas call `white_inv`'s
+and add only the whsize-specific facts. One shared helper, `caw_ws_head_whsize`, was factored out the
 second time the "consuming one more blue object adds exactly `wz + 1` to
 `blue_whsize g objs`" argument was needed, rather than being copied a
 third time.
@@ -544,13 +547,13 @@ agreement transfers any pair unchanged. Inside the run, the only
 candidate for a pair reaching the merged block from below is ruled out
 entirely by the "no blue ends at the old floor" hypothesis.
 
-**The induction** mirrors the same four-way split, with one structural
-difference: in the blue-continuing case, nothing new needs proving for
+**The induction** has the same shape, with one difference: in the blue
+step, nothing new needs proving for
 `adj_free_inv`'s own two clauses. The finalized floor is provably the
 same value across a blue step, whether starting fresh (the new floor
 equals the old `start`) or continuing (`first_blue` does not change), so
 the old state's matching branch is already the new state's fact. The
-white-continuing case's "no blue ends at the new floor `nxt`" needs a
+flush step's "no blue ends at the new floor `nxt`" needs a
 genuine new argument: the object just processed, `x`, is the unique
 object whose extent reaches `nxt` (`objects_no_straddle` rules out
 anything below `start` reaching that far; anything at or above `nxt`

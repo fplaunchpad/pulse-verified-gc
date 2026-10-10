@@ -65,9 +65,9 @@ counterexample below for lemmas 3 and 4.
 | 3 | flush_preserves_white | Not provable as stated. Corrected as `flush_white_transfer`, closed. Original val and let deleted from the file (superseded, unused). |
 | 4 | flush_preserves_density | Not provable as stated. Corrected as `flush_density_transfer`, closed. Original val and let deleted from the file (superseded, unused). |
 | 5 | coalesce_aux_preserves_white | Closed. Required adding a clause to `white_inv`. |
-| 6 | coalesce_conserves_whsize | Closed. New invariant `whsize_inv`. |
-| 7 | coalesce_preserves_blue_coverage | Closed. New invariant `blue_cov_inv`. |
-| 8 | coalesce_no_adjacent_blue | Closed. New invariant `adj_free_inv`. |
+| 6 | coalesce_conserves_free_space | Closed. New invariant `free_space_inv`. |
+| 7 | coalesce_preserves_blue_coverage | Closed. New invariant `coverage_inv`. |
+| 8 | coalesce_no_adjacent_blue | Closed. New invariant `no_adjacent_inv`. |
 
 `run_at` (the arithmetic relation between `first_blue`, `run_words`, and
 a run's end position) stays in the file. `flush_preserves_walk` and the
@@ -285,8 +285,8 @@ reaches `start`, which equals `first_blue - mword`; while a run extends,
 just the induction, for every `run_words`, with no admit.
 
 **Structure.** The recursion lives in one place. There are two terminal
-lemmas, one for an empty walk (`caw_empty`) and one for a head that is
-the last object, reaching the top of the heap (`caw_top`). There are two
+lemmas, one for an empty walk (`white_done`) and one for a head that is
+the last object, reaching the top of the heap (`white_last`). There are two
 step lemmas, each concluding the invariant at the next position from the
 invariant at the current one: `white_inv_step_blue` for a blue head (the
 pending run grows, nothing is written) and `white_inv_step_flush` for a
@@ -312,7 +312,7 @@ independently at more than one call site:**
   word, `y`'s color and wosize agree between them too. This replaced a
   conversion that had been hand-written at every call site that needed
   it.
-- `caw_shared_facts` / `caw_unpack_white_inv`: bundles the `white_inv`
+- `white_inv_facts` / `white_inv_unpack`: bundles the `white_inv`
   consequences every case lemma needs (first_blue's validity and
   H-reachability, an alignment fact, and two of `white_inv`'s clauses)
   into one named `prop`, established once at the top of each case lemma
@@ -326,25 +326,25 @@ during that search, even one that is definitionally equal to a raw
 forall. Confirmed by wrapping a clause in a named prop and calling
 `eliminate forall` against it: this reproduced the identical failure as
 not having the fact at all. Fix: wherever a shared bundle like
-`caw_shared_facts` is taken as a hypothesis and `eliminate forall` is
+`white_inv_facts` is taken as a hypothesis and `eliminate forall` is
 needed against one of its pieces, restate that piece as a raw local
 `assert` first, then use the raw local copy.
 
-## 6. `coalesce_conserves_whsize`: closed
+## 6. `coalesce_conserves_free_space`: closed
 
-New invariant, `whsize_inv`, built on top of `white_inv` rather than a
+New invariant, `free_space_inv`, built on top of `white_inv` rather than a
 parallel reimplementation of its bookkeeping:
 
 ```fstar
-let whsize_inv
+let free_space_inv
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (all_objs: seq obj_addr)
   : prop =
   white_inv g0 g start objs first_blue run_words all_objs /\
-  total_blue_whsize g0 == total_blue_whsize g /\
+  total_free_space g0 == total_free_space g /\
   (run_words > 0 ==>
-    blue_whsize g (objects (mk_hp_addr (U64.v first_blue - U64.v mword)) g) ==
-      run_words + blue_whsize g objs)
+    free_space g (objects (mk_hp_addr (U64.v first_blue - U64.v mword)) g) ==
+      run_words + free_space g objs)
 ```
 
 Including `white_inv` as a conjunct means every recursive step's
@@ -360,10 +360,10 @@ pending run by construction (`coalesce_aux`'s own
 needs to say so numerically.
 
 **General helpers**, written before the induction:
-- `blue_whsize_append (g s1 s2)`: `blue_whsize` is additive over
+- `free_space_append (g s1 s2)`: `free_space` is additive over
   `Seq.append`.
-- `blue_whsize_agree (g g' s)`: if every element of `s` has the same
-  header word in `g` and `g'`, `blue_whsize g s == blue_whsize g' s`.
+- `free_space_agree (g g' s)`: if every element of `s` has the same
+  header word in `g` and `g'`, `free_space g s == free_space g' s`.
   The sequence-lifted form of `header_agree_transfers`.
 - `objects_prefix_agree (g g1 s bound)`: if `g`'s walk from `s` reaches
   `bound`, and `g`/`g1` agree at every word in `[s, bound)`, the same
@@ -377,14 +377,14 @@ needs to say so numerically.
 `flush_white_transfer`/`flush_white_transfer_at_end` split (general
 run-end versus run-ends-at-top-of-heap, needed because `heap_size` itself
 is not a valid `hp_addr`):
-- `flush_conserves_whsize`: decomposes `objects zero_addr g` as
+- `flush_conserves_free_space`: decomposes `objects zero_addr g` as
   `pre ++ objects h g`, where `h` is the run's floor. The invariant's own
   sum clause gives the run's contribution; `flush_blue_header_spec` plus
   the header decoding lemmas show the merged block alone has whsize
-  exactly `run_words`; `blue_whsize_agree`, fed by
+  exactly `run_words`; `free_space_agree`, fed by
   `flush_blue_preserves_outside`, shows the prefix and the tail above the
   run are each untouched.
-- `flush_conserves_whsize_at_end`: the same argument with no tail. The
+- `flush_conserves_free_space_at_end`: the same argument with no tail. The
   needed nonemptiness of `objects h g` follows directly:
   `h + mword == first_blue < heap_size` is already a hypothesis, and
   `objects`'s nonemptiness at that particular call depends only on
@@ -392,9 +392,9 @@ is not a valid `hp_addr`):
   out emptiness (see the F* finding below for the general case).
 
 **The induction** has lemma 5's shape; its step lemmas call `white_inv`'s
-and add only the whsize-specific facts. One shared helper, `caw_ws_head_whsize`, was factored out the
+and add only the whsize-specific facts. One shared helper, `free_space_blue_head`, was factored out the
 second time the "consuming one more blue object adds exactly `wz + 1` to
-`blue_whsize g objs`" argument was needed, rather than being copied a
+`free_space g objs`" argument was needed, rather than being copied a
 third time.
 
 One bug caught by the checker: a stray `h_addr_agree first_blue`,
@@ -404,11 +404,11 @@ also redundant with the `h_addr_agree fb'` call already present. Removed.
 
 ## 7. `coalesce_preserves_blue_coverage`: closed
 
-Same shape as lemma 6: a new invariant, `blue_cov_inv`, built on
+Same shape as lemma 6: a new invariant, `coverage_inv`, built on
 `white_inv`, with two clauses tracked from the start:
 
 ```fstar
-let blue_cov_inv
+let coverage_inv
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (all_objs: seq obj_addr)
   : prop =
@@ -421,10 +421,10 @@ let blue_cov_inv
 
 The second clause (coverage agrees between `g0` and `g` at every
 position, not just below `start`) is the coverage analogue of
-`total_blue_whsize g0 == total_blue_whsize g`: a global equality,
+`total_free_space g0 == total_free_space g`: a global equality,
 trivially preserved by the blue-accumulate step, needing a real argument
 only at a flush. The third clause is the coverage analogue of
-`whsize_inv`'s sum clause: the pending run's own byte range is already
+`free_space_inv`'s sum clause: the pending run's own byte range is already
 covered by its still-unmerged individual blue objects, needed to show
 the merge does not change the covered set.
 
@@ -471,10 +471,10 @@ definition has a second escape hatch: if the wosize actually stored at
 `s` is large enough that the computed next position overflows past
 `Seq.length g`, `objects s g` is empty even though `s` has room for a
 header. A general lemma asserting nonemptiness from room alone is
-therefore not provable for an arbitrary heap. `flush_conserves_whsize_at_end`'s
+therefore not provable for an arbitrary heap. `flush_conserves_free_space_at_end`'s
 bare assertion of this fact (lemma 6) worked only because
-`blue_whsize g (objects h g) == run_words` with `run_words > 0` was
-already in scope there, and `blue_whsize`'s own base case (`0` for an
+`free_space g (objects h g) == run_words` with `run_words > 0` was
+already in scope there, and `free_space`'s own base case (`0` for an
 empty sequence) forces nonemptiness once that sum is known positive. For
 coverage, the matching argument instead goes through `blue_covered g h`
 (true since `h < heap_size`, by hypothesis) plus `objects_no_straddle`,
@@ -490,13 +490,13 @@ noisier.
 
 ## 8. `coalesce_no_adjacent_blue`: closed
 
-New invariant, `adj_free_inv`, tracking the finalized region below the
+New invariant, `no_adjacent_inv`, tracking the finalized region below the
 pending run's floor (or below `start` when no run is pending). It needs
 two clauses, conditioned on `run_words`, because the property is about a
 boundary, not a sum or a set:
 
 ```fstar
-let adj_free_inv
+let no_adjacent_inv
   (g0 g: heap) (start: hp_addr) (objs: seq obj_addr)
   (first_blue: U64.t) (run_words: nat) (all_objs: seq obj_addr)
   : prop =
@@ -536,7 +536,7 @@ objects' headers agree between two heaps, the whole "adjacent and both
 blue" fact transfers.
 
 **The flush-preserves-adj-free argument**, in the same two-lemma split as
-before: `flush_conserves_adj_free` and `flush_conserves_adj_free_at_end`.
+before: `flush_conserves_no_adjacent` and `flush_conserves_no_adjacent_at_end`.
 Both take the old floor's two clauses as hypotheses and give the
 pairwise clause at the new floor as their conclusion. They deliberately
 do not re-derive a "no blue ends at the new floor" fact themselves, since
@@ -549,7 +549,7 @@ entirely by the "no blue ends at the old floor" hypothesis.
 
 **The induction** has the same shape, with one difference: in the blue
 step, nothing new needs proving for
-`adj_free_inv`'s own two clauses. The finalized floor is provably the
+`no_adjacent_inv`'s own two clauses. The finalized floor is provably the
 same value across a blue step, whether starting fresh (the new floor
 equals the old `start`) or continuing (`first_blue` does not change), so
 the old state's matching branch is already the new state's fact. The
@@ -583,7 +583,7 @@ hypothesis (see lemma 7) recurred here and needed the same explicit
 derivation.
 
 The top-level wrapper's own call needed an explicit proof that
-`adj_free_inv`'s two extra clauses hold vacuously at `zero_addr`: no
+`no_adjacent_inv`'s two extra clauses hold vacuously at `zero_addr`: no
 object's header can sit strictly below the walk's own start, and no
 object's extent can end exactly there. Lemmas 6 and 7's wrappers needed
 no such step, since their extra clauses have no "vacuous at the very
@@ -624,7 +624,8 @@ rules out an oversized wosize at that position (a known sum, a known
 color-and-extent fact, or similar), not from bare address arithmetic.
 
 **A borderline SMT query can pass one run and fail another, without any
-change to the file.** In `caw_bc_blue_head`'s `only_x` closure, one
+change to the file.** In the `only_x` closure of the coverage induction's
+old blue-head case (since replaced by `coverage_inv_step_blue`), one
 branch derives a contradiction (`hd_address y >= nxt` from
 `objects_addresses_gt_start` and `hd_address_spec`, against
 `hd_address y < nxt` already in the closure's own hypotheses) and closes

@@ -639,6 +639,7 @@ let flush_reaches_run_end
     walk_visits_above g zero_addr h;
     walk_visits_agree_below g g1 zero_addr h;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     walk_visits_step g1 zero_addr h re
@@ -762,6 +763,7 @@ let flush_h_decompose
     walk_visits_above g zero_addr h;
     walk_visits_agree_below g g1 zero_addr h;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     f_hd_roundtrip fb;
@@ -1017,6 +1019,7 @@ let flush_preserves_walk_end
     walk_visits_prefix g h re;
     walk_end_agree_on_visit g h re;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     let above (q: hp_addr)
@@ -2251,6 +2254,7 @@ let flush_conserves_whsize
       flush_h_decompose g first_blue run_words fp start;
       flush_preserves_walk g (U64.v start) first_blue run_words fp;
       flush_blue_header_spec g fb run_words fp;
+      FStar.Math.Lemmas.pow2_lt_compat 64 54;
       let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
       makeHeader_getWosize wz_u64 Blue 0UL;
       makeHeader_getColor wz_u64 Blue 0UL;
@@ -2346,6 +2350,7 @@ let flush_conserves_whsize_at_end
       // `objects h g1` is the merged block alone: its header gives wosize
       // `run_words - 1`, so its own extent reaches exactly `heap_size`.
       flush_blue_header_spec g fb run_words fp;
+      FStar.Math.Lemmas.pow2_lt_compat 64 54;
       let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
       makeHeader_getWosize wz_u64 Blue 0UL;
       makeHeader_getColor wz_u64 Blue 0UL;
@@ -2691,6 +2696,7 @@ let flush_conserves_coverage
     flush_reaches_run_end g first_blue run_words fp start;
     flush_h_decompose g first_blue run_words fp start;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     makeHeader_getColor wz_u64 Blue 0UL;
@@ -2883,6 +2889,7 @@ let flush_conserves_coverage_at_end
     FStar.Classical.forall_intro (FStar.Classical.move_requires below);
     objects_prefix_agree g g1 zero_addr h;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     makeHeader_getColor wz_u64 Blue 0UL;
@@ -3222,6 +3229,7 @@ let flush_conserves_adj_free
     objects_prefix_agree g g1 zero_addr h;
     flush_h_decompose g first_blue run_words fp start;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     makeHeader_getColor wz_u64 Blue 0UL;
@@ -3340,6 +3348,7 @@ let flush_conserves_adj_free_at_end
     FStar.Classical.forall_intro (FStar.Classical.move_requires below);
     objects_prefix_agree g g1 zero_addr h;
     flush_blue_header_spec g fb run_words fp;
+    FStar.Math.Lemmas.pow2_lt_compat 64 54;
     let wz_u64 : wosize = U64.uint_to_t (run_words - 1) in
     makeHeader_getWosize wz_u64 Blue 0UL;
     makeHeader_getColor wz_u64 Blue 0UL;

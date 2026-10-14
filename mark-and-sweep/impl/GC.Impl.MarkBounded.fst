@@ -1150,6 +1150,23 @@ let resolve_object_rt (g: heap_state) (v: obj_addr) (hdr: U64.t)
       SpecObject.resolve_non_infix v g
 #pop-options
 
+/// `wz * mword + mword` fits in 64 bits, for any header word.
+///
+/// The Pulse code below computes `U64.mul wz mword` and then
+/// `U64.add off mword`, each of which raises `FStar.UInt.size _ 64`.  Inside
+/// `check_and_darken_bounded` -- fuel 0, ifuel 0, with the heap invariant and
+/// the gray-stack invariant in scope -- the solver could not reach that from
+/// `getWosize_bound` within the 50 rlimit units the function is given.  The
+/// bound depends on the header alone, so establish it once, here.
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let wosize_offset_fits (hdr: U64.t)
+  : Lemma (ensures (let wz = U64.v (SpecObject.getWosize hdr) in
+                    wz * U64.v mword + U64.v mword < pow2 64 /\
+                    wz * U64.v mword < pow2 64))
+  = SpecObject.getWosize_bound hdr;
+    assert_norm (pow2 54 * 8 + 8 < pow2 64)
+#pop-options
+
 /// Check if value is a pointer, and if so, darken its target with bounded push
 fn check_and_darken_bounded (heap: heap_t) (st: gray_stack) (v: U64.t) (cap: Ghost.erased nat)
   requires is_heap heap 's ** is_gray_stack st 'st **
@@ -1175,6 +1192,8 @@ fn check_and_darken_bounded (heap: heap_t) (st: gray_stack) (v: U64.t) (cap: Gho
     resolve_object_rt 's vo hdr;
     let t = getTag hdr;
     let wz = getWosize hdr;
+    getWosize_eq hdr;
+    wosize_offset_fits hdr;
     let off = U64.mul wz mword;
     if (t = infix_tag && U64.gte v (U64.add off mword)) {
       let parent_hdr : hp_addr = U64.sub (U64.sub v off) mword;
@@ -1217,7 +1236,7 @@ fn darken_roots_bounded
             stack_capacity st == cap /\
             (s_i, st_i) ==
               darken_roots_bounded_prefix_spec 's 'st 'rs (SZ.v iv) cap)
-    decreases (Prims.op_Subtraction (SZ.v nroots) (SZ.v !i))
+    decreases (Prims.op_Minus (SZ.v nroots) (SZ.v !i))
   {
     let iv = !i;
     let r = roots.(iv);
@@ -1318,7 +1337,7 @@ fn push_children_bounded_impl (heap: heap_t) (st: gray_stack) (h_addr: hp_addr)
             U64.v (wosize_of_object obj s) < pow2 54 /\
             SpecMarkBounded.push_children_bounded s st_cur obj vi wz cap ==
             SpecMarkBounded.push_children_bounded 's 'st obj 1UL wz cap)
-    decreases (Prims.op_Subtraction (U64.v wz + 1) (U64.v !i))
+    decreases (Prims.op_Minus (U64.v wz + 1) (U64.v !i))
   {
     let curr_i = !i;
     push_step_body_bounded heap st h_addr obj curr_i wz cap;
@@ -1521,7 +1540,7 @@ fn mark_inner_loop_impl (heap: heap_t) (st: gray_stack) (cap: Ghost.erased nat)
             SpecMarkBoundedCorr.stack_elems_reachable g_init st_cur roots /\
             m == SpecMarkBounded.count_non_black s /\
             (m < SpecMarkBounded.count_non_black 's \/ (st_cur == 'st /\ s == 's)))
-    decreases (Prims.op_Addition (GR.op_Bang gm) (if !go then 1 else 0))
+    decreases (Prims.op_Plus (GR.op_Bang gm) (if !go then 1 else 0))
   {
     let empty = is_empty st;
     if empty {
@@ -2017,7 +2036,7 @@ fn rescan_heap_impl (heap: heap_t) (st: gray_stack) (cap: Ghost.erased nat)
             (Seq.length st_cur == 0 ==> no_gray_visited_at (U64.v vc) 's) /\
             // Boundary: when past heap_size and stack empty, no_gray_objects holds
             (Seq.length st_cur == 0 /\ U64.v vc >= heap_size ==> SweepInv.no_gray_objects 's))
-    decreases (Prims.op_Subtraction heap_size (U64.v !current))
+    decreases (Prims.op_Minus heap_size (U64.v !current))
   {
     let v = !current;
     hp_addr_plus_8 v;
@@ -2160,7 +2179,7 @@ fn mark_loop_bounded (heap: heap_t) (st: gray_stack)
             SpecMarkBoundedCorr.mark_color_inv 's s /\
             SpecMarkBoundedCorr.gray_black_reachable 's s roots /\
             SpecMarkBoundedCorr.gray_stays 's s)
-    decreases (Prims.op_Addition (GR.op_Bang gm) (if !go then 1 else 0))
+    decreases (Prims.op_Plus (GR.op_Bang gm) (if !go then 1 else 0))
   {
     with _vg s_cur st_cur. assert (
       R.pts_to go _vg **

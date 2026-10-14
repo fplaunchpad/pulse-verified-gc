@@ -47,6 +47,21 @@ private let aligned_distinct (a b: U64.t)
   = ()
 #pop-options
 
+/// `hd_address` in terms of the object address's value.
+///
+/// `hd_address_spec` gives the same equation, but as a fact about `hd_address x`
+/// alone; matching it against a value already computed for `U64.v x` is left to
+/// the solver.  Deep inside `alloc_preserves_blue_part1` -- where the goal
+/// carries the whole `well_formed_heap` invariant and every intermediate heap
+/// of the split -- that match timed out.  Naming the composite equation here
+/// makes the assertion a hypothesis lookup.
+#push-options "--z3rlimit 10 --fuel 0 --ifuel 0"
+private let hd_address_v (x: obj_addr) (n: nat)
+  : Lemma (requires U64.v x == n + 8)
+          (ensures U64.v (hd_address x) == n)
+  = hd_address_spec x
+#pop-options
+
 /// An address strictly inside the block owned by `blk` is distinct from every other
 /// object of the heap.  `objects_separated` places any other object either strictly
 /// below `blk` or strictly beyond `blk`'s last field, and `inner` sits between the

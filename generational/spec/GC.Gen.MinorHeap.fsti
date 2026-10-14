@@ -220,6 +220,32 @@ let minor_tag (ms: minor_state) (obj: U64.t) : GTot nat =
 val minor_tag_bound (ms: minor_state) (obj: U64.t)
   : Lemma (minor_tag ms obj < 256)
 
+/// `minor_wosize`/`minor_tag` in terms of the header word.
+///
+/// Both decode the header with `shift_right`/`logand` behind two address
+/// guards, so reducing them at a *known* address makes the solver (a) discharge
+/// the guards, (b) rewrite under `minor_read_word`, and (c) evaluate the bit
+/// operation.  Done inside a client's proof -- e.g. the SPOT nurseries, whose
+/// context also fixes several other header words -- that combination times out.
+/// Discharging (a) and (b) once here, against an arbitrary `ms`, leaves the
+/// client with nothing but (c), which its own `assert_norm`ed decoding facts
+/// already give it.
+val minor_header_fields (ms: minor_state) (obj: U64.t)
+  : Lemma (requires U64.v obj >= 8 /\ U64.v obj < minor_heap_size /\
+                    U64.v obj % 8 == 0)
+          (ensures (let hdr = minor_read_word ms.data (U64.uint_to_t (U64.v obj - 8)) in
+                    minor_wosize ms obj == U64.v (U64.shift_right hdr 10ul) /\
+                    minor_tag ms obj == U64.v (U64.logand hdr 0xFFUL)))
+
+/// The common case: a zero header word gives wosize 0 and tag 0.  Stated
+/// separately because the bit-level step is worth doing once too -- see the
+/// implementation.
+val minor_zero_header_fields (ms: minor_state) (obj: U64.t)
+  : Lemma (requires U64.v obj >= 8 /\ U64.v obj < minor_heap_size /\
+                    U64.v obj % 8 == 0 /\
+                    minor_read_word ms.data (U64.uint_to_t (U64.v obj - 8)) == 0UL)
+          (ensures minor_wosize ms obj == 0 /\ minor_tag ms obj == 0)
+
 /// ---------------------------------------------------------------------------
 /// No-Scan Objects
 /// ---------------------------------------------------------------------------
@@ -350,6 +376,15 @@ val infix_parent_value (ms: minor_state) (addr: U64.t)
 
 /// When addr is an infix sub-object and minor_infix_wf holds,
 /// the parent is a valid minor object with expected bounds.
+/// The infix parent never lies above the sub-object.  This is immediate from
+/// `infix_parent_value`, but getting there needs `minor_wosize ms addr >= 0`,
+/// and `minor_wosize` unfolds into minor-heap header arithmetic.  Inside the
+/// large collector proofs that unfolding is what makes the step time out, so
+/// the inequality is established once here, in an empty context.
+val infix_parent_below (ms: minor_state) (addr: U64.t)
+  : Lemma (requires is_infix_in_minor ms addr /\ minor_infix_wf ms)
+          (ensures U64.v (infix_parent ms addr) <= U64.v addr)
+
 val infix_parent_in_minor_objects (ms: minor_state) (addr: U64.t)
   : Lemma (requires is_infix_in_minor ms addr /\ minor_infix_wf ms)
           (ensures (let parent = infix_parent ms addr in

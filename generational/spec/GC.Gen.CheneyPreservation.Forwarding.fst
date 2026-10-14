@@ -183,6 +183,21 @@ let dst_fields_valid_of_bound (addr: U64.t) (wz: pos)
   assert ((wz - 1) * 8 + 8 == wz * 8);
   dst_fields_valid_from_bounds addr wz
 
+/// Two small arithmetic facts, hoisted out of the large proofs below.
+///
+/// Both are trivial in an empty context but neither survives the ambient
+/// context of `promote_object_frame_old_header_derived` /
+/// `promote_preserves_is_infix_frame`, where Z3 reports `canceled` even at
+/// rlimit 120.
+private let plus_mult_mod8 (a: nat) (k: nat)
+  : Lemma (requires a % 8 == 0) (ensures (a + k * 8) % 8 == 0)
+  = FStar.Math.Lemmas.lemma_mod_plus a k 8
+
+private let aligned_diff_div_mul (a: int) (b: int)
+  : Lemma (requires a % 8 == 0 /\ b % 8 == 0)
+          (ensures b + ((a - b) / 8) * 8 == a)
+  = FStar.Math.Lemmas.euclidean_division_definition (a - b) 8
+
 #push-options "--z3rlimit 30 --fuel 0 --ifuel 0"
 let promote_object_frame_old_header_derived
   (minor: minor_state) (major: heap) (obj: U64.t) (fp: U64.t) (wz: nat{wz > 0})
@@ -217,6 +232,7 @@ let promote_object_frame_old_header_derived
     // src > dst_obj + wosize(dst_obj)*8, wosize(dst_obj) >= wz
     let wos = U64.v (wosize_of_object_as_wosize dst_obj alloc_res.heap_out) in
     assert (U64.v src > U64.v dst_obj + wos * 8);
+    plus_mult_mod8 (U64.v dst_obj) wos;
     assert ((U64.v dst_obj + wos * 8) % 8 == 0);
     aligned_gap (U64.v src) (U64.v dst_obj + wos * 8);
     assert (U64.v hd_src >= U64.v dst_obj + wos * 8);
@@ -406,6 +422,7 @@ let promote_preserves_is_infix_frame
     AllocProps.alloc_spec_obj_ne_excl major fp wz parent_obj;
     let hd_idx = (U64.v (hd_address target) - U64.v parent_obj) / 8 in
     hd_address_spec target;
+    aligned_diff_div_mul (U64.v (hd_address target)) (U64.v parent_obj);
     assert (U64.v parent_obj + hd_idx * 8 == U64.v (hd_address target));
     assert (hd_idx < U64.v (wosize_of_object parent_obj major));
     assert (U64.v parent_obj + hd_idx * 8 + 8 <= heap_size);
@@ -1468,6 +1485,23 @@ let rec cheney_scan_preserves_fwd_noninfix_targets_valid
   end
 #pop-options
 
+/// `fwd_valid_or_infix` is `fwd_classified` with the witness dropped.
+///
+/// Deriving one from the other is a per-x weakening, but it is a weakening
+/// *under two quantifiers*: the solver has to instantiate `fwd_classified` at
+/// the same `x` the goal introduces and then discard the `exists p`.  At the
+/// end of `cheney_promote_fwd_valid_or_infix`, with every intermediate Cheney
+/// state and the whole `well_formed_heap` invariant in scope, whether it finds
+/// that instantiation is a coin flip -- the goal took 0.1s in isolation and
+/// then timed out at rlimit 20 in a full build.  Proving the weakening for an
+/// arbitrary `cs`, in an empty context, makes it deterministic.
+#push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
+let fwd_classified_weakens (cs: cheney_state)
+  : Lemma (requires fwd_classified cs)
+          (ensures fwd_valid_or_infix cs.cs_fwd cs.cs_major)
+  = ()
+#pop-options
+
 /// Top-level: cheney_promote_fwd_valid_or_infix
 #push-options "--z3rlimit 20 --fuel 0 --ifuel 0"
 let cheney_promote_fwd_valid_or_infix
@@ -1488,7 +1522,8 @@ let cheney_promote_fwd_valid_or_infix
   cheney_scan_preserves_fwd_classified minor cs1 0 (cheney_fuel minor);
   let cs2 = cheney_scan minor cs1 0 (cheney_fuel minor) in
   assert (fwd_classified cs2);
-  cheney_promote_fwd_bounded minor major fp roots
+  cheney_promote_fwd_bounded minor major fp roots;
+  fwd_classified_weakens cs2
 #pop-options
 
 /// ---------------------------------------------------------------------------

@@ -171,6 +171,11 @@ private let cheney_forward_one_preserves_cob
     cheney_forward_one_noop minor cs addr
   else if is_infix_in_minor minor addr then begin
     reveal_opaque (`%minor_infix_wf) (minor_infix_wf minor);
+    // `cheney_forward_one_infix` needs `addr >= infix_parent minor addr`.
+    // `infix_parent_value` only gives the equation; deriving the inequality
+    // from it still needs `minor_wosize minor addr >= 0`, and `minor_wosize`
+    // unfolds into header arithmetic, which is what times out here.
+    infix_parent_below minor addr;
     cheney_forward_one_infix minor cs addr;
     let parent = infix_parent minor addr in
     cheney_forward_normal_preserves_cob minor cs parent
@@ -252,6 +257,7 @@ let cheney_forward_one_preserves_old_nonblue_shape
     cheney_forward_one_noop minor cs addr
   else if is_infix_in_minor minor addr then begin
     reveal_opaque (`%minor_infix_wf) (minor_infix_wf minor);
+    infix_parent_below minor addr;
     cheney_forward_one_infix minor cs addr;
     let parent = infix_parent minor addr in
     cheney_forward_normal_preserves_old_nonblue_shape minor cs parent src
@@ -428,6 +434,7 @@ let cheney_forward_one_frame_field
     cheney_forward_one_noop minor cs addr
   else if is_infix_in_minor minor addr then begin
     reveal_opaque (`%minor_infix_wf) (minor_infix_wf minor);
+    infix_parent_below minor addr;
     cheney_forward_one_infix minor cs addr;
     let parent = infix_parent minor addr in
     cheney_forward_normal_frame_field minor cs parent src idx
@@ -623,6 +630,7 @@ private let cheney_forward_one_frame_header
     cheney_forward_one_noop minor cs addr
   else if is_infix_in_minor minor addr then begin
     reveal_opaque (`%minor_infix_wf) (minor_infix_wf minor);
+    infix_parent_below minor addr;
     cheney_forward_one_infix minor cs addr;
     let parent = infix_parent minor addr in
     cheney_forward_normal_frame_header minor cs parent src

@@ -45,9 +45,14 @@ let init_heap_normal_lemma (s: heap_state) (hdr: U64.t)
                            (wz: wosize{U64.v wz == SpecBase.heap_words - 1})
   : Lemma (requires SpecBase.heap_words >= 2 /\
                     hdr == makeHeader wz blue 0UL)
-          (ensures (SH.write_word (SH.write_word s zero_addr hdr)
-                                         (mword <: hp_addr) 0UL, mword)
-                   == SA.init_heap_spec s)
+          // `write_word` is a `Pure ... (ensures ...)`, so its result type now
+          // carries the postcondition as a refinement. Left implicit, the pair
+          // below gets a doubly-refined tuple type and the subtyping check
+          // against `heap & U64.t` times out. Ascribing each component to
+          // `SpecBase.heap` keeps the pair’s type the plain one.
+          (ensures (let g1 : SpecBase.heap = SH.write_word s zero_addr hdr in
+                    let g2 : SpecBase.heap = SH.write_word g1 (mword <: hp_addr) 0UL in
+                    (g2, mword) == SA.init_heap_spec s))
   = ()
 
 /// Fuel bound for search loop
@@ -228,7 +233,7 @@ fn allocate (heap: heap_t) (fp: U64.t) (wosize: U64.t)
            vhead == sr.fp_out /\
            vresult == sr.obj_out))
       )
-    decreases (Prims.op_Addition (U64.v !fuel_ref) (if !go then 1 else 0))
+    decreases (Prims.op_Plus (U64.v !fuel_ref) (if !go then 1 else 0))
   {
     let vfuel = !fuel_ref;
     if U64.eq vfuel 0UL {
@@ -457,7 +462,7 @@ fn allocate_part1 (heap: heap_t) (fp: U64.t) (wosize: U64.t)
            vhead == sr.fp_out /\
            vresult == sr.obj_out))
       )
-    decreases (Prims.op_Addition (U64.v !fuel_ref) (if !go then 1 else 0))
+    decreases (Prims.op_Plus (U64.v !fuel_ref) (if !go then 1 else 0))
   {
     let vfuel = !fuel_ref;
     if U64.eq vfuel 0UL {

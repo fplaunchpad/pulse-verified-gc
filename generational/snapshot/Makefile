@@ -1,7 +1,7 @@
 # Standalone build for the verified generational GC snapshot.
 #
-# This compiles the KaRaMeL-extracted C code without needing F* or KaRaMeL
-# installed. The krmllib/ headers are vendored in this directory.
+# This compiles the Custard-extracted C code (Custard.{c,h}) without needing
+# F* installed. Custard's C is self-contained: no krmllib.
 #
 # Usage:
 #   make            Build and run the test harness
@@ -11,14 +11,13 @@
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable
 
-# krmllib headers are vendored under krmllib/
-CFLAGS += -I. -Iinternal -Ikrmllib -Ikrmllib/krml -Ikrmllib/krml/internal
+CFLAGS += -I.
 CFLAGS += -include compat.h
 
-LIB_SOURCES = GC_Gen_Impl.c GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.c krmlinit.c compat.c
+LIB_SOURCES = Custard.c custard_glue.c compat.c
 SOURCES = $(LIB_SOURCES) main.c
 TARGET  = gc_gen_test
-DEPS    = GC_Gen_Impl.h internal/GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.h
+DEPS    = Custard.h custard_glue.h compat.h
 
 # Size-exactness of the allocator, driven directly rather than through the
 # OCaml testsuite: the one-word-leftover case is presented on every run

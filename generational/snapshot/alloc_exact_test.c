@@ -22,8 +22,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "compat.h"
-#include "GC_Gen_Impl.h"
-#include "krmlinit.h"
+#include "custard_glue.h"
 
 #define MWORD        8ULL
 #define COL_WHITE    0ULL
@@ -88,7 +87,7 @@ static int run_case(uint64_t req, uint64_t leftover, int *hard_fail)
     heap_t heap = { .data = data, .size = (size_t)HEAP_BYTES };
     K___uint64_t_uint64_t res = allocate(heap, cell_obj, req);
 
-    uint64_t obj = res.snd;
+    uint64_t obj = res._2;
     int ok = 1;
 
     if (obj == 0) {
@@ -133,7 +132,7 @@ int main(void)
 {
     zero_addr = 0;
     heap_size_u64 = HEAP_BYTES;
-    krmlinit_globals();
+    gc_init_globals();
 
     printf("=== allocator size-exactness ===\n");
     printf("A free block of wosize req+leftover; we ask for req words.\n");

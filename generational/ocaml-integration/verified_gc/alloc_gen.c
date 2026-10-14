@@ -33,10 +33,7 @@
  *   slots to major addresses (absolute with NULL-base).
  */
 
-#include "GC_Gen_Impl.h"
-#include "internal/GC_Gen_Impl.h"
-#include "internal/GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.h"
-#include "krmlinit.h"
+#include "custard_glue.h"   /* Custard.h + gc_init_globals */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,8 +51,7 @@
 #include "../caml/address_class.h" /* for In_heap, caml_page_table_add */
 #include "../caml/memprof.h" /* for caml_memprof_renew_minor_sample */
 
-/* --- Patched externs from GC_Gen_Impl.c --- */
-#include "GC_Spec_ZeroAddr.h"  /* zero_addr, heap_size_u64 */
+/* zero_addr, heap_size_u64: declared in compat.h (force-included) */
 #include "profiling_counters.h"
 extern size_t queue_size_sz;
 
@@ -93,7 +89,7 @@ static int        in_full_gc = 0;  /* re-entrancy guard */
  * allocated in the minor heap, the verified BFS trivially handles them
  * (objects with tag >= no_scan_tag have no pointer fields to scan). */
 
-/* minor_base_addr is defined in the extracted GC_Gen_Base module.
+/* minor_base_addr is defined in the extracted code (GC.Gen.Base).
  * We set it at runtime to the actual minor heap buffer address so that
  * the verified to_minor_offset_u64 can translate absolute→offset inline. */
 extern uint64_t minor_base_addr;
@@ -157,7 +153,7 @@ static void ensure_heap(void) {
     minor_heap_size_u64 = (uint64_t)minor_sz;
 
     /* Re-derive constants that depend on minor_heap_size */
-    krmlinit_globals();
+    gc_init_globals();
     uint8_t *minor_data = (uint8_t *)calloc(1, minor_sz);
     if (!minor_data)
         caml_fatal_error("verified gen GC: cannot allocate minor heap");
@@ -598,7 +594,7 @@ static void do_full_gc(void) {
         K___uint64_t_bool result =
             gen_gc(gc_gen_heap, roots_for_gc, (size_t)root_count, gc_fwd_arr,
                    gc_queue, (uint64_t *)tbl->base, n_slots, gc_stack);
-        if (!result.snd) {
+        if (!result._2) {
             free(roots_for_gc);
             free(gray_storage);
             in_full_gc = 0;
@@ -680,8 +676,8 @@ void *verified_allocate(mlsize_t wosize, uint8_t tag) {
     PROF_START(major_alloc);
     uint64_t fp = *gc_gen_heap.fp_ref;
     K___uint64_t_uint64_t res = allocate(gc_gen_heap.major, fp, (uint64_t)wosize);
-    *gc_gen_heap.fp_ref = res.fst;
-    uint64_t result = res.snd;
+    *gc_gen_heap.fp_ref = res._1;
+    uint64_t result = res._2;
     PROF_END(major_alloc);
 
     if (result == 0) {
@@ -689,8 +685,8 @@ void *verified_allocate(mlsize_t wosize, uint8_t tag) {
         PROF_START(major_alloc);
         fp = *gc_gen_heap.fp_ref;
         res = allocate(gc_gen_heap.major, fp, (uint64_t)wosize);
-        *gc_gen_heap.fp_ref = res.fst;
-        result = res.snd;
+        *gc_gen_heap.fp_ref = res._1;
+        result = res._2;
         PROF_END(major_alloc);
     }
 

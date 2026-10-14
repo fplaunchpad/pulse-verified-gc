@@ -11,10 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "compat.h"
-#include "GC_Gen_Impl.h"
-#include "krmlinit.h"
-#include "internal/GC_Gen_Impl.h"
-#include "internal/GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.h"
+#include "custard_glue.h"
 
 /* Read a word from minor heap (host byte order, little-endian assumed) */
 static uint64_t peek_minor(minor_heap_t mh, uint64_t offset)
@@ -29,7 +26,7 @@ int main(void)
     heap_size_u64 = 1024 * 1024;
 
     /* Initialize derived constants (fwd_array_size, queue_size_sz, ...) */
-    krmlinit_globals();
+    gc_init_globals();
 
     printf("=== Verified Generational GC Test ===\n");
     printf("minor_heap_size = %lld bytes\n", (long long)minor_heap_size_sz);
@@ -139,12 +136,12 @@ int main(void)
     uint64_t empty_roots[1] = { 0 };
     memset(fwd_arr, 0, fwd_entries * sizeof(uint64_t));
     K___uint64_t_bool result = gen_gc(gh, empty_roots, 0, fwd_arr, queue, empty_slots, 0, st);
-    if (!result.snd) {
+    if (!result._2) {
         printf("FAIL: gen_gc promotion phase failed\n");
         free(gray_storage);
         goto cleanup_queue;
     }
-    uint64_t result_fp = result.fst;
+    uint64_t result_fp = result._1;
     printf("gen_gc returned fp = %llu\n", (unsigned long long)result_fp);
 
     /* ---- Phase 4: Allocate after GC ---- */

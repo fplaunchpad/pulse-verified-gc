@@ -2,8 +2,8 @@
 #
 # Builds on top of mark-and-sweep (major heap) and common modules.
 # Verification: make verify
-# Extraction:   make extract  (requires M&S and common already verified)
-# Snapshot:     make snapshot (copies extracted C + krmllib headers)
+# Extraction:   make extract  (Custard → _extract/Custard.{c,h}; requires M&S and common verified)
+# Snapshot:     make snapshot (copies Custard.{c,h} into snapshot/)
 
 FSTAR_HOME ?= $(CURDIR)/../fstar
 FSTAR_EXE  ?= $(FSTAR_HOME)/bin/fstar.exe
@@ -170,101 +170,66 @@ check-orphans:
 verify: check-orphans $(VERIFY_CHECKED)
 	@echo "=== GC.Gen.Impl root closure verified ==="
 
-# === Extraction (.krml → C) =================================================
+# === Extraction (F* → C, via Custard) =======================================
 #
 # Extracts generational impl + mark-and-sweep impl + common impl into a
-# single C file via KaRaMeL bundling.
+# single self-contained C translation unit, _extract/Custard.{c,h}, with F*'s
+# Custard backend (--codegen Custard --custard_backend C).  No KaRaMeL and no
+# krmllib: Custard's C needs only <stdint.h> and friends.
 #
 # Prerequisites: M&S and common .checked files must already exist
 # (run `make -C ../mark-and-sweep verify` first if needed).
 
-# --- Modules to extract -----------------------------------------------------
+# Public API (external linkage, declared in Custard.h): every definition of
+# these modules.  Everything else reachable from them is emitted `static`.
+CUSTARD_API_MODS = \
+  GC.Gen.Impl GC.Gen.Impl.MinorHeap GC.Gen.Impl.Cheney GC.Gen.Impl.UpdatePtrs \
+  GC.Impl GC.Impl.Allocator GC.Impl.MarkBounded
 
-ALL_KRML_MODS = \
-  GC.Gen.Impl GC.Gen.Impl.MinorHeap GC.Gen.Impl.Cheney \
-  GC.Gen.Impl.Promote GC.Gen.Impl.UpdatePtrs \
-  GC.Gen.Base \
-  GC.Impl GC.Impl.Fields \
-  GC.Impl.MarkBounded GC.Impl.Coalesce \
-  GC.Impl.FusedSweepCoalesce GC.Impl.Allocator \
-  GC.Impl.ArrayWord GC.Impl.Heap GC.Impl.Object GC.Impl.Stack \
-  GC.Spec.ZeroAddr GC.Spec.Base GC.Spec.Heap GC.Spec.Object \
-  GC.Lib.Header GC.Lib.Address
+# Globals the hand-written runtime glue reads or writes, that are not already
+# public through CUSTARD_API_MODS:
+#   - minor_heap_size_u64, max_young_wosize_u64, minor_base_addr are set by
+#     the OCaml bridge at runtime;
+#   - minor_heap_size_sz, fwd_arr_size_sz are derived from minor_heap_size_u64.
+#     Custard folds their initialisers from the .fst value (2048), so
+#     snapshot/krmlinit.c recomputes them after the bridge has configured the
+#     nursery, exactly as KaRaMeL's krmlinit_globals used to.
+CUSTARD_ENTRIES = \
+  GC.Gen.Base.minor_heap_size_u64 GC.Gen.Base.max_young_wosize_u64 \
+  GC.Gen.Base.minor_base_addr \
+  GC.Gen.Impl.MinorHeap.minor_heap_size_sz GC.Gen.Impl.MinorHeap.fwd_arr_size_sz
 
-ALL_KRML = $(foreach m,$(ALL_KRML_MODS),$(OUTPUT_DIR)/$(subst .,_,$(m)).krml) \
-           $(OUTPUT_DIR)/FStar_Pervasives_Native.krml
+# Emit public names unqualified (as KaRaMeL's -no-prefix did), so that the
+# bridge's names (heap_t, allocate, gen_gc, zero_addr, read_u64_le, ...) are
+# unchanged.
+CUSTARD_NO_PREFIX = \
+  $(CUSTARD_API_MODS) GC.Gen.Base GC.Impl.Heap GC.Impl.Stack \
+  GC.Impl.ArrayWord GC.Spec.ZeroAddr GC.Lib.Header
 
-# --- .krml extraction rules -------------------------------------------------
-#
-# Pattern rule: _output/GC_Gen_Impl.krml from GC.Gen.Impl.fst
-# fstar.exe finds the source via --include paths; prerequisite is verify.
-
-$(OUTPUT_DIR)/%.krml: verify | $(OUTPUT_DIR)
-	$(FSTAR) --odir $(OUTPUT_DIR) --codegen krml \
-	  --extract_module $(subst _,.,$*) $(subst _,.,$*).fst
-
-# GC.Impl.ArrayWord — interface-only module (assumed vals, no .fst)
-$(OUTPUT_DIR)/GC_Impl_ArrayWord.krml: verify | $(OUTPUT_DIR)
-	$(FSTAR) --odir $(OUTPUT_DIR) --codegen krml \
-	  --extract_module GC.Impl.ArrayWord GC.Impl.ArrayWord.fsti
-
-# GC.Spec.ZeroAddr — interface-only module (extern zero_addr, no .fst)
-$(OUTPUT_DIR)/GC_Spec_ZeroAddr.krml: verify | $(OUTPUT_DIR)
-	$(FSTAR) --odir $(OUTPUT_DIR) --codegen krml \
-	  --extract_module GC.Spec.ZeroAddr GC.Spec.ZeroAddr.fsti
-
-# FStar.Pervasives.Native (tuple types used by allocate) — special case
-$(OUTPUT_DIR)/FStar_Pervasives_Native.krml: | $(OUTPUT_DIR)
-	$(FSTAR_EXE) --cache_checked_modules --warn_error -321 \
-	  --codegen krml --extract_module FStar.Pervasives.Native \
-	  --odir $(OUTPUT_DIR) $(FSTAR_LIB)/ulib/FStar.Pervasives.Native.fst
-
-# --- KaRaMeL bundling (.krml → C) ------------------------------------------
-#
-# Bundle layout:
-#   GC_Gen_Impl.{c,h}  — all gen + M&S impl code (one translation unit)
-#   Spec/constants      — heap_size_u64, minor_heap_size_u64, color enum (internal)
-#
-# API (public in header): GC.Gen.Impl, GC.Gen.Impl.MinorHeap, GC.Impl, GC.Impl.Allocator
-# Internal (static):      Cheney, Promote, UpdatePtrs, Mark, Sweep, Fields, ...
-# Hidden (no C output):   Spec modules, Prims, FStar, Pulse
-
-KRML_FLAGS = \
-  -tmpdir $(EXTRACT_DIR) \
-  -skip-compilation -skip-linking \
-  -bundle 'GC.Gen.Impl+GC.Gen.Impl.MinorHeap+GC.Gen.Impl.Cheney+GC.Gen.Impl.UpdatePtrs+GC.Impl+GC.Impl.Allocator+GC.Impl.MarkBounded=GC.Gen.Impl.*,GC.Impl.*[rename=GC_Gen_Impl]' \
-  -bundle 'FStar.Pervasives.Native' \
-  -bundle 'GC.Spec.ZeroAddr=GC.Spec.ZeroAddr' \
-  -bundle 'GC.Gen.Base,GC.Spec.*,GC.Lib.Header,GC.Lib.Address' \
-  $(foreach m,$(ALL_KRML_MODS),-no-prefix $(m)) \
-  -warn-error -2-9-15
+CUSTARD_FLAGS = \
+  --codegen Custard --custard_backend C \
+  --custard_monomorphize_types true \
+  $(foreach m,$(CUSTARD_API_MODS),--custard_entry_module $(m)) \
+  $(foreach e,$(CUSTARD_ENTRIES),--custard_entry $(e)) \
+  $(foreach m,$(CUSTARD_NO_PREFIX),--custard_c_no_prefix $(m))
 
 $(EXTRACT_DIR):
 	@mkdir -p $@
 
-$(EXTRACT_DIR)/GC_Gen_Impl.c: $(ALL_KRML) | $(EXTRACT_DIR)
-	$(KRML) $(KRML_FLAGS) $(ALL_KRML)
+$(EXTRACT_DIR)/Custard.c: verify | $(EXTRACT_DIR)
+	$(FSTAR) --odir $(EXTRACT_DIR) $(CUSTARD_FLAGS) impl/GC.Gen.Impl.fst
 
-extract: $(EXTRACT_DIR)/GC_Gen_Impl.c
-	@echo "=== Extraction complete: $(EXTRACT_DIR)/GC_Gen_Impl.{c,h} ==="
+extract: $(EXTRACT_DIR)/Custard.c
+	@echo "=== Extraction complete: $(EXTRACT_DIR)/Custard.{c,h} ==="
 
 # --- Snapshot ---------------------------------------------------------------
+#
+# Only the generated pair is copied.  krmlinit.{c,h} and compat.{c,h} in
+# snapshot/ are hand-written glue and are left alone.
 
 snapshot: extract
 	@echo "=== Creating snapshot ==="
-	@mkdir -p $(SNAPSHOT_DIR)/krmllib/krml/internal $(SNAPSHOT_DIR)/internal
-	@rm -f $(SNAPSHOT_DIR)/internal/*.h
-	@cp $(EXTRACT_DIR)/GC_Gen_Impl.c $(SNAPSHOT_DIR)/
-	@cp $(EXTRACT_DIR)/GC_Gen_Impl.h $(SNAPSHOT_DIR)/
-	@cp $(EXTRACT_DIR)/GC_Gen_Base_GC_Spec_GC_Lib_Header_GC_Lib_Address.c $(SNAPSHOT_DIR)/ 2>/dev/null || true
-	@cp $(EXTRACT_DIR)/GC_Spec_ZeroAddr.h $(SNAPSHOT_DIR)/ 2>/dev/null || true
-	@cp $(EXTRACT_DIR)/internal/*.h $(SNAPSHOT_DIR)/internal/ 2>/dev/null || true
-	@# Copy krmlinit.h but NOT krmlinit.c (we have a clean replacement in snapshot/)
-	@cp $(EXTRACT_DIR)/krmlinit.h $(SNAPSHOT_DIR)/
-	@cp $(KRML_HOME)/include/krmllib.h $(SNAPSHOT_DIR)/krmllib/ 2>/dev/null || true
-	@cp -r $(KRML_HOME)/krmllib/dist/minimal/* $(SNAPSHOT_DIR)/krmllib/ 2>/dev/null || true
-	@cp $(KRML_HOME)/include/krml/*.h $(SNAPSHOT_DIR)/krmllib/krml/ 2>/dev/null || true
-	@cp $(KRML_HOME)/include/krml/internal/*.h $(SNAPSHOT_DIR)/krmllib/krml/internal/ 2>/dev/null || true
+	@cp $(EXTRACT_DIR)/Custard.c $(EXTRACT_DIR)/Custard.h $(SNAPSHOT_DIR)/
 	@echo "=== Snapshot updated ==="
 
 # --- Cleanup ----------------------------------------------------------------

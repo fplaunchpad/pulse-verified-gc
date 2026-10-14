@@ -34,6 +34,15 @@ private let mk_hp_addr (a: nat{a < heap_size /\ a % U64.v mword == 0}) : (r: hp_
   assert (a < pow2 64);
   U64.uint_to_t a
 
+/// Two distinct word-aligned addresses are a whole word apart.  Stated once
+/// here so callers deep in a split proof do not leave the mod reasoning to the
+/// solver (same lemma as in GC.Gen.Cheney.Dense).
+private let aligned_apart (a b: U64.t)
+  : Lemma (requires a <> b /\ U64.v a % U64.v mword == 0 /\ U64.v b % U64.v mword == 0)
+          (ensures U64.v a + U64.v mword <= U64.v b \/
+                   U64.v b + U64.v mword <= U64.v a)
+  = ()
+
 /// Word-aligned offsets stay word-aligned when advanced by whole words.
 private let aligned_plus_mul8 (base: nat{base % U64.v mword == 0}) (k: nat)
   : Lemma ((base + k * 8) % U64.v mword == 0)
@@ -1133,6 +1142,7 @@ let alloc_from_block_preserves_blue
       AllocLemmas.make_header_getColor (U64.uint_to_t (leftover - 1)) blue_bits 0UL;
       getColor_raw rem_hdr;
       // the allocated header never lands on h's header
+      aligned_apart ah (hd_address h);
       write_preserves_color g1 h ah alloc_hdr;
       if U64.v (hd_address h) = U64.v hd then begin
         // h IS the block we allocated from; its header is now the blue

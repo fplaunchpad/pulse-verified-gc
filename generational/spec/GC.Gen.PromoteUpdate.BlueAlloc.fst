@@ -328,6 +328,12 @@ private let rec alloc_search_preserves_bfc
                      assert (U64.v prev_fp + 8 <= U64.v field_addr)
                    end else begin
                      objects_separated zero_addr g obj prev_obj;
+                     // objects_separated speaks of wosize_of_object_as_wosize;
+                     // tie it to bwz here rather than inside the big context
+                     assert (U64.v (wosize_of_object_as_wosize obj g) == bwz);
+                     assert (Seq.mem obj (objects zero_addr g));
+                     assert (Seq.mem prev_obj (objects zero_addr g));
+                     assert (U64.v obj < U64.v prev_obj);
                      assert (U64.v prev_fp > U64.v obj + bwz * 8);
                      assert (U64.v field_addr + 8 <= U64.v prev_fp)
                    end;

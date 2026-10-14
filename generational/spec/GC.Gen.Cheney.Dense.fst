@@ -62,6 +62,13 @@ private let split_next_offset (hd wz bwz: nat)
           (ensures hd + (1 + wz) * 8 + (bwz - wz - 1 + 1) * 8 == hd + (1 + bwz) * 8)
   = ()
 
+/// The allocated block ends where the original block ended: right-justifying
+/// `wz` words inside `bwz` leaves `leftover = bwz - wz` words in front of it.
+private let alloc_block_end (hd wz bwz: nat)
+  : Lemma (requires bwz >= wz)
+          (ensures hd + (bwz - wz) * 8 + (wz + 1) * 8 == hd + (1 + bwz) * 8)
+  = ()
+
 private let aligned_apart (a b: U64.t)
   : Lemma (requires a <> b /\ U64.v a % U64.v mword == 0 /\ U64.v b % U64.v mword == 0)
           (ensures U64.v a + U64.v mword <= U64.v b \/
@@ -365,6 +372,7 @@ private let alloc_from_block_split_dense
           read_write_same g1 ah ahdr;
           assert (read_word g' ah == ahdr);
           let next = ahn + (wz + 1) * 8 in
+          alloc_block_end (U64.v hd_obj) wz bwz;
           assert (next == U64.v hd_obj + (1 + bwz) * 8);
           if next + 8 < heap_size then begin
             let next_hp : hp_addr = U64.uint_to_t next in

@@ -116,9 +116,10 @@ codebase:
 
 ## 6. Still open
 
-- **Allocation preserves `fl_exact`.** Not needed for the OOM result in §7,
-  but needed to add `fl_complete` to the generational heap-shape invariant, or
-  to say anything about an allocation that fails *without* a collection first.
+- **The first attempt, system-wide.** §8 proves it for any run of
+  allocations after a collection. Carrying it across promotion and pointer
+  updates as well needs `fl_complete` in the generational heap-shape
+  invariant (`major_heap_shape`).
 - **Promotion padding.** `zero_promote_padding` and the lemmas around it now
   zero a word that no longer exists. Removing them changes the extracted C.
 - **`heap_objects_dense`** is defined twice (`GC.Gen.Promote.fsti`,
@@ -142,3 +143,31 @@ small. The argument has to rule out the search giving up early: running out of
 fuel (`fl_chain_terminates`), stopping at a node the free list would continue
 past (objects lie at least a word above `zero_addr`), and bailing on bounds
 (a right-justified object lies inside its block, which lies inside the heap).
+
+## 8. Allocation keeps the free list exact
+
+A full collection leaves the free list exact (`fused_exact`).
+`GC.Gen.AllocExact` shows allocation keeps it that way, so the property
+survives every allocation up to the next collection:
+
+| lemma | says |
+|---|---|
+| `alloc_spec_preserves_fl_sound` | after an allocation, everything on the list is still a blue block with room for a link |
+| `alloc_spec_preserves_fl_complete` | and every such block is still on the list |
+| `alloc_spec_preserves_fl_exact` | the two together |
+| `alloc_spec_fits_succeeds` | with an exact free list, an allocation succeeds whenever some free block is big enough |
+| `first_attempt_succeeds` | so after a full collection, and after any run of allocations that follows it, an allocation succeeds whenever some free block is big enough |
+
+Soundness follows from what the allocator proofs already show (nothing new
+joins the chain, and the allocated object is not on it). Completeness is the
+new part: nothing that was on the list falls off it, except the block an
+exact fit or a one-word leftover unlinks. The proof follows the search to the
+block it allocates from, at depth `k` with `prev` before it, and splits on
+where a node `y` sits:
+
+- before the block: the walk to `y` reads no link the allocation changed;
+- the block itself: at a split it stays on the list unchanged; otherwise it is
+  the allocated object or the fragment, and leaves;
+- after the block: the new walk is the old one with the block cut out --
+  `prev` now links to `next` -- and termination guarantees the old walk never
+  passes `prev` or the block again.

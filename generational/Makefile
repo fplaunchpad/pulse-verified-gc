@@ -70,7 +70,10 @@ ALL_SRC  = $(filter-out $(SPOT_SRC),$(SPEC_SRC) $(IMPL_SRC))
 # module file name alone.
 checked = $(addprefix $(CACHE_DIR)/,$(addsuffix .checked,$(notdir $(1))))
 
-ROOT_SRC = impl/GC.Gen.Impl.fsti impl/GC.Gen.Impl.fst
+# Proofs about the collector that the implementation does not need are roots
+# of their own, so they are verified here and do not trip the orphan audit.
+ROOT_SRC = impl/GC.Gen.Impl.fsti impl/GC.Gen.Impl.fst \
+           spec/GC.Gen.AllocExact.fst
 ROOT_CHECKED = $(call checked,$(ROOT_SRC))
 ALL_CHECKED  = $(call checked,$(ALL_SRC))
 
